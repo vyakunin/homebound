@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+enum MediaType {
+  MEDIA_TYPE_INVALID = 0;
+  MEDIA_TYPE_IMAGE = 1;
+  MEDIA_TYPE_VIDEO = 2;
+  MEDIA_TYPE_GIF = 3;
+  MEDIA_TYPE_LINK_EMBED = 4;
+}
+
+// original_url, original_filename, local_path: plain string — proto has no
+// built-in URI or filesystem-path well-known type.
+message MediaItem {
+  MediaType type = 1;
+  string original_url = 2;
+  string original_filename = 3;
+  string local_path = 4;
+  string caption = 5;
+}

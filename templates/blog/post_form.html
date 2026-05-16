@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+
+{% block title %}
+  {% if form.instance.pk %}Edit Post{% else %}New Post{% endif %} — Vladimir Yakunin
+{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
+<style>
+  .editor-wrapper {
+    max-width: var(--max-width);
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+  .editor-wrapper h1 {
+    margin-bottom: 1.5rem;
+  }
+  .editor-field {
+    margin-bottom: 1.25rem;
+  }
+  .editor-field label {
+    display: block;
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.35rem;
+  }
+  .field-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 1rem;
+    box-sizing: border-box;
+  }
+  .field-input:focus {
+    outline: 2px solid var(--link);
+    outline-offset: -1px;
+    border-color: transparent;
+  }
+  .editor-field--row {
+    display: flex;
+    gap: 2rem;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .editor-field--row > div {
+    flex: 1;
+    min-width: 160px;
+  }
+  .radio-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-right: 1rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  .editor-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+  }
+  .btn-primary {
+    padding: 0.55rem 1.4rem;
+    background: var(--link);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn-primary:hover { background: var(--link-hover); }
+  .btn-secondary {
+    padding: 0.55rem 1.4rem;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn-secondary:hover { color: var(--text); border-color: var(--text-muted); }
+  .field-errors {
+    color: var(--accent);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+  }
+
+  /* ── EasyMDE dark mode overrides ─────────────────────── */
+  @media (prefers-color-scheme: dark) {
+    .EasyMDEContainer .CodeMirror {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .EasyMDEContainer .CodeMirror-scroll { background: var(--surface); }
+    .EasyMDEContainer .CodeMirror-cursor { border-left-color: var(--text); }
+    .EasyMDEContainer .CodeMirror-selected { background: #264f78; }
+    .EasyMDEContainer .CodeMirror-line::selection,
+    .EasyMDEContainer .CodeMirror-line > span::selection,
+    .EasyMDEContainer .CodeMirror-line > span > span::selection {
+      background: #264f78;
+    }
+    .editor-toolbar {
+      background: var(--surface-2);
+      border-color: var(--border);
+    }
+    .editor-toolbar button {
+      color: var(--text) !important;
+    }
+    .editor-toolbar button:hover,
+    .editor-toolbar button.active {
+      background: var(--tag-bg);
+      border-color: var(--border);
+      color: var(--text) !important;
+    }
+    .editor-toolbar i.separator {
+      border-color: var(--border);
+    }
+    .editor-toolbar.disabled-for-preview button:not(.no-disable) {
+      opacity: 0.4;
+    }
+    .editor-preview {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .editor-preview-side {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .editor-statusbar {
+      color: var(--text-muted);
+    }
+    .EasyMDEContainer .CodeMirror-fullscreen,
+    .editor-toolbar.fullscreen {
+      background: var(--surface);
+    }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="editor-wrapper">
+  <h1 class="post-title">{% if form.instance.pk %}Edit Post{% else %}New Post{% endif %}</h1>
+
+  <form method="post" id="post-form">
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+      <div class="field-errors">{{ form.non_field_errors }}</div>
+    {% endif %}
+
+    <div class="editor-field">
+      <label for="{{ form.title.id_for_label }}">Title</label>
+      {{ form.title }}
+      {% if form.title.errors %}<div class="field-errors">{{ form.title.errors }}</div>{% endif %}
+    </div>
+
+    <div class="editor-field editor-field--row">
+      <div>
+        <label>Visibility</label>
+        {% for radio in form.visibility %}
+          <label class="radio-label">{{ radio.tag }} {{ radio.choice_label }}</label>
+        {% endfor %}
+        {% if form.visibility.errors %}<div class="field-errors">{{ form.visibility.errors }}</div>{% endif %}
+      </div>
+      <div>
+        <label for="{{ form.created_at.id_for_label }}">Date</label>
+        {{ form.created_at }}
+        {% if form.created_at.errors %}<div class="field-errors">{{ form.created_at.errors }}</div>{% endif %}
+      </div>
+    </div>
+
+    <div class="editor-field">
+      <label for="{{ form.tag_names.id_for_label }}">Tags</label>
+      {{ form.tag_names }}
+      {% if form.tag_names.errors %}<div class="field-errors">{{ form.tag_names.errors }}</div>{% endif %}
+    </div>
+
+    <div class="editor-field">
+      <label>Content</label>
+      {{ form.content_markdown }}
+      {% if form.content_markdown.errors %}<div class="field-errors">{{ form.content_markdown.errors }}</div>{% endif %}
+    </div>
+
+    <div class="editor-actions">
+      <button type="submit" class="btn-primary">
+        {% if form.instance.pk %}Save changes{% else %}Publish{% endif %}
+      </button>
+      <a href="{% if form.instance.pk %}/post/{{ form.instance.slug }}/{% else %}/{% endif %}"
+         class="btn-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  function getCsrfToken() {
+    var match = document.cookie.match(/csrftoken=([^;]+)/);
+    return match ? match[1] : '';
+  }
+
+  var easyMDE = new EasyMDE({
+    element: document.getElementById('id_content_markdown'),
+    spellChecker: false,
+    autosave: { enabled: false },
+    uploadImage: true,
+    imageUploadFunction: function (file, onSuccess, onError) {
+      var data = new FormData();
+      data.append('image', file);
+      fetch('/api/upload-image/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCsrfToken() },
+        body: data,
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (res.url) { onSuccess(res.url); }
+          else { onError(res.error || 'Upload failed'); }
+        })
+        .catch(function () { onError('Upload failed'); });
+    },
+    toolbar: [
+      'bold', 'italic', 'heading', '|',
+      'quote', 'unordered-list', 'ordered-list', '|',
+      'link', 'upload-image', '|',
+      'preview', 'side-by-side', 'fullscreen', '|',
+      'guide',
+    ],
+  });
+
+  /* Sync EasyMDE value back to the hidden textarea before submit. */
+  document.getElementById('post-form').addEventListener('submit', function () {
+    easyMDE.codemirror.save();
+  });
+}());
+</script>
+{% endblock %}

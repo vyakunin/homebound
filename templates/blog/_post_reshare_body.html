@@ -1,0 +1,30 @@
+{% load blog_tags %}
+{% reshare_info post as info %}
+
+{# ── Attribution header ─────────────────────────────────────────────── #}
+<div class="gplus-reshare-header">
+  Shared a post{% if info.author %} by {% if info.author_url %}<a href="{{ info.author_url }}" target="_blank" rel="noopener noreferrer">{{ info.author }}</a>{% else %}{{ info.author }}{% endif %}{% endif %}{% if info.original %} from <a href="{% url 'blog:post_detail' info.original.slug %}">{{ info.original.created_at|date:"M j, Y" }}</a>{% elif post.reshared_from_url %} · <a href="{{ post.reshared_from_url }}" target="_blank" rel="noopener noreferrer" title="View original post">original ↗</a>{% elif not info.author %}<span class="gplus-reshare-unavailable"> (original source not available)</span>{% endif %}
+</div>
+
+{# ── Reshared content body ──────────────────────────────────────────── #}
+{# Show EITHER the blockquote (when we have reshared text) OR the Facebook   #}
+{# embed iframe (when we don't). Never both — the iframe loads the same      #}
+{# text via data-show-text="true", which duplicates the blockquote content.  #}
+{% if post.reshared_content_text and post.reshared_content_text != "(original post not available)" %}
+  {% if not post.reshared_from_url or not post.reshared_content_text|is_fb_unavailable_reshare_notice %}
+    <blockquote class="gplus-reshare-embed"><div class="gplus-reshare-embed-inner">{{ post.reshared_content_text|linebreaksbr }}</div></blockquote>
+  {% endif %}
+{% elif post.reshared_from_url %}
+  {% if post|fb_reshare_embed_iframe_ok %}
+    <div class="gplus-fb-post-embed">
+      <div class="fb-post"
+        data-href="{{ post.reshared_from_url }}"
+        data-width="500"
+        data-show-text="true"></div>
+    </div>
+  {% else %}
+    <span class="gplus-reshare-note" title="Embedded story has the same permalink as this post on Facebook">
+      Embedded preview not available (same link as this post).
+    </span>
+  {% endif %}
+{% endif %}

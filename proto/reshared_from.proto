@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+message ResharedFrom {
+  string author = 1;
+  string url = 2;
+  // Body of the embedded/original post (e.g. Graph API target object or link preview).
+  string content_text = 3;
+}

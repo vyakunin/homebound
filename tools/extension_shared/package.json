@@ -1,0 +1,9 @@
+{
+  "name": "extension-shared",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Canonical sources for code shared by FB Activity Log and X/Twitter export Chrome extensions.",
+  "scripts": {
+    "test": "node --test test/timing_test.js test/zip_helpers_test.js"
+  }
+}

@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>extractTimestamp browser smoke</title></head>
+<body>
+<h1 id="status">running…</h1>
+<pre id="results"></pre>
+
+<!-- This mirrors the row structure that triggered the Glowfari bug:
+     anchor (.target) says "Apr 19", post body contains the word "today". -->
+<div id="glowfariRow">
+  <article>
+    <header>
+      <a class="target" href="https://www.facebook.com/u/posts/pfbid0X">Apr 19</a>
+    </header>
+    <div class="body">
+      Selling 2 adult and 2 kids tickets to Glowfari in Oakland zoo
+      today 6.30 - 9pm. We are all sick so can't go.
+    </div>
+  </article>
+</div>
+
+<div id="todayAnchorRow">
+  <article>
+    <a class="target" href="/u/posts/pfbid0">Today at 6:30 PM</a>
+    <div>Body without date words.</div>
+  </article>
+</div>
+
+<script src="../lib/extract_timestamp.js"></script>
+<script>
+  const results = [];
+  function check(name, ok, info) {
+    results.push((ok ? 'PASS ' : 'FAIL ') + name + (info ? ' — ' + info : ''));
+  }
+
+  // Test 1: Glowfari row — anchor "Apr 19" + body "today".
+  // Bug-era behavior: rawText would be "Today" (from body). Fix: rawText null.
+  const r1 = document.getElementById('glowfariRow');
+  const ts1 = extractTimestamp(r1, r1.querySelector('a.target'));
+  check(
+    'glowfari row: rawText is null (body "today" must NOT leak)',
+    ts1.rawText === null && ts1.utime === null && ts1.iso === null,
+    'got ' + JSON.stringify(ts1),
+  );
+
+  // Test 2: anchor with "Today" — must extract "Today" as rawText.
+  const r2 = document.getElementById('todayAnchorRow');
+  const ts2 = extractTimestamp(r2, r2.querySelector('a.target'));
+  check(
+    'anchor "Today at 6:30 PM": rawText is "Today"',
+    ts2.rawText === 'Today',
+    'got ' + JSON.stringify(ts2),
+  );
+
+  const allPass = results.every(r => r.startsWith('PASS'));
+  document.getElementById('status').textContent = allPass ? 'all pass' : 'FAIL';
+  document.getElementById('results').textContent = results.join('\n');
+  window.__smokeOk = allPass;
+  window.__smokeResults = results;
+</script>
+</body>
+</html>

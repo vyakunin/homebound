@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Activity export">
+  <rect width="128" height="128" rx="24" fill="#0f172a"/>
+  <rect x="28" y="34" width="72" height="6" rx="3" fill="#14b8a6" opacity="0.9"/>
+  <rect x="28" y="50" width="56" height="6" rx="3" fill="#2dd4bf" opacity="0.75"/>
+  <rect x="28" y="66" width="64" height="6" rx="3" fill="#5eead4" opacity="0.55"/>
+  <path d="M88 82 L88 98 L72 98 L72 90 L80 90 L80 82 Z" fill="#f59e0b"/>
+  <rect x="28" y="82" width="40" height="22" rx="4" fill="none" stroke="#94a3b8" stroke-width="3"/>
+</svg>

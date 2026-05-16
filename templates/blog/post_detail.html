@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% load blog_tags %}
+
+{% block title %}
+  {% if post.title %}{{ post.title }} — {% endif %}{{ post.created_at|date:"Y" }} — Vladimir Yakunin
+{% endblock %}
+
+{% block og_title %}{% if post.title %}{{ post.title }}{% else %}{{ post.content_text|truncatechars:80 }}{% endif %}{% endblock %}
+{% block og_description %}{{ post.content_text|truncatechars:200 }}{% endblock %}
+{% block meta_description %}{{ post.content_text|truncatechars:200 }}{% endblock %}
+{% block og_image %}{% with first_media=post.media.first %}{% if first_media and first_media.og_image %}{{ first_media.og_image }}{% elif first_media and first_media.original_url %}{{ first_media.original_url }}{% else %}{{ block.super }}{% endif %}{% endwith %}{% endblock %}
+{% block canonical_url %}{{ request.build_absolute_uri }}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "{% if post.title %}{{ post.title|escapejs }}{% else %}{{ post.content_text|truncatechars:80|escapejs }}{% endif %}",
+  "description": "{{ post.content_text|truncatechars:200|escapejs }}",
+  "datePublished": "{{ post.created_at|date:'c' }}",
+  "dateModified": "{{ post.updated_at|date:'c' }}",
+  "author": {
+    "@type": "Person",
+    "name": "Vladimir Yakunin",
+    "url": "{{ request.scheme }}://{{ request.get_host }}/"
+  },
+  "publisher": {
+    "@type": "Person",
+    "name": "Vladimir Yakunin"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "{{ request.build_absolute_uri }}"
+  }{% with first_media=post.media.first %}{% if first_media and first_media.original_url %},
+  "image": "{{ first_media.original_url|escapejs }}"{% endif %}{% endwith %}
+}
+</script>
+{% endblock %}
+
+{% block owner_toolbar_extra %}
+  {% if user.is_authenticated %}
+    <a href="/post/{{ post.slug }}/edit/" class="owner-toolbar-btn">Edit</a>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="post-feed post-feed--detail">
+  {% include "blog/_post_card.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  // Reload Twitter/Facebook widgets after page load
+  function reloadSocialWidgets() {
+    // Twitter widget — retry if not ready
+    if (window.twttr && window.twttr.widgets && window.twttr.widgets.load) {
+      window.twttr.widgets.load();
+    } else if (window.twttr) {
+      setTimeout(reloadSocialWidgets, 250);
+      return;
+    }
+    // Facebook widget
+    if (window.FB && window.FB.XFBML && window.FB.XFBML.parse) {
+      window.FB.XFBML.parse();
+    }
+  }
+
+  // Call with delay to let async scripts load
+  setTimeout(reloadSocialWidgets, 500);
+})();
+</script>
+{% endblock %}

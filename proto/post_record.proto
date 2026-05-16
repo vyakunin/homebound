@@ -1,0 +1,45 @@
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+import "media_item.proto";
+import "comment.proto";
+import "reaction.proto";
+import "location.proto";
+import "reshared_from.proto";
+
+enum Source {
+  SOURCE_INVALID = 0;
+  SOURCE_GOOGLE_PLUS = 1;
+  SOURCE_FACEBOOK = 2;
+  SOURCE_TWITTER = 3;
+  SOURCE_BLOG = 4;
+}
+
+enum Visibility {
+  VISIBILITY_INVALID = 0;
+  VISIBILITY_PUBLIC = 1;
+  VISIBILITY_FRIENDS = 2;
+  VISIBILITY_PRIVATE = 3;
+}
+
+// source identifies which network this record came from.
+// source_id is the post's ID on that network — the two encode independent
+// information and both are needed (source_id values like "1234567890" don't
+// embed the network name).
+message PostRecord {
+  Source source = 1;
+  string source_id = 2;
+  string source_url = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+  string title = 6;
+  string content_text = 7;
+  string content_html = 8;
+  Visibility visibility = 9;
+  Location location = 10;
+  ResharedFrom reshared_from = 11;
+  repeated MediaItem media = 12;
+  repeated Reaction reactions = 13;
+  repeated Comment comments = 14;
+  repeated string tags = 15;
+  map<string, string> extra = 16;
+}

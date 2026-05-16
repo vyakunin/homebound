@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}Word Cloud — Vladimir Yakunin{% endblock %}
+
+{% block content %}
+<div class="page-header inner-narrow">
+  <h1 class="page-title">Word Cloud</h1>
+  <p class="page-subtitle">Most frequent words across all posts. Click any word to search for it.</p>
+</div>
+
+<div class="word-cloud">
+  {% for item in words %}
+    <a href="/search/?q={{ item.word }}"
+       class="word-cloud__word"
+       style="font-size: {{ item.size }}px; opacity: {{ item.opacity }};"
+       title="{{ item.count }} occurrences">{{ item.word }}</a>
+  {% empty %}
+    <p class="empty-state">No words to display yet.</p>
+  {% endfor %}
+</div>
+{% endblock %}

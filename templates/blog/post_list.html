@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% load blog_tags %}
+
+{% block title %}
+  {% if filter_label %}{{ filter_label }} — {% endif %}Vladimir Yakunin
+{% endblock %}
+
+{% block content %}
+
+{% if filter_label %}
+  <div class="filter-header">{{ filter_label }}</div>
+{% endif %}
+
+<div class="post-feed" id="post-feed">
+  {% for post in posts %}
+    {% include "blog/_post_card.html" %}
+  {% empty %}
+    <p class="empty-state">No posts found.</p>
+  {% endfor %}
+</div>
+
+{% if page_obj.has_next %}
+  <div id="infinite-scroll-sentinel"
+       data-next-page="{{ page_obj.next_page_number }}"
+       aria-hidden="true"></div>
+{% endif %}
+
+<div id="loading-indicator" class="loading-indicator" style="display:none">
+  <span class="loading-dots"><span></span><span></span><span></span></span>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+
+  const TRUNCATE_HEIGHT = 320; // px — content taller than this gets a "Show more"
+
+  /* ── Expand/collapse ──────────────────────────────────────────────── */
+  function applyTruncation(root) {
+    root = root || document;
+    root.querySelectorAll('.js-post-content:not(.js-checked)').forEach(function (el) {
+      el.classList.add('js-checked');
+      if (el.scrollHeight <= TRUNCATE_HEIGHT) return;
+
+      el.classList.add('is-truncated');
+      var btn = el.nextElementSibling;
+      if (!btn || !btn.classList.contains('js-show-more')) return;
+      btn.style.display = 'inline-block';
+
+      btn.addEventListener('click', function () {
+        var expanded = btn.dataset.expanded === 'true';
+        if (expanded) {
+          el.classList.add('is-truncated');
+          btn.textContent = 'Show more';
+          btn.dataset.expanded = 'false';
+        } else {
+          el.classList.remove('is-truncated');
+          btn.textContent = 'Show less';
+          btn.dataset.expanded = 'true';
+        }
+      });
+    });
+  }
+
+  /* ── Infinite scroll ─────────────────────────────────────────────── */
+  var sentinel = document.getElementById('infinite-scroll-sentinel');
+  var loader   = document.getElementById('loading-indicator');
+  var feed     = document.getElementById('post-feed');
+
+  applyTruncation(feed);
+
+  /* ── Reload Twitter/Facebook widgets on content change ─────────────── */
+  function reloadSocialWidgets() {
+    // Twitter widget processing — retry if not ready yet
+    if (window.twttr && window.twttr.widgets && window.twttr.widgets.load) {
+      window.twttr.widgets.load();
+    } else if (window.twttr) {
+      // Widget object exists but widgets.load might not be ready yet
+      setTimeout(reloadSocialWidgets, 250);
+      return;
+    }
+    // Facebook widget processing
+    if (window.FB && window.FB.XFBML && window.FB.XFBML.parse) {
+      window.FB.XFBML.parse();
+    }
+  }
+
+  // Initial load — wait a bit for async widget script to load
+  setTimeout(reloadSocialWidgets, 500);
+
+  if (!sentinel) return;
+
+  var loading = false;
+
+  var observer = new IntersectionObserver(function (entries) {
+    if (entries[0].isIntersecting && !loading) {
+      loadMore();
+    }
+  }, { rootMargin: '300px' });
+
+  observer.observe(sentinel);
+
+  function loadMore() {
+    var nextPage = sentinel.dataset.nextPage;
+    if (!nextPage) { observer.disconnect(); return; }
+
+    loading = true;
+    loader.style.display = 'block';
+
+    var url = new URL(window.location.href);
+    url.searchParams.set('page', nextPage);
+    url.searchParams.set('partial', '1');
+
+    fetch(url.toString())
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        // Parse the HTML and insert before the sentinel
+        var tmp = document.createElement('div');
+        tmp.innerHTML = data.html;
+        while (tmp.firstChild) {
+          feed.appendChild(tmp.firstChild);
+        }
+
+        applyTruncation(feed);
+        // Reload widgets after new content is added
+        setTimeout(reloadSocialWidgets, 100);
+
+        if (data.has_next) {
+          sentinel.dataset.nextPage = data.next_page;
+        } else {
+          observer.disconnect();
+          sentinel.remove();
+        }
+      })
+      .catch(function (err) {
+        console.error('Infinite scroll fetch failed:', err);
+      })
+      .finally(function () {
+        loading = false;
+        loader.style.display = 'none';
+      });
+  }
+}());
+</script>
+{% endblock %}

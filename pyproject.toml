@@ -1,0 +1,52 @@
+[project]
+name = "personal-blog"
+version = "0.0.0"
+requires-python = ">=3.13"
+dependencies = [
+    "Django==5.1.6",
+    "gunicorn==22.0.0",
+    "psycopg2-binary==2.9.11",
+    "beautifulsoup4==4.12.3",
+    "lxml==5.1.0",
+    "Markdown==3.7",
+    "requests==2.32.3",
+    "Pillow==12.1.1",
+    "django-allauth==65.15.0",
+    "PyJWT==2.12.1",
+    "cryptography==46.0.6",
+    "pytest==8.3.3",
+    "pytest-django==4.9.0",
+    "pymorphy3==2.0.6",
+    "nltk==3.9.2",
+    "betterproto[compiler]==1.2.5",
+    "grpcio-tools==1.78.0",
+    "wayback==0.4.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = [
+    "SIM105",   # try/except/pass — sometimes intentional
+    "N818",     # exception names
+]
+
+[tool.ruff.lint.per-file-ignores]
+# N802: function name should be lowercase — pytest conventions use mixed-case (e.g. setUp, tearDown)
+# N803: argument name should be lowercase — same reason (e.g. self.maxDiff)
+# N806: variable in function should be lowercase — test locals often mirror Django model names (e.g. MyModel)
+"tests/*" = ["N802", "N803", "N806"]
+# N806: variable in function should be lowercase — Django ORM uses PascalCase model references in migrations
+# E501: line too long — auto-generated migration files have long dependency/field lines that shouldn't be reformatted
+# N999: invalid module name — Django names migration files like 0001_initial which starts with a digit
+"blog/migrations/*" = ["N806", "E501", "N999"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "django_config.settings"
+python_files = ["test_*.py"]

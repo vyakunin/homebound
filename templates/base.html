@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Vladimir Yakunin{% endblock %}</title>
+  <meta name="description" content="{% block meta_description %}Personal blog. Posts imported from Google+, Facebook, and Twitter.{% endblock %}">
+  <meta property="og:title" content="{% block og_title %}Vladimir Yakunin{% endblock %}">
+  <meta property="og:description" content="{% block og_description %}Personal blog. Posts imported from Google+, Facebook, and Twitter.{% endblock %}">
+  <meta property="og:image" content="{% block og_image %}{{ request.scheme }}://{{ request.get_host }}/static/img/thumbnail.png{% endblock %}">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="{{ request.scheme }}://{{ request.get_host }}/static/img/thumbnail.png">
+  <link rel="canonical" href="{% block canonical_url %}{{ request.build_absolute_uri }}{% endblock %}">
+  <link rel="alternate" type="application/rss+xml" title="Vladimir Yakunin" href="/feed/">
+  <link rel="icon" type="image/png" href="/static/img/thumbnail.png">
+  <link rel="stylesheet" href="/static/css/style.css">
+  {% block extra_head %}{% endblock %}
+  {% if analytics_script %}{{ analytics_script|safe }}{% endif %}
+</head>
+<body>
+<div class="site-wrapper">
+
+  {% if user.is_authenticated %}
+  <div class="owner-toolbar">
+    <div class="inner">
+      <a href="/new/" class="owner-toolbar-btn">+ New Post</a>
+      {% block owner_toolbar_extra %}{% endblock %}
+      <a href="/accounts/logout/" class="owner-toolbar-btn owner-toolbar-btn--muted">Sign out</a>
+    </div>
+  </div>
+  {% endif %}
+
+  <header class="site-header">
+    <div class="inner site-header__inner">
+      <a href="/" class="site-title">Vladimir Yakunin</a>
+      <nav class="site-nav">
+        <a href="/source/google_plus/">Google+</a>
+        <a href="/source/facebook/">Facebook</a>
+        <a href="/source/twitter/">Twitter</a>
+        <a href="/word-cloud/">Word Cloud</a>
+        <a href="/feed/" title="RSS Feed">RSS</a>
+      </nav>
+      <div class="site-header__actions">
+        <form class="nav-search" action="/search/" method="get" role="search">
+          <input class="nav-search__input" type="search" name="q" placeholder="Search…" aria-label="Search posts">
+          <button class="nav-search__btn" type="submit" aria-label="Submit search">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <circle cx="5.5" cy="5.5" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+              <line x1="8.8" y1="8.8" x2="13" y2="13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </form>
+        <button id="theme-toggle" class="theme-toggle" aria-label="Toggle dark/light mode" title="Toggle dark/light mode">
+          <svg class="theme-toggle__sun" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="8" r="3.5" stroke="currentColor" stroke-width="1.5"/>
+            <line x1="8" y1="0.5" x2="8" y2="2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="8" y1="13.5" x2="8" y2="15.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="0.5" y1="8" x2="2.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="13.5" y1="8" x2="15.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="2.57" y1="2.57" x2="3.99" y2="3.99" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="12.01" y1="12.01" x2="13.43" y2="13.43" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="13.43" y1="2.57" x2="12.01" y2="3.99" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="3.99" y1="12.01" x2="2.57" y2="13.43" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <svg class="theme-toggle__moon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M13.5 10.5A6 6 0 0 1 5.5 2.5a6 6 0 1 0 8 8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <p>Personal blog. Posts imported from Google+, Facebook, and Twitter.</p>
+  </footer>
+
+</div>
+{% block scripts %}{% endblock %}
+<script>
+/* ── Theme toggle ──────────────────────────────────────────────────────── */
+(function () {
+  var STORAGE_KEY = 'theme';
+  var html = document.documentElement;
+
+  function getSystemTheme() {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function applyTheme(theme) {
+    html.setAttribute('data-theme', theme);
+    var toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+      toggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+    }
+  }
+
+  var saved = localStorage.getItem(STORAGE_KEY);
+  applyTheme(saved || getSystemTheme());
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var current = html.getAttribute('data-theme') || getSystemTheme();
+      var next = current === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(STORAGE_KEY, next);
+      applyTheme(next);
+    });
+  });
+}());
+
+/* ── YouTube lazy embed ────────────────────────────────────────────────── */
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.js-yt-embed');
+  if (!btn) return;
+  var vid = btn.dataset.vid;
+  if (!vid) return;
+  btn.innerHTML = '<iframe src="https://www.youtube.com/embed/' + vid + '?autoplay=1&feature=oembed" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>';
+  btn.classList.add('active');
+});
+
+/* ── Image lightbox ────────────────────────────────────────────────── */
+(function () {
+  var lb = document.createElement('div');
+  lb.id = 'lb';
+  var lbImg = document.createElement('img');
+  var lbClose = document.createElement('button');
+  lbClose.id = 'lb-close';
+  lbClose.setAttribute('aria-label', 'Close');
+  lbClose.innerHTML = '&times;';
+  lb.appendChild(lbClose);
+  lb.appendChild(lbImg);
+  document.body.appendChild(lb);
+
+  function openLb(src, alt) {
+    lbImg.src = src;
+    lbImg.alt = alt || '';
+    lb.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeLb() {
+    lb.classList.remove('open');
+    lbImg.src = '';
+    document.body.style.overflow = '';
+  }
+
+  lb.addEventListener('click', function (e) {
+    if (e.target === lb) closeLb();
+  });
+  lbClose.addEventListener('click', closeLb);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && lb.classList.contains('open')) closeLb();
+  });
+  // Intercept clicks on post media images — open lightbox instead of following link
+  document.addEventListener('click', function (e) {
+    var link = e.target.closest('.gplus-media-item a');
+    if (!link) return;
+    var img = link.querySelector('img');
+    if (!img) return;
+    e.preventDefault();
+    // Use the link href (full-res file URL) when available, fall back to img src
+    openLb(link.href || img.src || img.currentSrc, img.alt);
+  });
+}());
+
+/* ── Facebook JS SDK — lazy-load only when embedded posts are present ── */
+(function() {
+  if (!document.querySelector('.fb-post')) return;
+  var fbRoot = document.getElementById('fb-root');
+  if (!fbRoot) {
+    fbRoot = document.createElement('div');
+    fbRoot.id = 'fb-root';
+    document.body.insertBefore(fbRoot, document.body.firstChild);
+  }
+  var js = document.createElement('script');
+  js.id = 'facebook-jssdk';
+  js.async = true;
+  js.defer = true;
+  js.crossOrigin = 'anonymous';
+  js.src = 'https://connect.facebook.net/en_US/sdk.js#xfbml=1&version=v18.0';
+  document.head.appendChild(js);
+}());
+</script>
+<script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
+</body>
+</html>

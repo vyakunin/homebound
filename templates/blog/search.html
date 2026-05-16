@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% load blog_tags %}
+
+{% block title %}
+  {% if query %}Search: {{ query }} — {% endif %}Vladimir Yakunin
+{% endblock %}
+
+{% block content %}
+<div class="search-page inner-narrow">
+  <form class="search-form" action="/search/" method="get">
+    <div class="search-form__row">
+      <input class="search-form__input"
+             type="search"
+             name="q"
+             value="{{ query|default:'' }}"
+             placeholder="Search posts…"
+             autofocus>
+      <button class="search-form__btn" type="submit">Search</button>
+    </div>
+  </form>
+
+  {% if query %}
+    <p class="search-summary">
+      {% if result_count == 0 %}
+        No results for <strong>{{ query }}</strong>.
+      {% elif result_count == 1 %}
+        1 result for <strong>{{ query }}</strong>
+      {% else %}
+        {{ result_count }} results for <strong>{{ query }}</strong>
+      {% endif %}
+    </p>
+  {% endif %}
+</div>
+
+{% if posts %}
+  <div class="post-feed" id="post-feed">
+    {% for post in posts %}
+      {% include "blog/_post_card.html" %}
+    {% endfor %}
+  </div>
+
+  {% if page_obj.has_next %}
+    <div id="infinite-scroll-sentinel"
+         data-next-page="{{ page_obj.next_page_number }}"
+         aria-hidden="true"></div>
+  {% endif %}
+
+  <div id="loading-indicator" class="loading-indicator" style="display:none">
+    <span class="loading-dots"><span></span><span></span><span></span></span>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  // Reload Twitter/Facebook widgets
+  function reloadSocialWidgets() {
+    // Twitter widget — retry if not ready
+    if (window.twttr && window.twttr.widgets && window.twttr.widgets.load) {
+      window.twttr.widgets.load();
+    } else if (window.twttr) {
+      setTimeout(reloadSocialWidgets, 250);
+      return;
+    }
+    // Facebook widget
+    if (window.FB && window.FB.XFBML && window.FB.XFBML.parse) {
+      window.FB.XFBML.parse();
+    }
+  }
+
+  setTimeout(reloadSocialWidgets, 500);
+})();
+</script>
+{% endblock %}

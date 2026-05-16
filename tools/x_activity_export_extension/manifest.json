@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "X/Twitter Timeline Export (personal)",
+  "version": "1.4.2",
+  "description": "Wizard: export tweets from your X/Twitter profile timeline. Personal/local use; not affiliated with X Corp.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Open X timeline export wizard (side panel)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["activeTab", "storage", "tabs", "sidePanel", "scripting"],
+  "host_permissions": [
+    "*://*.x.com/*",
+    "*://*.twitter.com/*",
+    "*://pbs.twimg.com/*",
+    "*://video.twimg.com/*"
+  ],
+  "side_panel": {
+    "default_path": "wizard.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": ["page_hook.js"],
+      "all_frames": false,
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": ["lib/jszip.min.js", "lib/shared/timing.js", "lib/shared/zip_helpers.js", "content.js"],
+      "all_frames": false,
+      "run_at": "document_idle"
+    }
+  ]
+}

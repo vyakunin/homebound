@@ -1,0 +1,1 @@
+/Users/vyakunin/.cursor/tools/sync_rules.py

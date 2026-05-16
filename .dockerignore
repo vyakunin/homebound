@@ -1,0 +1,27 @@
+# Bazel
+bazel-*
+bazel-bin
+bazel-out
+bazel-testlogs
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local data (large, not needed in image)
+output/
+media/
+
+# Secrets
+.env
+
+# Dev / editor
+.DS_Store
+.cursor/
+*.mdc
+
+# Test artifacts
+bazel-testlogs/

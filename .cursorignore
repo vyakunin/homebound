@@ -1,0 +1,38 @@
+# Bazel build symlinks and outputs
+bazel-bin/
+bazel-out/
+bazel-testlogs/
+bazel-personal_blog/
+bazel-genfiles/
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Git
+.git/
+
+# OS
+.DS_Store
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+*.egg
+
+# Django
+*.sqlite3
+db.sqlite3
+/staticfiles/
+/media/
+
+# Logs
+*.log
+logs/

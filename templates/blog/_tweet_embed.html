@@ -1,0 +1,54 @@
+{% load blog_tags %}
+{% reshare_info post as info %}
+
+{# Twitter/X official embed widget — renders with images, link cards, etc. #}
+{% with embed_url=post.reshared_from_url|twitter_embed_url %}
+{% if embed_url and post.reshared_from_url %}
+  <div class="tweet-embed">
+    <blockquote class="twitter-tweet" data-dnt="true" data-theme="light">
+      {% if post.reshared_content_text %}
+        <p>{{ post.reshared_content_text }}</p>
+      {% endif %}
+      &mdash; {{ info.author }}
+      <a href="{{ embed_url }}">View on X</a>
+    </blockquote>
+  </div>
+{% elif post.reshared_content_text %}
+  {# Fallback: self-hosted card showing quoted tweet (user commentary shown above by post card) #}
+  <div class="tweet-embed tweet-embed--fallback">
+    <div class="tweet-embed__header">
+      <svg class="tweet-embed__x-logo" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <path fill="#536471" d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/>
+      </svg>
+      <div class="tweet-embed__author">
+        {% if info.author_url %}
+          <a href="{{ info.author_url }}" target="_blank" rel="noopener noreferrer" class="tweet-embed__author-link">
+            <span class="tweet-embed__author-name">{{ info.author }}</span>
+          </a>
+        {% elif info.author %}
+          <span class="tweet-embed__author-name">{{ info.author }}</span>
+        {% else %}
+          <span class="tweet-embed__author-name" style="color: #666; font-size: 0.85em;">Quoted tweet</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="tweet-embed__text">
+      {# Only show the quoted tweet content, not user's commentary (which appears above) #}
+      {{ post.reshared_content_text|linkify_tweet|linebreaksbr }}
+    </div>
+    {% if post.reshared_from_url %}
+      <div class="tweet-embed__footer">
+        <a href="{{ post.reshared_from_url }}" target="_blank" rel="noopener noreferrer" class="tweet-embed__view-link">
+          View on X &#8599;
+        </a>
+      </div>
+    {% elif post.source_url %}
+      <div class="tweet-embed__footer">
+        <a href="{{ post.source_url }}" target="_blank" rel="noopener noreferrer" class="tweet-embed__view-link">
+          View on X &#8599;
+        </a>
+      </div>
+    {% endif %}
+  </div>
+{% endif %}
+{% endwith %}

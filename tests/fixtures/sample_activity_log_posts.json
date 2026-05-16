@@ -1,0 +1,65 @@
+{
+  "phase": "posts",
+  "mode": "quick",
+  "collectedAt": "2026-04-04T22:27:23.006Z",
+  "stoppedBecause": "maxRounds",
+  "stoppedEarly": false,
+  "rounds": 18,
+  "count": 7,
+  "postsWithText": [
+    {
+      "postKey": "https://www.facebook.com/vyakunin/posts/17000000001",
+      "fbId": "17000000001",
+      "url": "https://www.facebook.com/vyakunin/posts/17000000001",
+      "timestamp": { "utime": 1700000000, "iso": null, "rawText": null },
+      "text": "updated his status.Hello world, this is a test post with some content.Public3:21\u202fAMView"
+    },
+    {
+      "postKey": "https://www.facebook.com/vyakunin/posts/12345678901234567",
+      "fbId": "12345678901234567",
+      "url": "https://www.facebook.com/vyakunin/posts/12345678901234567",
+      "timestamp": { "utime": 1690000000, "iso": null, "rawText": null },
+      "text": "added a new photo.We fundraised more than $500 towards Nova Ukraine. #Ukraine #Fundraiser Friends10:11\u202fPMView"
+    },
+    {
+      "postKey": "https://www.facebook.com/vyakunin/posts/17000000002",
+      "fbId": "17000000002",
+      "url": "https://www.facebook.com/vyakunin/posts/17000000002",
+      "timestamp": { "utime": null, "iso": "2024-06-15T14:30:00+03:00", "rawText": null },
+      "text": "shared a post.\u0421\u043f\u0430\u0441\u0438\u0431\u043e \u0432\u0441\u0435\u043c \u043a\u0442\u043e \u043f\u043e\u043c\u043e\u0433Public2:49\u202fPMView"
+    },
+    {
+      "postKey": "https://www.facebook.com/photo/?fbid=98765432101234567",
+      "fbId": null,
+      "url": "https://www.facebook.com/photo/?fbid=98765432101234567",
+      "timestamp": { "utime": null, "iso": null, "rawText": "January 5, 2024" },
+      "text": "added a new photo.Photo from the concert last night.Public11:05\u202fPMView"
+    },
+    {
+      "postKey": "https://www.facebook.com/vyakunin/posts/story_fbid_post",
+      "fbId": null,
+      "url": "https://www.facebook.com/story.php?story_fbid=55512345&id=100001",
+      "timestamp": { "utime": null, "iso": null, "rawText": "3 hours ago" },
+      "text": "updated his status.Meeting went well, excited about new project.Friends6:00\u202fPMView"
+    },
+    {
+      "postKey": "https://www.facebook.com/vyakunin/posts/55501100",
+      "fbId": "55501100",
+      "url": "https://www.facebook.com/vyakunin/posts/55501100",
+      "timestamp": { "utime": 1680000000, "iso": null, "rawText": null },
+      "text": "updated his status.Short text.Public9:00\u202fAMView"
+    },
+    {
+      "postKey": "https://www.facebook.com/vyakunin/posts/55501100",
+      "fbId": "55501100",
+      "url": "https://www.facebook.com/vyakunin/posts/55501100",
+      "timestamp": { "utime": 1680000000, "iso": null, "rawText": null },
+      "text": "updated his status.Longer text that should win deduplication because it has more content.Public9:00\u202fAMView"
+    }
+  ],
+  "postsWithTextCount": 7,
+  "postsWithNonEmptyTextCount": 7,
+  "mediaCandidates": [],
+  "mediaCapped": false,
+  "uniqueUrls": []
+}

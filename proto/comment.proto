@@ -1,0 +1,13 @@
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+
+message Comment {
+  string author = 1;
+  string author_url = 2;
+  string text = 3;
+  google.protobuf.Timestamp date = 4;
+  string source_id = 5;
+  // Parent comment ID for threaded replies. Empty = top-level comment.
+  // Populated only by the Graph API extractor; not available in archive exports.
+  string parent_comment_id = 6;
+}

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>X/Twitter Timeline export</title>
+    <link rel="stylesheet" href="wizard.css" />
+  </head>
+  <body>
+    <header class="wizard-header">
+      <img src="icons/icon128.png" width="44" height="44" alt="" />
+      <div>
+        <h1>X Timeline export</h1>
+        <p class="tagline">Side panel stays open while X reloads.</p>
+      </div>
+    </header>
+
+    <nav class="step-indicator" aria-label="Wizard steps">
+      <span class="step-dot" data-step="1">1</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="2">2</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="3">3</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="4">4</span>
+    </nav>
+
+    <p class="hint subtle">Navigate to your X profile page before starting. Keep the tab focused during harvest.</p>
+
+    <section id="step-intro" class="step" data-step-num="1">
+      <h2>1. Setup</h2>
+      <label>
+        Scroll mode
+        <select id="mode">
+          <option value="quick">Quick (~30s, partial)</option>
+          <option value="full">Full (long; entire timeline)</option>
+        </select>
+      </label>
+      <fieldset class="harvest-mode-fieldset">
+        <legend>What to harvest</legend>
+        <label class="checkbox-label">
+          <input type="checkbox" id="harvest-tweets" checked />
+          Tweets (posts)
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="harvest-replies" />
+          Replies
+        </label>
+      </fieldset>
+      <label class="checkbox-label">
+        <input type="checkbox" id="skip-media" />
+        Skip media download (faster ZIP, no images/videos)
+      </label>
+      <fieldset class="caps-fieldset">
+        <legend>Harvest limits</legend>
+        <p class="hint subtle caps-hint">
+          0 = unlimited (scroll until the feed ends or stabilizes). For images/videos, 0 uses built-in defaults.
+        </p>
+        <div class="caps-grid">
+          <label>
+            Max tweets
+            <input type="number" id="cap-tweets" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+          <label>
+            Max images
+            <input type="number" id="cap-images" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+          <label>
+            Max videos
+            <input type="number" id="cap-videos" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+        </div>
+      </fieldset>
+      <button type="button" id="btn-start-wizard" class="primary">Start wizard</button>
+    </section>
+
+    <section id="step-navigate" class="step hidden" data-step-num="2">
+      <h2>2. Navigate to profile</h2>
+      <p class="hint">Enter your X username. We'll open <code>x.com/&lt;username&gt;</code>.</p>
+      <label>
+        Username
+        <input type="text" id="profile-username" placeholder="yourusername" autocomplete="off" spellcheck="false" />
+      </label>
+      <button type="button" id="btn-nav-profile" class="primary">Go to profile</button>
+      <button type="button" id="btn-skip-nav" class="secondary">Already there</button>
+      <button type="button" id="btn-back-intro" class="secondary">Back</button>
+    </section>
+
+    <section id="step-harvest" class="step hidden" data-step-num="3">
+      <h2>3. Harvest tweets</h2>
+      <p class="hint">Scrolls your timeline and collects tweets. Use Stop when you have enough.</p>
+      <progress id="harvest-progress" max="100" value="0" class="hidden"></progress>
+      <button type="button" id="btn-harvest" class="primary">Start harvest</button>
+      <button type="button" id="btn-stop" class="danger" disabled>Stop here</button>
+    </section>
+
+    <section id="step-zip" class="step hidden" data-step-num="4">
+      <h2>4. ZIP</h2>
+      <div id="export-summary" class="export-summary hidden"></div>
+      <progress id="zip-progress" max="100" value="0" class="hidden"></progress>
+      <p class="hint">Media files are fetched now. CDN links may expire — save your ZIP promptly.</p>
+      <button type="button" id="btn-zip" class="primary hidden">Retry download ZIP</button>
+    </section>
+
+    <section id="step-done" class="step hidden" data-step-num="4">
+      <h2>Done</h2>
+      <p class="hint">Check your Downloads folder for the .zip file.</p>
+      <button type="button" id="btn-reset" class="secondary">Start over</button>
+    </section>
+
+    <p id="status" class="status" aria-live="polite"></p>
+
+    <script src="wizard.js?v=1.0.0"></script>
+  </body>
+</html>

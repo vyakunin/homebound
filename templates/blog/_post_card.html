@@ -1,0 +1,335 @@
+{% load blog_tags static %}
+<div class="gplus-card" id="post-{{ post.pk }}">
+
+  {# ── Header ─────────────────────────────────────────────────────────── #}
+  <div class="gplus-card-header">
+    <span class="gplus-avatar-wrap" title="Posted on {{ post.source|source_label }}">
+      <img class="gplus-avatar" src="{% static 'img/thumbnail.png' %}" alt="" width="36" height="36">
+      <span class="gplus-source-badge gplus-source-badge--{{ post.source|source_slug }}"
+            aria-label="{{ post.source|source_label }}">{{ post.source|source_icon }}</span>
+    </span>
+    <div class="gplus-header-meta">
+      <div class="gplus-header-attribution">
+        <span class="gplus-author-name">Vladimir Yakunin</span>
+      </div>
+      <div class="gplus-header-dateline">
+        <a href="{% url 'blog:post_detail' post.slug %}" class="gplus-date-link">
+          <time datetime="{{ post.created_at|date:'c' }}" class="gplus-date">
+            {{ post.created_at|date:"M j, Y" }}
+          </time>
+        </a>
+        {% if post.source_url %}
+          <a href="{{ post.source_url }}" class="gplus-permalink"
+             target="_blank" rel="noopener noreferrer" title="View original post">&#8599;</a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {# ── Post title (if any) ────────────────────────────────────────────── #}
+  {% if post.title %}
+    <h2 class="gplus-post-title">{{ post.title }}</h2>
+  {% endif %}
+
+  {# ── Facebook reshare: commentary first (like FB), then embedded story ─── #}
+  {% if post.source == 3 %}
+    {% if post.reshared_from_author or post.reshared_from_url or post.reshared_content_text %}
+      {% if post.content_html or post.content_text %}
+        <div class="gplus-content gplus-content--fb-commentary js-post-content">
+          {{ post.get_display_content|safe }}
+        </div>
+        <button class="gplus-show-more js-show-more" style="display:none" data-expanded="false">
+          Show more
+        </button>
+      {% endif %}
+      <div class="gplus-fb-reshare-card">
+        {% include "blog/_post_reshare_body.html" %}
+      </div>
+    {% else %}
+      {% if post.content_html or post.content_text %}
+        <div class="gplus-content js-post-content">
+          {{ post.get_display_content|safe }}
+        </div>
+        <button class="gplus-show-more js-show-more" style="display:none" data-expanded="false">
+          Show more
+        </button>
+      {% endif %}
+    {% endif %}
+  {% elif post.source == 4 %}
+    {# ── Twitter/X: commentary first, then embedded tweet card ─── #}
+    {% if post.reshared_from_url or post.reshared_content_text %}
+      {% if post.content_html or post.content_text %}
+        <div class="gplus-content gplus-content--fb-commentary js-post-content">
+          {{ post.get_display_content|safe }}
+        </div>
+        <button class="gplus-show-more js-show-more" style="display:none" data-expanded="false">
+          Show more
+        </button>
+      {% endif %}
+      {% include "blog/_tweet_embed.html" %}
+    {% else %}
+      {% if post.content_html or post.content_text %}
+        <div class="gplus-content js-post-content">
+          {{ post.get_display_content|safe }}
+        </div>
+        <button class="gplus-show-more js-show-more" style="display:none" data-expanded="false">
+          Show more
+        </button>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    {# ── Google+ / other: embed block above body (legacy order) ─────────── #}
+    {# Only render the reshare block when there is something to reshow; the   #}
+    {# "Shared a post (original source not available)" placeholder was      #}
+    {# leaking onto plain G+ posts that never were reshares.                  #}
+    {% if post.reshared_from_author or post.reshared_from_url or post.reshared_content_text %}
+      {% include "blog/_post_reshare_body.html" %}
+    {% endif %}
+    {% if post.content_html or post.content_text %}
+      <div class="gplus-content js-post-content">
+        {{ post.get_display_content|safe }}
+      </div>
+      <button class="gplus-show-more js-show-more" style="display:none" data-expanded="false">
+        Show more
+      </button>
+    {% endif %}
+  {% endif %}
+
+  {# ── Media gallery ──────────────────────────────────────────────────── #}
+  {% with media_list=post.media.all %}
+    {% if media_list %}
+      <div class="gplus-media">
+        <div class="gplus-media-grid {% if post.media_count == 1 %}single{% elif post.media_count == 2 %}two{% elif post.media_count == 3 %}three{% elif post.media_count >= 4 %}four{% endif %}">
+          {% for item in media_list %}
+            {% if item.media_type == 1 or item.media_type == 3 %}
+              {# IMAGE or GIF #}
+              {% if item.file %}
+                <div class="gplus-media-item">
+                  <a href="{{ item.file.url }}" target="_blank" rel="noopener noreferrer">
+                    <img src="{{ item.file.url }}" alt="{{ item.caption }}" loading="lazy"
+                         onerror="this.closest('.gplus-media-item').style.display='none'">
+                  </a>
+                  {% if item.caption %}
+                    <div class="gplus-media-caption">{{ item.caption }}</div>
+                  {% endif %}
+                </div>
+              {% elif item.original_url %}
+                <div class="gplus-media-item">
+                  <a href="{{ item.original_url }}" target="_blank" rel="noopener noreferrer">
+                    <img src="{{ item.original_url }}" alt="{{ item.caption }}" loading="lazy"
+                         onerror="this.closest('.gplus-media-item').style.display='none'">
+                  </a>
+                  {% if item.caption %}
+                    <div class="gplus-media-caption">{{ item.caption }}</div>
+                  {% endif %}
+                </div>
+              {% endif %}
+            {% elif item.media_type == 2 %}
+              {# VIDEO #}
+              {% if item.file %}
+                <div class="gplus-media-item">
+                  <video controls preload="metadata" style="width:100%;max-width:100%;">
+                    <source src="{{ item.file.url }}" type="{% if item.file.name|slice:'-4:' == '.mp4' %}video/mp4{% else %}video/webm{% endif %}">
+                  </video>
+                  {% if item.caption %}
+                    <div class="gplus-media-caption">{{ item.caption }}</div>
+                  {% endif %}
+                </div>
+              {% elif item.original_url %}
+                {% with fb_embed=item.original_url|facebook_embed_url %}
+                  {% if fb_embed %}
+                <div class="gplus-media-item gplus-fb-video-embed">
+                  <iframe src="{{ fb_embed }}"
+                    class="gplus-fb-video-iframe"
+                    style="border:none;overflow:hidden" scrolling="no" frameborder="0"
+                    allowfullscreen="true"
+                    allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share"
+                    title="Facebook video"></iframe>
+                </div>
+                {% if item.caption %}
+                  <div class="gplus-media-caption">{{ item.caption }}</div>
+                {% endif %}
+                  {% else %}
+                {% with vid_id=item.original_url|youtube_video_id %}
+                  {% if vid_id %}
+                    <div class="gplus-youtube-embed js-yt-embed" data-vid="{{ vid_id }}">
+                      <img src="https://img.youtube.com/vi/{{ vid_id }}/hqdefault.jpg"
+                           alt="{{ item.caption|default:'Play video' }}"
+                           loading="lazy"
+                           class="gplus-youtube-thumb">
+                      <button class="gplus-youtube-play-btn" aria-label="Play on YouTube">
+                        <svg viewBox="0 0 68 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                          <path d="M66.5 7.8a8.5 8.5 0 0 0-6-6C55.8 0 34 0 34 0S12.2 0 7.5 1.8a8.5 8.5 0 0 0-6 6C0 11.4 0 24 0 24s0 12.6 1.5 16.2a8.5 8.5 0 0 0 6 6C12.2 48 34 48 34 48s21.8 0 26.5-1.8a8.5 8.5 0 0 0 6-6C68 36.6 68 24 68 24s0-12.6-1.5-16.2z" fill="#f00"/>
+                          <path d="M27 34l18-10-18-10v20z" fill="#fff"/>
+                        </svg>
+                      </button>
+                    </div>
+                    {% if item.caption %}
+                      <div class="gplus-youtube-caption">{{ item.caption }}</div>
+                    {% endif %}
+                  {% else %}
+                    <div class="gplus-media-item gplus-media-item--link">
+                      <a href="{{ item.original_url }}" target="_blank" rel="noopener noreferrer">
+                        {{ item.original_url }}
+                      </a>
+                      {% if item.caption %}
+                        <div class="gplus-media-caption">{{ item.caption }}</div>
+                      {% endif %}
+                    </div>
+                  {% endif %}
+                {% endwith %}
+                  {% endif %}
+                {% endwith %}
+              {% endif %}
+            {% elif item.media_type == 4 %}
+              {# LINK EMBED — YouTube gets a full embed; other URLs get a rich card #}
+              {% with link_url=item.embed_url|default:item.original_url %}
+              {% with vid_id=link_url|youtube_video_id %}
+              {% if vid_id %}
+                {# YouTube URL stored as link_embed — render as full player #}
+                <div class="gplus-youtube-embed js-yt-embed" data-vid="{{ vid_id }}">
+                  <img src="https://img.youtube.com/vi/{{ vid_id }}/hqdefault.jpg"
+                       alt="{{ item.caption|default:item.embed_title|default:'Play video' }}"
+                       loading="lazy"
+                       class="gplus-youtube-thumb">
+                  <button class="gplus-youtube-play-btn" aria-label="Play on YouTube">
+                    <svg viewBox="0 0 68 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                      <path d="M66.5 7.8a8.5 8.5 0 0 0-6-6C55.8 0 34 0 34 0S12.2 0 7.5 1.8a8.5 8.5 0 0 0-6 6C0 11.4 0 24 0 24s0 12.6 1.5 16.2a8.5 8.5 0 0 0 6 6C12.2 48 34 48 34 48s21.8 0 26.5-1.8a8.5 8.5 0 0 0 6-6C68 36.6 68 24 68 24s0-12.6-1.5-16.2z" fill="#f00"/>
+                      <path d="M27 34l18-10-18-10v20z" fill="#fff"/>
+                    </svg>
+                  </button>
+                </div>
+                {% if item.caption or item.embed_title %}
+                  <div class="gplus-youtube-caption">{{ item.caption|default:item.embed_title }}</div>
+                {% endif %}
+              {% else %}
+                {% with fb_embed=link_url|facebook_embed_url %}
+                  {% if fb_embed %}
+                <div class="gplus-media-item gplus-fb-video-embed">
+                  <iframe src="{{ fb_embed }}"
+                    class="gplus-fb-video-iframe"
+                    style="border:none;overflow:hidden" scrolling="no" frameborder="0"
+                    allowfullscreen="true"
+                    allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share"
+                    title="Facebook video"></iframe>
+                </div>
+                {% if item.caption or item.embed_title %}
+                  <div class="gplus-media-caption">{{ item.caption|default:item.embed_title }}</div>
+                {% endif %}
+                  {% else %}
+                {# Non-YouTube link embed — rich card with optional hero image #}
+                {% with has_og_image=item.og_image_file|default:item.og_image %}
+                <div class="gplus-link-embed{% if has_og_image %} gplus-link-embed--hero{% endif %}">
+                  {% if has_og_image %}
+                    <a href="{{ link_url }}" target="_blank" rel="noopener noreferrer"
+                       class="gplus-link-embed__hero-link">
+                      <img src="{% if item.og_image_file %}{{ item.og_image_file.url }}{% else %}{{ item.og_image }}{% endif %}"
+                           alt="" loading="lazy"
+                           class="gplus-link-embed__hero-img"
+                           onerror="this.closest('.gplus-link-embed__hero-link').style.display='none'">
+                    </a>
+                  {% endif %}
+                  <a href="{{ link_url }}" target="_blank" rel="noopener noreferrer"
+                     class="gplus-link-embed__anchor">
+                    <div class="gplus-link-embed__meta">
+                      <img class="gplus-link-embed__favicon"
+                           src="https://www.google.com/s2/favicons?sz=32&domain={{ link_url }}"
+                           alt="" width="16" height="16" loading="lazy">
+                      <span class="gplus-link-embed__domain">{{ link_url|urlparse_domain }}</span>
+                    </div>
+                    <div class="gplus-link-embed__title">
+                      {{ item.embed_title|default:item.caption|default:link_url }}
+                    </div>
+                    {% if item.og_description %}
+                      <div class="gplus-link-embed__desc">{{ item.og_description }}</div>
+                    {% endif %}
+                  </a>
+                </div>
+                {% endwith %}
+                  {% endif %}
+                {% endwith %}
+              {% endif %}
+              {% endwith %}
+              {% endwith %}
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  {# ── Engagement bar — counts with reaction tooltip on hover ─────────── #}
+  {% if post.reaction_count or post.comment_count %}
+    <div class="gplus-engagement-bar">
+      {% if post.reaction_count %}
+        <span class="gplus-reaction-wrapper">
+          <span class="gplus-plus-count{% if post.source == 3 %} fb-reaction-count{% endif %}">
+            {% if post.source == 3 %}
+              <span class="gplus-plus-badge fb-reaction-badge" aria-label="Reactions">👍</span>
+            {% elif post.source == 4 %}
+              <span class="gplus-plus-badge tw-reaction-badge" aria-label="Likes">&#10084;</span>
+            {% else %}
+              <span class="gplus-plus-badge" aria-label="+1">+1</span>
+            {% endif %}
+            {{ post.reaction_count }}
+          </span>
+          {% with reactions=post.reactions.all %}
+            {% if reactions %}
+              <span class="gplus-reaction-tooltip" role="tooltip">
+                {% for r in reactions %}
+                  {% if r.user_url %}
+                    <a href="{{ r.user_url }}" target="_blank" rel="noopener noreferrer">{{ r.user_name }}</a>
+                  {% else %}
+                    {{ r.user_name }}
+                  {% endif %}
+                  {% if not forloop.last %}, {% endif %}
+                {% endfor %}
+              </span>
+            {% endif %}
+          {% endwith %}
+        </span>
+      {% endif %}
+      {% if post.comment_count %}
+        <span class="gplus-comment-pill">
+          {{ post.comment_count }} comment{{ post.comment_count|pluralize }}
+        </span>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {# ── Comments ───────────────────────────────────────────────────────── #}
+  {% with comments=post.comments.all %}
+    {% if comments %}
+      <div class="gplus-comments">
+        {% for comment in comments %}
+          <div class="gplus-comment">
+            <div class="gplus-comment-header">
+              {% if comment.author_url %}
+                <a href="{{ comment.author_url }}" target="_blank" rel="noopener noreferrer"
+                   class="gplus-comment-author">{{ comment.author_name }}</a>
+              {% else %}
+                <span class="gplus-comment-author">{{ comment.author_name }}</span>
+              {% endif %}
+              {% if comment.created_at %}
+                <time class="gplus-comment-date" datetime="{{ comment.created_at|date:'c' }}">
+                  {{ comment.created_at|date:"M j, Y" }}
+                </time>
+              {% endif %}
+            </div>
+            <div class="gplus-comment-body">{{ comment.text|linkify_mentions }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  {# ── Tags ───────────────────────────────────────────────────────────── #}
+  {% if post.post_tags.all %}
+    <div class="gplus-tags">
+      {% for pt in post.post_tags.all %}
+        <a href="{% url 'blog:tag' pt.tag.slug %}" class="tag">#{{ pt.tag.name }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+</div>{# end .gplus-card #}

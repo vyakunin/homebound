@@ -1,0 +1,20 @@
+{
+  "exclude": [
+    "bazel-*",
+    ".venv",
+    "venv",
+    "**/__pycache__",
+    ".git",
+    ".cursor",
+    ".claude",
+    ".github",
+    ".pytest_cache",
+    "node_modules",
+    "dist",
+    "build",
+    "staticfiles",
+    "media",
+    "output",
+    "tools"
+  ]
+}

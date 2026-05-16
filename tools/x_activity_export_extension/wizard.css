@@ -1,0 +1,342 @@
+/* System stack only — MV3 extension pages block remote font CDNs unless CSP is widened. */
+
+:root {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --text: #0f172a;
+  --muted: #475569;
+  --accent: #1d9bf0;
+  --accent-hover: #1a8cd8;
+  --danger: #b91c1c;
+  --danger-border: #991b1b;
+  --border: #e2e8f0;
+  --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', 'Helvetica Neue', Ubuntu, Cantarell, system-ui, sans-serif;
+  width: 100%;
+  min-width: 280px;
+  max-width: 420px;
+  margin: 0;
+  padding: 16px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.wizard-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wizard-header img {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.wizard-header h1 {
+  font-family: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.wizard-header .tagline {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 4px 0 0;
+  font-weight: 400;
+}
+
+h2 {
+  font-family: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--text);
+}
+
+.hint {
+  color: var(--muted);
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
+.hint.subtle {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.step.hidden {
+  display: none;
+}
+
+.hidden {
+  display: none !important;
+}
+
+label {
+  display: block;
+  margin-bottom: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+select,
+textarea,
+input[type="text"] {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: 'Segoe UI', 'Helvetica Neue', Ubuntu, Cantarell, system-ui, sans-serif;
+  font-size: 13px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+textarea {
+  font-size: 12px;
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  line-height: 1.35;
+}
+
+button {
+  display: inline-block;
+  margin: 4px 8px 4px 0;
+  padding: 9px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: 'Segoe UI', 'Helvetica Neue', Ubuntu, Cantarell, system-ui, sans-serif;
+  font-weight: 500;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+button:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+button.primary {
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent-hover);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button.danger {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger-border);
+}
+
+button.danger:hover:not(:disabled) {
+  background: #991b1b;
+}
+
+button.secondary {
+  opacity: 0.9;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.status {
+  margin: 14px 0 0;
+  min-height: 2.5em;
+  font-size: 12px;
+  color: #0369a1;
+  white-space: pre-wrap;
+  padding: 10px;
+  background: #f0f9ff;
+  border-radius: 8px;
+  border: 1px solid #bae6fd;
+}
+
+.status.err {
+  color: #991b1b;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+/* Step indicator */
+.step-indicator {
+  display: flex;
+  align-items: center;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.step-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--border);
+  color: var(--muted);
+  flex-shrink: 0;
+  transition: background 0.2s, color 0.2s;
+}
+
+.step-dot.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.step-dot.done {
+  background: #0284c7;
+  color: #fff;
+}
+
+.step-dot.skipped,
+.step-connector.skipped {
+  opacity: 0.25;
+}
+
+.step-connector {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+/* Progress bar */
+progress {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 0 0 12px;
+  border: none;
+  border-radius: 3px;
+  accent-color: var(--accent);
+  background: var(--border);
+}
+
+progress.hidden {
+  display: none;
+}
+
+/* Export summary */
+.export-summary {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #0369a1;
+  margin-bottom: 12px;
+}
+
+.export-summary.hidden {
+  display: none;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.harvest-mode-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px 4px;
+  margin: 0 0 12px;
+}
+
+.harvest-mode-fieldset legend {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  padding: 0 4px;
+}
+
+.harvest-mode-fieldset .checkbox-label {
+  margin-bottom: 6px;
+}
+
+.caps-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px 12px;
+  margin: 0 0 12px;
+}
+
+.caps-fieldset legend {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  padding: 0 4px;
+}
+
+.caps-hint {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.caps-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+
+.caps-grid label {
+  margin-bottom: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.caps-grid input[type='number'] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  background: var(--surface);
+}

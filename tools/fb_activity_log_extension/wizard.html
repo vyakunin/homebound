@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>FB Activity Log export</title>
+    <link rel="stylesheet" href="wizard.css" />
+  </head>
+  <body>
+    <header class="wizard-header">
+      <img src="icons/logo.svg" width="44" height="44" alt="" />
+      <div>
+        <h1>Activity Log export</h1>
+        <p class="tagline">Side panel stays open while Facebook reloads.</p>
+      </div>
+    </header>
+
+    <!-- Step 13: step indicator -->
+    <nav class="step-indicator" aria-label="Wizard steps">
+      <span class="step-dot" data-step="1">1</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="2">2</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="3">3</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="4">4</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="5">5</span>
+      <span class="step-connector"></span>
+      <span class="step-dot" data-step="6">6</span>
+    </nav>
+
+    <p class="hint subtle">Stay logged into Facebook. Use a test profile if unsure. Focus the Activity Log tab in this window while harvesting.</p>
+
+    <section id="step-intro" class="step" data-step-num="1">
+      <h2>1. Setup</h2>
+      <label>
+        Scroll mode
+        <select id="mode">
+          <option value="quick">Quick (~20s per phase, partial)</option>
+          <option value="full">Full (long; whole feed)</option>
+        </select>
+      </label>
+      <fieldset class="harvest-mode-fieldset">
+        <legend>What to harvest</legend>
+        <label class="checkbox-label">
+          <input type="checkbox" id="harvest-comments" checked />
+          Comments
+        </label>
+        <label class="checkbox-label" id="label-comments-own-posts-only" style="margin-left:20px">
+          <input type="checkbox" id="comments-own-posts-only" />
+          Only on my own posts
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="harvest-posts" checked />
+          Posts
+        </label>
+      </fieldset>
+      <label class="checkbox-label">
+        <input type="checkbox" id="skip-media" />
+        Skip media download (faster ZIP, no images)
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="diagnostic-mode" />
+        Diagnostic mode (adds timestamp + row HTML debug fields to ZIP)
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="use-tab-extraction" />
+        Tab-based media extraction (opens each post in a background tab — slower but finds images/video in reels)
+      </label>
+      <label class="media-allowlist-label">
+        Only fetch media for these permalinks (one URL per line; empty = all harvested posts)
+        <textarea id="media-allowlist" rows="4" placeholder="Paste full post or reel URLs (one per line). Leave empty to fetch media for every harvested post."></textarea>
+      </label>
+      <fieldset class="caps-fieldset">
+        <legend>Harvest limits</legend>
+        <p class="hint subtle caps-hint">
+          0 = unlimited for comments/posts (scroll until the feed ends or stabilizes). For images/videos, 0 uses built-in defaults (3000 images, 500 videos).
+        </p>
+        <div class="caps-grid">
+          <label>
+            Max comments
+            <input type="number" id="cap-comments" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+          <label>
+            Max posts
+            <input type="number" id="cap-posts" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+          <label>
+            Max images (media)
+            <input type="number" id="cap-images" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+          <label>
+            Max videos (media)
+            <input type="number" id="cap-videos" min="0" step="1" value="0" inputmode="numeric" />
+          </label>
+        </div>
+      </fieldset>
+      <details class="urls-details">
+        <summary>Activity Log URLs (edit if auto-navigation is wrong)</summary>
+        <label>Comments filter URL <textarea id="url-comments" rows="2"></textarea></label>
+        <label>Posts filter URL <textarea id="url-posts" rows="2"></textarea></label>
+        <button type="button" id="save-urls">Save URLs</button>
+      </details>
+      <button type="button" id="btn-start-wizard" class="primary">Start wizard</button>
+    </section>
+
+    <section id="step-nav-comments" class="step hidden" data-step-num="2">
+      <h2>2. Comments log</h2>
+      <p id="nav-comments-hint" class="hint">Opens your Activity Log with the Comments filter (best-effort URL).</p>
+      <p id="nav-comments-skip-note" class="skip-nav-note hidden">You're already on Activity Log — use the button that matches your filter.</p>
+      <button type="button" id="btn-nav-comments" class="primary">Go to Comments Activity Log</button>
+      <button type="button" id="btn-skip-comments-harvest" class="secondary hidden">Start harvest (already on Comments)</button>
+      <button type="button" id="btn-back-intro" class="secondary">Back</button>
+    </section>
+
+    <section id="step-harvest-comments" class="step hidden" data-step-num="3">
+      <h2>3. Harvest comments</h2>
+      <p class="hint">Scrolls and collects comment permalinks + row text. Use Stop when you have enough (newest-first).</p>
+      <!-- Step 13: progress bar -->
+      <progress id="harvest-comments-progress" max="100" value="0" class="hidden"></progress>
+      <button type="button" id="btn-harvest-comments" class="primary">Start comments harvest</button>
+      <button type="button" id="btn-stop" class="danger" disabled>Stop here</button>
+    </section>
+
+    <section id="step-nav-posts" class="step hidden" data-step-num="4">
+      <h2>4. Posts log</h2>
+      <p id="nav-posts-hint" class="hint">Opens Activity Log with the Posts filter.</p>
+      <p id="nav-posts-skip-note" class="skip-nav-note hidden">You're already on Activity Log — use the button that matches your filter.</p>
+      <button type="button" id="btn-nav-posts" class="primary">Go to Posts Activity Log</button>
+      <button type="button" id="btn-skip-posts-harvest" class="secondary hidden">Start harvest (already on Posts)</button>
+    </section>
+
+    <section id="step-harvest-posts" class="step hidden" data-step-num="5">
+      <h2>5. Harvest posts</h2>
+      <!-- Step 13: progress bar -->
+      <progress id="harvest-posts-progress" max="100" value="0" class="hidden"></progress>
+      <button type="button" id="btn-harvest-posts" class="primary">Start posts harvest</button>
+      <button type="button" id="btn-stop-posts" class="danger" disabled>Stop here</button>
+    </section>
+
+    <section id="step-zip" class="step hidden" data-step-num="6">
+      <h2>6. ZIP</h2>
+      <!-- Step 13: pre-ZIP export summary and skip-media checkbox -->
+      <div id="export-summary" class="export-summary hidden"></div>
+      <progress id="zip-progress" max="100" value="0" class="hidden"></progress>
+      <p class="hint">Media files are fetched now. CDN links expire — save your ZIP within a few hours of harvesting.</p>
+      <button type="button" id="btn-zip" class="primary hidden">Retry download ZIP</button>
+    </section>
+
+    <section id="step-done" class="step hidden" data-step-num="6">
+      <h2>Done</h2>
+      <p class="hint">Check your Downloads folder for the .zip file.</p>
+      <button type="button" id="btn-reset" class="secondary">Start over</button>
+    </section>
+
+    <p id="status" class="status" aria-live="polite"></p>
+
+    <!-- Query string busts extension disk cache after updates (bump when editing JS). -->
+    <script src="activity_log_urls.js?v=2.2.22"></script>
+    <script src="wizard.js?v=2.2.22"></script>
+  </body>
+</html>

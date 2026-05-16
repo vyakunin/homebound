@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+enum ReactionType {
+  REACTION_TYPE_INVALID = 0;
+  REACTION_TYPE_PLUS_ONE = 1;
+  REACTION_TYPE_LIKE = 2;
+  REACTION_TYPE_RETWEET = 3;
+  REACTION_TYPE_OTHER = 4;
+  // Facebook-specific reaction types (Graph API extractor)
+  REACTION_TYPE_LOVE = 5;
+  REACTION_TYPE_HAHA = 6;
+  REACTION_TYPE_WOW = 7;
+  REACTION_TYPE_SAD = 8;
+  REACTION_TYPE_ANGRY = 9;
+  REACTION_TYPE_CARE = 10;
+}
+
+message Reaction {
+  ReactionType type = 1;
+  string user = 2;
+  string user_url = 3;
+}

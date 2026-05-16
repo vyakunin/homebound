@@ -1,0 +1,147 @@
+[
+  {
+    "timestamp": 1495728000,
+    "data": [
+      {"post": "Hello from Facebook! #travel #food"},
+      {"update_timestamp": 1495728000}
+    ],
+    "title": "Vladimir Yakunin updated his status."
+  },
+  {
+    "timestamp": 1500000000,
+    "attachments": [
+      {
+        "data": [
+          {
+            "media": {
+              "uri": "your_facebook_activity/posts/media/Photos_123/photo.jpg",
+              "creation_timestamp": 1500000000,
+              "media_metadata": {"photo_metadata": {"exif_data": []}},
+              "title": "Mobile uploads",
+              "description": "Nice view"
+            }
+          }
+        ]
+      }
+    ],
+    "data": [
+      {"post": "Check out this photo!"},
+      {"update_timestamp": 1500000000}
+    ],
+    "title": "Vladimir Yakunin added a new photo."
+  },
+  {
+    "timestamp": 1510000000,
+    "attachments": [
+      {
+        "data": [
+          {
+            "external_context": {
+              "url": "https://example.com/article"
+            }
+          }
+        ]
+      }
+    ],
+    "data": [
+      {"post": "Interesting article"},
+      {"update_timestamp": 1510000000}
+    ],
+    "title": "Vladimir Yakunin shared a link."
+  },
+  {
+    "timestamp": 1520000000,
+    "attachments": [
+      {
+        "data": [
+          {
+            "place": {
+              "name": "San Francisco, CA",
+              "coordinate": {
+                "latitude": 37.7749,
+                "longitude": -122.4194
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "data": [
+      {"post": "At a conference in SF"},
+      {}
+    ],
+    "title": "Vladimir Yakunin updated his status."
+  },
+  {
+    "timestamp": 1530000000,
+    "data": [
+      {"post": "\u00d0\u009f\u00d1\u0080\u00d0\u00b8\u00d0\u00b2\u00d0\u00b5\u00d1\u0082 \u00d0\u00b8\u00d0\u00b7 \u00d0\u009c\u00d0\u00be\u00d1\u0081\u00d0\u00ba\u00d0\u00b2\u00d1\u008b!"},
+      {}
+    ],
+    "title": "Vladimir Yakunin updated his status."
+  },
+  {
+    "timestamp": 1540000000,
+    "data": [
+      {"post": "Old memory post"},
+      {}
+    ],
+    "title": "Vladimir Yakunin shared a memory."
+  },
+  {
+    "timestamp": 1550000000,
+    "attachments": [
+      {
+        "data": [
+          {
+            "for_sale_item": {
+              "title": "Used bike",
+              "price": "$100"
+            }
+          }
+        ]
+      }
+    ],
+    "data": [
+      {}
+    ],
+  "title": "Vladimir Yakunin shared a product.",
+  "data": [{"post": "Selling my old bike, great condition."}]
+},
+  {
+    "timestamp": 1560000000,
+    "tags": [
+      {"name": "Jane Doe"},
+      {"name": "John Smith"}
+    ],
+    "data": [
+      {"post": "With friends at the park"},
+      {}
+    ],
+    "title": "Vladimir Yakunin was with Jane Doe and John Smith."
+  },
+  {
+    "timestamp": 1570000000,
+    "data": [
+      {"post": "Great article, thanks for sharing!"},
+      {}
+    ],
+    "title": "Vladimir Yakunin commented on Jane Doe's post."
+  },
+  {
+    "timestamp": 1580000000,
+    "data": [
+      {"post": "Totally agree with you!"},
+      {}
+    ],
+    "title": "Vladimir Yakunin replied to John Smith's comment."
+  },
+  {
+    "timestamp": 1590000000,
+    "data": [
+      {"post": "Commented on a public post"},
+      {}
+    ],
+    "title": "Vladimir Yakunin commented on a post."
+  }
+]

@@ -1,0 +1,31 @@
+# Bazel
+bazel-*
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+site/
+.env
+
+# Large local data (not committed to repo)
+output/
+media/
+
+# Symlinks to ~/.cursor/shared_rules (machine-local); project rules stay tracked below
+.cursor/rules/general_*.mdc
+.cursor/rules/rules_management.mdc
+
+# Generated merged rules (AGENTS.md + .mdc) from tools/run_claude.py
+CLAUDE.md
+
+# Sync base for three-way diff (sync_rules.py)
+.sync_base/
+
+# Node test deps for the FB Activity Log extension (run outside Bazel)
+tools/fb_activity_log_extension/node_modules/
+tools/fb_activity_log_extension/package-lock.json
+
+# Local Claude Code state (per-checkout settings, skills, hooks)
+.claude/

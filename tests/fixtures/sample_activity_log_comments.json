@@ -1,0 +1,56 @@
+{
+  "phase": "comments",
+  "mode": "quick",
+  "collectedAt": "2026-04-04T22:26:05.315Z",
+  "stoppedBecause": "maxRounds",
+  "stoppedEarly": false,
+  "rounds": 18,
+  "count": 5,
+  "commentsWithText": [
+    {
+      "commentId": "100001111111",
+      "replyCommentId": null,
+      "fbId": "100001111111",
+      "url": "https://www.facebook.com/vyakunin/posts/17000000001?comment_id=100001111111",
+      "timestamp": { "utime": 1700001000, "iso": null, "rawText": null },
+      "text": "commented on own post.This is my own comment on my post.Public3:30\u202fAMView"
+    },
+    {
+      "commentId": "200002222222",
+      "replyCommentId": "100001111111",
+      "fbId": "200002222222",
+      "url": "https://www.facebook.com/vyakunin/posts/17000000001?comment_id=100001111111&reply_comment_id=200002222222",
+      "timestamp": { "utime": 1700002000, "iso": null, "rawText": null },
+      "text": "replied to own comment.This is a reply to my own comment.Public3:45\u202fAMView"
+    },
+    {
+      "commentId": "300003333333",
+      "replyCommentId": null,
+      "fbId": "300003333333",
+      "url": "https://www.facebook.com/theberlinermag/posts/pfbid02KKNjABctfvzYPwftsjTrAF2r5?comment_id=300003333333",
+      "timestamp": { "utime": null, "iso": null, "rawText": null },
+      "text": "commented on .Some comment on someone else's post that should be skipped.Public5:00\u202fPMView"
+    },
+    {
+      "commentId": "400004444444",
+      "replyCommentId": null,
+      "fbId": "400004444444",
+      "url": "https://www.facebook.com/vyakunin/posts/12345678901234567?comment_id=400004444444",
+      "timestamp": { "utime": 1690001000, "iso": null, "rawText": null },
+      "text": "commented on own photo.Great fundraiser result!Custom10:30\u202fPMView"
+    },
+    {
+      "commentId": "500005555555",
+      "replyCommentId": null,
+      "fbId": null,
+      "url": "https://www.facebook.com/photo/?fbid=98765432101234567&comment_id=500005555555",
+      "timestamp": { "utime": null, "iso": null, "rawText": "2 days ago" },
+      "text": "commented on own photo.Beautiful shot!Public11:20\u202fPMView"
+    }
+  ],
+  "commentsWithTextCount": 5,
+  "commentsWithNonEmptyTextCount": 5,
+  "mediaCandidates": [],
+  "mediaCapped": false,
+  "uniqueUrls": []
+}
