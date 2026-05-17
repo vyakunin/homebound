@@ -217,17 +217,49 @@ async function loadUrlFields() {
     comments: d.comments,
     posts: d.posts,
   };
-  const r = await chrome.storage.local.get(['fbCustomUrls']);
+  const r = await chrome.storage.local.get(['fbCustomUrls', 'fbDateFilter']);
   document.getElementById('url-comments').value = r.fbCustomUrls?.comments || defaults.comments;
   document.getElementById('url-posts').value = r.fbCustomUrls?.posts || defaults.posts;
+  // Restore year/month so the filter survives across wizard reloads. Empty
+  // values render as blank inputs (= no filter).
+  const yi = document.getElementById('filter-year');
+  const mi = document.getElementById('filter-month');
+  if (yi) yi.value = r.fbDateFilter?.year ? String(r.fbDateFilter.year) : '';
+  if (mi) mi.value = r.fbDateFilter?.month ? String(r.fbDateFilter.month) : '';
+}
+
+// Append year/month query params to an Activity Log URL when the user has
+// set the date filter. Keeps the existing params intact (uses URLSearchParams).
+// Returns the URL unchanged when year+month aren't both set — a partial date
+// filter is meaningless to FB so we treat it as "no filter".
+function applyDateFilter(url, year, month) {
+  if (!year || !month) return url;
+  const y = parseInt(String(year), 10);
+  const m = parseInt(String(month), 10);
+  if (!Number.isFinite(y) || y < 2004 || y > 2099) return url;
+  if (!Number.isFinite(m) || m < 1 || m > 12) return url;
+  try {
+    const u = new URL(url, 'https://www.facebook.com/');
+    u.searchParams.set('year', String(y));
+    u.searchParams.set('month', String(m));
+    return u.toString();
+  } catch (_) {
+    // Fall back to naive concat if URL parsing fails for any reason.
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}year=${y}&month=${m}`;
+  }
 }
 
 async function getNavUrls() {
   const d = defaultActivityLogUrls();
-  const r = await chrome.storage.local.get(['fbCustomUrls']);
+  const r = await chrome.storage.local.get(['fbCustomUrls', 'fbDateFilter']);
+  const baseComments = (r.fbCustomUrls?.comments || d.comments).trim();
+  const basePosts = (r.fbCustomUrls?.posts || d.posts).trim();
+  const year = r.fbDateFilter?.year;
+  const month = r.fbDateFilter?.month;
   return {
-    comments: (r.fbCustomUrls?.comments || d.comments).trim(),
-    posts: (r.fbCustomUrls?.posts || d.posts).trim(),
+    comments: applyDateFilter(baseComments, year, month),
+    posts: applyDateFilter(basePosts, year, month),
   };
 }
 
@@ -239,6 +271,20 @@ async function saveUrlFields() {
     },
   });
   setStatus('URLs saved.');
+}
+
+// Auto-persist the date filter on every keystroke so the user doesn't need
+// to click a separate Save button. The inputs live in their own <details>
+// block and a "remember to click Save" UX would be missed by everyone.
+async function saveDateFilterFromInputs() {
+  const yearRaw = document.getElementById('filter-year')?.value || '';
+  const monthRaw = document.getElementById('filter-month')?.value || '';
+  await chrome.storage.local.set({
+    fbDateFilter: {
+      year: yearRaw ? parseInt(yearRaw, 10) : null,
+      month: monthRaw ? parseInt(monthRaw, 10) : null,
+    },
+  });
 }
 
 async function getActiveTab() {
@@ -694,6 +740,15 @@ function bindUi() {
     saveUrlFields().catch((e) => setStatus(String(e), true));
   });
 
+  for (const id of ['filter-year', 'filter-month']) {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', () => {
+        saveDateFilterFromInputs().catch((e) => setStatus(String(e), true));
+      });
+    }
+  }
+
   document.getElementById('btn-start-wizard').addEventListener('click', () => {
     const mode = getHarvestMode();
     if (!mode.comments && !mode.posts) {
@@ -855,3 +910,9 @@ document.addEventListener('DOMContentLoaded', () => {
     syncOwnPostsVisibility();
   }
 });
+
+// Pure-function exports for Node-side unit tests. Side-effect-free; safe to
+// import in jsdom-less environments.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { applyDateFilter };
+}

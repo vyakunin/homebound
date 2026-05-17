@@ -101,6 +101,14 @@
         <label>Posts filter URL <textarea id="url-posts" rows="2"></textarea></label>
         <button type="button" id="save-urls">Save URLs</button>
       </details>
+      <details class="date-filter-details">
+        <summary>Date filter (one month at a time — bounds memory, lets you resume across sessions)</summary>
+        <p class="hint">When set, the wizard appends <code>&amp;year=YYYY&amp;month=MM</code> to both URLs above. Leave blank to scrape the unfiltered feed (memory-heavy on large archives).</p>
+        <div class="caps-grid">
+          <label>Year <input type="number" id="filter-year" min="2004" max="2099" step="1" inputmode="numeric" placeholder="e.g. 2019" /></label>
+          <label>Month (1-12) <input type="number" id="filter-month" min="1" max="12" step="1" inputmode="numeric" placeholder="e.g. 10" /></label>
+        </div>
+      </details>
       <button type="button" id="btn-start-wizard" class="primary">Start wizard</button>
     </section>
 
@@ -157,7 +165,7 @@
     <p id="status" class="status" aria-live="polite"></p>
 
     <!-- Query string busts extension disk cache after updates (bump when editing JS). -->
-    <script src="activity_log_urls.js?v=2.8.8"></script>
-    <script src="wizard.js?v=2.8.8"></script>
+    <script src="activity_log_urls.js?v=2.8.9"></script>
+    <script src="wizard.js?v=2.8.9"></script>
   </body>
 </html>
