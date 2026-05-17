@@ -135,12 +135,22 @@ def _prompt_hash(question: str) -> str:
     return hashlib.sha256(_normalize_question(question).encode("utf-8")).hexdigest()
 
 
-def _context_hash(hits: Iterable[BotHit]) -> str:
-    """Hash over the sorted cited-slug list. Two retrievals that yield
-    the same source pool (regardless of ranking order) share a cache
-    entry. Empty hits → fixed sentinel so cold answers still cache."""
+def _persona_hash(persona_text: str) -> str:
+    """Short SHA-256 prefix of the persona file. Folded into the
+    context_hash so editing the persona file naturally invalidates
+    every cached answer — no migration, no manual TRUNCATE."""
+    return hashlib.sha256(persona_text.encode("utf-8")).hexdigest()[:16]
+
+
+def _context_hash(hits: Iterable[BotHit], persona_text: str) -> str:
+    """Hash over (persona-content, sorted cited-slug list). Two
+    retrievals with the same persona AND the same source pool share
+    a cache entry. Empty hits → fixed sentinel so cold answers still
+    cache. Persona edits change the hash → stale rows can't match new
+    lookups → bot re-asks the LLM next time."""
     slugs = sorted(h.slug for h in hits)
-    payload = "|".join(slugs) if slugs else "__no_context__"
+    slug_payload = "|".join(slugs) if slugs else "__no_context__"
+    payload = f"{_persona_hash(persona_text)}|{slug_payload}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -292,8 +302,11 @@ def answer(
         logger.warning("bot retrieval failed (continuing cold): %s", e)
         hits = []
 
+    # Load persona once per request (cheap, ~22KB read) so we can fold
+    # its hash into context_hash. Reused for the system block below.
+    persona = _persona_text()
     p_hash = _prompt_hash(question)
-    c_hash = _context_hash(hits)
+    c_hash = _context_hash(hits, persona)
     cached = _cache_lookup(p_hash, c_hash, requested_model=model)
     if cached is not None:
         # Reconstitute titles from the hits we just retrieved (sources
@@ -313,7 +326,6 @@ def answer(
             cache_hit=True,
         )
 
-    persona = _persona_text()
     user_msg = _build_user_message(question, hits)
 
     t0 = time.monotonic()
