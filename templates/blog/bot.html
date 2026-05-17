@@ -24,6 +24,15 @@
   .bot-result__sources ul { margin: 0; padding-left: 1.2rem; }
   .bot-error { margin-top: 1rem; padding: 0.75rem 1rem; background: #fff4f4; border-left: 3px solid #d62828; border-radius: 0 6px 6px 0; color: #8a1a1a; }
   .bot-gate-warning { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: #fff8e0; border-left: 3px solid #d6a228; border-radius: 0 6px 6px 0; color: #6a4e0a; font-size: 0.85rem; }
+  .bot-contact { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border, #ccc); display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  .bot-contact__label { font-size: 0.9rem; color: var(--text-muted, #666); margin-right: 0.5rem; }
+  .bot-contact__btn { padding: 0.4rem 0.9rem; font-size: 0.9rem; border-radius: 6px; text-decoration: none; color: #fff; }
+  .bot-contact__btn--wa { background: #25D366; }
+  .bot-contact__btn--tg { background: #26A5E4; }
+  .bot-contact__btn:hover { filter: brightness(0.95); }
+  .bot-disclaimer { margin-top: 1.5rem; font-size: 0.8rem; color: var(--text-muted, #888); line-height: 1.45; }
+  .bot-cap-handoff { margin-top: 0.75rem; }
+  .bot-cap-handoff a { color: var(--accent, #2868d6); margin-right: 0.75rem; }
 </style>
 {% endblock %}
 
@@ -66,8 +75,33 @@
         <ul id="bot-sources-list"></ul>
       </div>
     </div>
-    <div class="bot-error" id="bot-error" hidden></div>
+    <div class="bot-error" id="bot-error" hidden>
+      <div id="bot-error-message"></div>
+      <div class="bot-cap-handoff" id="bot-cap-handoff" hidden>
+        {% if bot_telegram_url %}<a href="{{ bot_telegram_url }}" target="_blank" rel="noopener">Telegram</a>{% endif %}
+        {% if bot_whatsapp_url %}<a href="{{ bot_whatsapp_url }}" target="_blank" rel="noopener">WhatsApp</a>{% endif %}
+      </div>
+    </div>
   {% endif %}
+
+  {% if bot_telegram_url or bot_whatsapp_url %}
+    <div class="bot-contact">
+      <span class="bot-contact__label">Or ask me directly:</span>
+      {% if bot_telegram_url %}
+        <a class="bot-contact__btn bot-contact__btn--tg" href="{{ bot_telegram_url }}" target="_blank" rel="noopener">Telegram</a>
+      {% endif %}
+      {% if bot_whatsapp_url %}
+        <a class="bot-contact__btn bot-contact__btn--wa" href="{{ bot_whatsapp_url }}" target="_blank" rel="noopener">WhatsApp</a>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  <div class="bot-disclaimer">
+    This is an LLM voiced after Vladimir Yakunin's public blog. Not his official voice —
+    any resemblance to his real-time views is intentional but not guaranteed. He's not
+    responsible for what it says. The bot only sees public posts; for everything else,
+    ask him directly via the buttons above.
+  </div>
 </div>
 {% endblock %}
 
@@ -113,7 +147,13 @@
       var body = await resp.json().catch(function() { return {}; });
 
       if (!resp.ok) {
-        errorEl.textContent = body.message || ('Error ' + resp.status);
+        document.getElementById('bot-error-message').textContent =
+          body.message || ('Error ' + resp.status);
+        // For 429s the API includes WhatsApp/Telegram URLs; surface the
+        // hidden cap-handoff anchors only when they're populated. The
+        // anchors themselves are pre-rendered from server context.
+        var handoff = document.getElementById('bot-cap-handoff');
+        handoff.hidden = resp.status !== 429;
         errorEl.hidden = false;
         return;
       }

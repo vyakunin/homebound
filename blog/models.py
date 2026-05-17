@@ -253,6 +253,44 @@ class BotTranscript(models.Model):
         return f"BotTranscript({self.created_at:%Y-%m-%d %H:%M}, q={snippet!r})"
 
 
+class BotResponseCache(models.Model):
+    """Response-level cache for the public bot. Keyed by the
+    *normalized* question hash + the *context* hash (sorted slug list
+    of retrieved sources). When a request hits an existing row we
+    return the cached answer instead of calling Anthropic.
+
+    Model-aware ordering: if both a Sonnet and a Haiku response exist
+    for the same (prompt_hash, context_hash), the Sonnet one wins. New
+    Sonnet writes evict the corresponding Haiku row to keep the table
+    from accumulating dupes.
+    """
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_hit_at = models.DateTimeField(auto_now=True)
+    hit_count = models.IntegerField(default=1)
+    prompt_hash = models.CharField(max_length=64, db_index=True)
+    context_hash = models.CharField(max_length=64, db_index=True)
+    model = models.CharField(max_length=64)
+    question = models.TextField()
+    answer = models.TextField()
+    cited_slugs = models.JSONField(default=list)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['prompt_hash', 'context_hash', 'model'],
+                name='botcache_prompt_ctx_model',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['prompt_hash', 'context_hash'],
+                         name='botcache_lookup'),
+        ]
+
+    def __str__(self):
+        return f"BotResponseCache({self.model}, hits={self.hit_count})"
+
+
 class ProfileLink(models.Model):
     """Maps a display name (as it appears in post/comment text) to a Facebook profile URL."""
     display_name = models.CharField(max_length=300, unique=True)

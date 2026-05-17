@@ -45,9 +45,9 @@ def _make_private_post(slug, title, text):
     )
 
 
-def _fake_anthropic_response(text="Here's an answer.", input_tokens=900, output_tokens=80, cache_read=400):
+def _fake_anthropic_response(text="Here's an answer.", input_tokens=900, output_tokens=80, cache_read=400, model="claude-sonnet-4-6"):
     return SimpleNamespace(
-        model="claude-sonnet-4-6",
+        model=model,
         content=[SimpleNamespace(text=text, type="text")],
         usage=SimpleNamespace(
             input_tokens=input_tokens,
@@ -65,7 +65,12 @@ class _FakeAnthropic:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return _fake_anthropic_response(text=self.response_text)
+        # Echo the request's model in the response so cache writes
+        # match the requested tier (real Anthropic does this too —
+        # response.model includes the resolved snapshot id, but the
+        # prefix matches what was asked for).
+        requested_model = kwargs.get("model", "claude-sonnet-4-6")
+        return _fake_anthropic_response(text=self.response_text, model=requested_model)
 
 
 # ── Gate (?bot=1) ─────────────────────────────────────────────────────
@@ -217,7 +222,8 @@ def test_bot_api_persona_block_is_cache_controlled(monkeypatch):
     )
 
     call = fake.calls[0]
-    assert call["model"] == "claude-sonnet-4-6"
+    # Don't pin a specific model — test is about cache_control wiring.
+    assert call["model"].startswith("claude-")
     system_blocks = call["system"]
     assert isinstance(system_blocks, list)
     assert system_blocks[0]["cache_control"] == {"type": "ephemeral"}
@@ -227,7 +233,7 @@ def test_bot_api_persona_block_is_cache_controlled(monkeypatch):
 
 
 @pytest.mark.django_db
-@override_settings(BOT_PER_IP_RATE_LIMIT_PER_HOUR=2)
+@override_settings(BOT_PER_IP_RATE_LIMIT_PER_DAY=2)
 def test_bot_api_per_ip_throttle(monkeypatch):
     from blog import bot as bot_module
 
@@ -236,24 +242,32 @@ def test_bot_api_per_ip_throttle(monkeypatch):
     _make_public_post("p1", "t", "body")
 
     client = Client()
-    for _ in range(2):
+    for i in range(2):
+        # Use different questions so cache doesn't short-circuit the
+        # throttle assertion (cache hits don't count against the limit
+        # because they don't go through Anthropic — but they DO log a
+        # transcript, so the limit still applies).
         r = client.post(
             "/api/bot/ask/?bot=1",
-            data=json.dumps({"question": "q"}),
+            data=json.dumps({"question": f"q{i}"}),
             content_type="application/json",
         )
         assert r.status_code == 200
     r = client.post(
         "/api/bot/ask/?bot=1",
-        data=json.dumps({"question": "q"}),
+        data=json.dumps({"question": "q-overflow"}),
         content_type="application/json",
     )
     assert r.status_code == 429
     assert r.json()["error"] == "ip_rate_limited"
+    # Cap-exhausted handoff URLs come back in the body
+    body = r.json()
+    assert "whatsapp_url" in body
+    assert "telegram_url" in body
 
 
 @pytest.mark.django_db
-@override_settings(BOT_SITE_RATE_LIMIT_PER_HOUR=1, BOT_PER_IP_RATE_LIMIT_PER_HOUR=10)
+@override_settings(BOT_SITE_RATE_LIMIT_PER_DAY=1, BOT_PER_IP_RATE_LIMIT_PER_DAY=10)
 def test_bot_api_site_wide_throttle(monkeypatch):
     """Site-wide cap fires before per-IP. Visitors from different IPs
     share the same bucket; one over the limit and everyone's blocked."""
@@ -301,6 +315,115 @@ def test_bot_api_logs_only_hashed_ip(monkeypatch):
     assert t.ip_hash and len(t.ip_hash) == 64
     assert "203.0.113.42" not in t.ip_hash
     assert "203.0.113.42" not in t.question
+
+
+# ── Sonnet tier + response cache ──────────────────────────────────────
+
+
+@pytest.mark.django_db
+@override_settings(
+    BOT_SONNET_PER_IP_PER_DAY=1, BOT_SONNET_MIN_WORDS=4,
+    BOT_DEFAULT_MODEL="claude-haiku-4-5", BOT_PREMIUM_MODEL="claude-sonnet-4-6",
+)
+def test_sonnet_tier_first_long_question_gets_sonnet(monkeypatch):
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    fake = _FakeAnthropic()
+    monkeypatch.setattr(bot_module, "Anthropic", lambda **kw: fake)
+    _make_public_post("p1", "t", "body")
+
+    # 5 words → eligible for Sonnet
+    Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "what do you think about A"}),
+        content_type="application/json",
+    )
+    assert fake.calls[-1]["model"] == "claude-sonnet-4-6"
+
+    # Second long question from same IP → quota used, fall back to Haiku
+    Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "what do you think about B"}),
+        content_type="application/json",
+    )
+    assert fake.calls[-1]["model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.django_db
+@override_settings(BOT_SONNET_MIN_WORDS=6)
+def test_sonnet_tier_short_questions_stay_on_haiku(monkeypatch):
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    fake = _FakeAnthropic()
+    monkeypatch.setattr(bot_module, "Anthropic", lambda **kw: fake)
+    _make_public_post("p1", "t", "body")
+
+    Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "чей крым?"}),
+        content_type="application/json",
+    )
+    # Only 2 words → below threshold → Haiku
+    assert fake.calls[-1]["model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.django_db
+def test_response_cache_hits_skip_anthropic(monkeypatch):
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    fake = _FakeAnthropic()
+    monkeypatch.setattr(bot_module, "Anthropic", lambda **kw: fake)
+    _make_public_post("p1", "t", "body")
+
+    # First call → Anthropic + cache write
+    r1 = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "same question"}),
+        content_type="application/json",
+    )
+    assert r1.status_code == 200
+    assert len(fake.calls) == 1
+
+    # Second call (same question, same corpus) → cache hit, no Anthropic
+    r2 = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "same question"}),
+        content_type="application/json",
+    )
+    assert r2.status_code == 200
+    assert len(fake.calls) == 1, "second identical question should hit cache"
+
+
+@pytest.mark.django_db
+@override_settings(BOT_PREMIUM_MODEL="claude-sonnet-4-6")
+def test_response_cache_sonnet_evicts_haiku(monkeypatch):
+    """If a question lands a Haiku response, then later a Sonnet
+    response for the same prompt+context, the Haiku row gets removed
+    so we don't keep duplicates."""
+    from blog import bot as bot_module
+    from blog.models import BotResponseCache
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    fake = _FakeAnthropic()
+    monkeypatch.setattr(bot_module, "Anthropic", lambda **kw: fake)
+    _make_public_post("p1", "t", "body")
+
+    # Haiku call first
+    bot_module.answer("how does this work", model="claude-haiku-4-5")
+    assert BotResponseCache.objects.filter(model="claude-haiku-4-5").count() == 1
+
+    # Sonnet call with the SAME (prompt, context) — must evict Haiku
+    fake.calls.clear()
+    # The _FakeAnthropic always returns the same model in its response,
+    # so we force the cache row's stored model via the model= kwarg
+    # routing. The fake's resp.model is hardcoded to claude-sonnet-4-6,
+    # so the cache row will be written as Sonnet.
+    bot_module.answer("how does this work", model="claude-sonnet-4-6")
+    assert BotResponseCache.objects.filter(model="claude-sonnet-4-6").count() == 1
+    assert BotResponseCache.objects.filter(model="claude-haiku-4-5").count() == 0
 
 
 if __name__ == "__main__":  # pragma: no cover

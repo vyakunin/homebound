@@ -141,11 +141,33 @@ POSTS_PER_PAGE = 20
 # and a small "Ask Vladimir" footer link appears.
 BOT_PUBLIC = os.environ.get('BOT_PUBLIC', 'False') == 'True'
 
-# Rate limits (Django-layer; nginx is the hard limit). Per-IP is soft —
-# 30 questions/hour/visitor — meant to dissuade scraping while allowing
-# a real conversation. The site-wide cap is the cost ceiling.
-BOT_PER_IP_RATE_LIMIT_PER_HOUR = int(os.environ.get('BOT_PER_IP_RATE_LIMIT_PER_HOUR', '30'))
-BOT_SITE_RATE_LIMIT_PER_HOUR = int(os.environ.get('BOT_SITE_RATE_LIMIT_PER_HOUR', '500'))
+# Rate limits (Django-layer; nginx is the hard limit). DAILY windows —
+# the bot is a personal-blog widget, not a production service; daily
+# caps map cleanly to the "toy LLM budget" framing visitors see when
+# the cap is hit.
+#
+# Calibrated for ~$50/mo at Haiku 4.5 pricing measured against the
+# v2 sample dump ($0.006/Q without persona caching — our 6KB persona
+# is below Haiku's 4096-token minimum cacheable prefix). 270/day ×
+# 30 × $0.006 ≈ $48/mo. The response-cache layer should drop this
+# further when popular questions repeat.
+BOT_PER_IP_RATE_LIMIT_PER_DAY = int(os.environ.get('BOT_PER_IP_RATE_LIMIT_PER_DAY', '30'))
+BOT_SITE_RATE_LIMIT_PER_DAY = int(os.environ.get('BOT_SITE_RATE_LIMIT_PER_DAY', '270'))
+
+# Tiered model selection. Default = Haiku 4.5 for cost; allow one
+# Sonnet 4.6 call per IP per day, only if the question is non-trivial
+# (>= BOT_SONNET_MIN_WORDS). Trivial questions ("чей крым?") stay on
+# Haiku regardless — Sonnet doesn't add much for one-liners.
+BOT_DEFAULT_MODEL = os.environ.get('BOT_DEFAULT_MODEL', 'claude-haiku-4-5')
+BOT_PREMIUM_MODEL = os.environ.get('BOT_PREMIUM_MODEL', 'claude-sonnet-4-6')
+BOT_SONNET_PER_IP_PER_DAY = int(os.environ.get('BOT_SONNET_PER_IP_PER_DAY', '1'))
+BOT_SONNET_MIN_WORDS = int(os.environ.get('BOT_SONNET_MIN_WORDS', '6'))
+
+# Public contact handles for the cap-exhausted handoff message and the
+# widget's footer DM buttons. Read from env so they can be rotated /
+# disabled without a code change.
+BOT_CONTACT_WHATSAPP_URL = os.environ.get('BOT_CONTACT_WHATSAPP_URL', 'https://wa.me/16509655983')
+BOT_CONTACT_TELEGRAM_URL = os.environ.get('BOT_CONTACT_TELEGRAM_URL', 'https://t.me/vyakunin')
 
 # Optional analytics snippet rendered just before </head> on every page.
 # Set to the full <script>…</script> for GoatCounter / Plausible / etc.

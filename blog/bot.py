@@ -1,80 +1,66 @@
-"""Public bot service: persona + retrieval + Anthropic call.
+"""Public bot service: persona + retrieval + Anthropic call + cache.
 
-One-shot Q&A. No session state; each visitor question carries enough
-context (the question itself + retrieved posts) to answer in isolation.
-Multi-turn is deferred — too easy to leak history across visitors
-otherwise.
+One-shot Q&A. No session state.
 
-The persona file lives in homebound-platform (private repo) and is
-mounted into the prod container at ``BOT_PERSONA_PATH``. Local dev
-should point that env var at
-``~/cursor_projects/homebound-platform/personas/bot_persona_v1.md``.
-A baked-in minimal fallback persona lets CI tests run without the file.
+**Model tiering.** Default is Haiku 4.5 (`BOT_DEFAULT_MODEL`). Each IP
+gets one free Sonnet 4.6 (`BOT_PREMIUM_MODEL`) call per day, gated by
+``BOT_SONNET_MIN_WORDS`` (trivial questions stay on Haiku — Sonnet
+doesn't add much for one-liners).
 
-Prompt caching: the persona text is a stable ~6 KB prefix shared by
-every visitor request. We wrap it in a ``cache_control: ephemeral``
-system block — the first call writes the cache (~1.25× cost), every
-subsequent call within 5 minutes reads it (~0.1× cost). On a busy bot
-the second-and-onward calls pay roughly $0.003 each in input tokens
-instead of $0.018.
+**Response cache.** Before calling Anthropic we look up
+``(prompt_hash, context_hash, model)``. If the same prompt+context has
+already been answered by *any* model, we prefer the Sonnet response
+(superior wins). On Sonnet write we evict the Haiku row for the same
+key so we don't keep both.
+
+**Persona file.** Loaded from ``BOT_PERSONA_PATH`` (defaults to
+``/etc/homebound/bot_persona.md``). The file is loaded fresh on each
+call so a hot-deploy of the persona doesn't require a restart.
+
+**Prompt caching.** The persona system block gets ``cache_control:
+ephemeral`` so the first call writes the cache (~1.25× cost), every
+subsequent call within 5 minutes reads it (~0.1× cost).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from anthropic import Anthropic, APIError
+from django.conf import settings
+from django.db import transaction
 
 from blog.bot_retrieval import BotHit, retrieve
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = os.environ.get("HOMEBOUND_PUBLICBOT_MODEL", "claude-sonnet-4-6")
 DEFAULT_MAX_TOKENS = 1024
-DEFAULT_TOP_K = 6
+DEFAULT_TOP_K = 10
 
-# Last-resort persona for tests / when the mounted file is missing.
-# Tight enough that the bot can still answer reasonably; the real file
-# is what ships to prod.
 FALLBACK_PERSONA = """\
-You are a chatbot speaking as Vladimir Yakunin, who writes a public
-multilingual personal blog at vyakunin.org (Russian and English).
+You are a chatbot speaking AS Vladimir Yakunin (first-person),
+answering visitor questions from his public multilingual blog.
 
-Answer the visitor's question using ONLY what is supplied in the
-retrieved past posts below. Do NOT invent facts that aren't in the
-posts. If the question can't be answered from the supplied posts,
-say so plainly and suggest a related topic the visitor could search
-for.
-
-Match the language of the visitor's question. Keep answers short
-(2-4 paragraphs max). Don't claim certainty about Vladimir's current
-opinions when only old posts are available — say so explicitly.
-
-If asked about people other than Vladimir, family details, addresses,
-employer specifics, finances, or anything not in the public posts,
-politely decline. Never speculate, never give medical / legal /
-financial advice in his voice.
+Match the visitor's language. Be concise. If you don't have anything
+in the corpus relevant, say so plainly and suggest a related topic.
+Refuse generic LLM-style queries that aren't about Vladimir's life
+or views.
 """
 
 
 class BotUnavailableError(RuntimeError):
-    """Surface to the view as a 503. Used for missing key / Anthropic
-    errors / persona-load failures we want to acknowledge but not
-    swallow."""
+    """Surface to the view as a 503."""
 
 
 @dataclass(frozen=True, slots=True)
 class BotAnswer:
-    """The result of one question. ``cited_slugs`` is the source pool —
-    every post we showed Claude — not just the ones Claude referenced.
-    Citing the full pool lets the visitor verify the answer is actually
-    grounded in the corpus."""
-
     answer: str
     cited_slugs: list[str]
     cited_titles: list[str]
@@ -83,6 +69,7 @@ class BotAnswer:
     output_tokens: int
     cache_read_input_tokens: int
     latency_ms: int
+    cache_hit: bool = False
 
 
 # ── Auth ──────────────────────────────────────────────────────────────
@@ -116,9 +103,6 @@ def is_available() -> bool:
 
 
 def _persona_text() -> str:
-    """Load the persona file (env var > home dir > fallback). Loaded
-    fresh on each call so a hot-deploy of the persona doesn't require
-    restarting gunicorn. Cheap — 6 KB read."""
     candidates = [
         os.environ.get("BOT_PERSONA_PATH"),
         "/etc/homebound/bot_persona.md",
@@ -135,14 +119,128 @@ def _persona_text() -> str:
     return FALLBACK_PERSONA
 
 
+# ── Hashing for the response cache ────────────────────────────────────
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_question(q: str) -> str:
+    """Collapse whitespace + lowercase. Same question with different
+    capitalization / spacing should hit the cache."""
+    return _WHITESPACE_RE.sub(" ", (q or "").strip().lower())
+
+
+def _prompt_hash(question: str) -> str:
+    return hashlib.sha256(_normalize_question(question).encode("utf-8")).hexdigest()
+
+
+def _context_hash(hits: Iterable[BotHit]) -> str:
+    """Hash over the sorted cited-slug list. Two retrievals that yield
+    the same source pool (regardless of ranking order) share a cache
+    entry. Empty hits → fixed sentinel so cold answers still cache."""
+    slugs = sorted(h.slug for h in hits)
+    payload = "|".join(slugs) if slugs else "__no_context__"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# ── Cache lookup / write ──────────────────────────────────────────────
+
+
+def _cache_lookup(
+    prompt_hash: str,
+    context_hash: str,
+    *,
+    requested_model: str,
+) -> BotAnswer | None:
+    """Return the best cached answer for this prompt+context, or None.
+
+    Rules:
+    - If a row for the *premium* model exists → return it (Sonnet wins).
+    - Else if requested_model is the premium model and only a cheaper
+      row exists → return None so the caller fetches the upgrade.
+    - Else (cheap requested, cheap cached) → return the cached cheap.
+
+    Soft-fails if the cache table doesn't exist."""
+    try:
+        from blog.models import BotResponseCache
+
+        premium = getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
+        rows = list(
+            BotResponseCache.objects
+            .filter(prompt_hash=prompt_hash, context_hash=context_hash)
+        )
+        if not rows:
+            return None
+        # Prefer premium if cached. Otherwise, if caller wants premium
+        # and we only have cheap, miss the cache so caller calls premium
+        # (which will evict the cheap row on write).
+        premium_rows = [r for r in rows if r.model == premium]
+        if premium_rows:
+            row = premium_rows[0]
+        elif requested_model == premium:
+            return None
+        else:
+            row = rows[0]
+        BotResponseCache.objects.filter(pk=row.pk).update(
+            hit_count=row.hit_count + 1,
+        )
+        return BotAnswer(
+            answer=row.answer,
+            cited_slugs=list(row.cited_slugs or []),
+            cited_titles=list(row.cited_slugs or []),  # titles re-derived later
+            model=row.model,
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_input_tokens=0,
+            latency_ms=0,
+            cache_hit=True,
+        )
+    except Exception as e:  # noqa: BLE001 — table missing / migration not run
+        logger.info("response cache lookup soft-fail: %s", e)
+        return None
+
+
+def _cache_write(
+    *,
+    prompt_hash: str,
+    context_hash: str,
+    model: str,
+    question: str,
+    answer: str,
+    cited_slugs: list[str],
+) -> None:
+    """Persist the response. Sonnet writes evict any Haiku entry for
+    the same (prompt, context). Soft-fails on missing table."""
+    try:
+        from blog.models import BotResponseCache
+
+        premium = getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
+        with transaction.atomic():
+            BotResponseCache.objects.update_or_create(
+                prompt_hash=prompt_hash,
+                context_hash=context_hash,
+                model=model,
+                defaults={
+                    "question": question,
+                    "answer": answer,
+                    "cited_slugs": cited_slugs,
+                    "hit_count": 1,
+                },
+            )
+            if model == premium:
+                BotResponseCache.objects.filter(
+                    prompt_hash=prompt_hash,
+                    context_hash=context_hash,
+                ).exclude(model=premium).delete()
+    except Exception as e:  # noqa: BLE001
+        logger.info("response cache write soft-fail: %s", e)
+
+
 # ── Prompt assembly ───────────────────────────────────────────────────
 
 
 def _build_user_message(question: str, hits: Iterable[BotHit]) -> str:
-    """Render the visitor's question with retrieved posts as context.
-    Sources go FIRST so the snippets become part of Claude's working
-    context before the question lands; the question is the trailing
-    instruction."""
     parts: list[str] = ["# Past posts that may help you answer\n"]
     hits = list(hits)
     if not hits:
@@ -163,15 +261,18 @@ def _build_user_message(question: str, hits: Iterable[BotHit]) -> str:
 # ── Entry point ───────────────────────────────────────────────────────
 
 
-def answer(question: str, *, top_k: int = DEFAULT_TOP_K,
-           max_tokens: int = DEFAULT_MAX_TOKENS,
-           model: str = DEFAULT_MODEL) -> BotAnswer:
-    """Run the full pipeline: retrieve → build prompt → Anthropic call.
+def answer(
+    question: str,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    model: str | None = None,
+) -> BotAnswer:
+    """Run retrieval → cache → Anthropic. Returns BotAnswer.
 
-    Raises ``BotUnavailableError`` on missing key or Anthropic failure;
-    the view turns that into a 503 with a polite message. Retrieval
-    failures bubble up as the answer body simply citing no sources —
-    not fatal.
+    ``model`` defaults to ``BOT_DEFAULT_MODEL``. Pass the premium model
+    explicitly to override (the view does this based on
+    ``sonnet_eligible``).
     """
     question = (question or "").strip()
     if not question:
@@ -182,12 +283,35 @@ def answer(question: str, *, top_k: int = DEFAULT_TOP_K,
             "Public bot API key missing — write the key to "
             "~/tokens/homebound_publicbot_anthropic_key or set ANTHROPIC_API_KEY."
         )
+    if model is None:
+        model = getattr(settings, "BOT_DEFAULT_MODEL", "claude-haiku-4-5")
 
     try:
         hits = retrieve(question, top_k=top_k)
-    except Exception as e:  # noqa: BLE001 — retrieval is best-effort
+    except Exception as e:  # noqa: BLE001
         logger.warning("bot retrieval failed (continuing cold): %s", e)
         hits = []
+
+    p_hash = _prompt_hash(question)
+    c_hash = _context_hash(hits)
+    cached = _cache_lookup(p_hash, c_hash, requested_model=model)
+    if cached is not None:
+        # Reconstitute titles from the hits we just retrieved (sources
+        # block in the UI uses titles). cited_slugs in the cache is
+        # canonical; titles are best-effort.
+        title_by_slug = {h.slug: h.title for h in hits}
+        titles = [title_by_slug.get(s, s) for s in cached.cited_slugs]
+        return BotAnswer(
+            answer=cached.answer,
+            cited_slugs=cached.cited_slugs,
+            cited_titles=titles,
+            model=cached.model,
+            input_tokens=cached.input_tokens,
+            output_tokens=cached.output_tokens,
+            cache_read_input_tokens=cached.cache_read_input_tokens,
+            latency_ms=cached.latency_ms,
+            cache_hit=True,
+        )
 
     persona = _persona_text()
     user_msg = _build_user_message(question, hits)
@@ -201,9 +325,6 @@ def answer(question: str, *, top_k: int = DEFAULT_TOP_K,
             system=[{
                 "type": "text",
                 "text": persona,
-                # Persona is the stable prefix shared by every visitor
-                # request — caching it brings the per-call input bill
-                # down from ~1500 tokens to ~150 after the first hit.
                 "cache_control": {"type": "ephemeral"},
             }],
             messages=[{"role": "user", "content": user_msg}],
@@ -217,16 +338,27 @@ def answer(question: str, *, top_k: int = DEFAULT_TOP_K,
     input_tokens = getattr(usage, "input_tokens", 0) or 0
     output_tokens = getattr(usage, "output_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    resolved_model = getattr(resp, "model", model)
+
+    _cache_write(
+        prompt_hash=p_hash,
+        context_hash=c_hash,
+        model=resolved_model if "-" in resolved_model else model,
+        question=question,
+        answer=text,
+        cited_slugs=[h.slug for h in hits],
+    )
 
     return BotAnswer(
         answer=text,
         cited_slugs=[h.slug for h in hits],
         cited_titles=[h.title or h.slug for h in hits],
-        model=getattr(resp, "model", model),
+        model=resolved_model,
         input_tokens=int(input_tokens),
         output_tokens=int(output_tokens),
         cache_read_input_tokens=int(cache_read),
         latency_ms=latency_ms,
+        cache_hit=False,
     )
 
 

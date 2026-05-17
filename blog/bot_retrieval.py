@@ -41,11 +41,14 @@ from blog.models import Post, PostVisibility
 
 _log = logging.getLogger(__name__)
 
-# Keep snippets short — the bot's Anthropic call has a tight budget and
-# repeating long post bodies eats most of it.
-SNIPPET_MAX_CHARS = 800
+# Keep snippets moderate. Going much below 500 chars starts losing the
+# "paragraph of context" that lets the model actually quote me; going
+# above ~800 burns budget. 500 is the sweet spot empirically.
+SNIPPET_MAX_CHARS = 500
 # Wider fanout than the MCP — the bot has only one chance to surface
-# the right post, so we trade some prompt cost for recall.
+# the right post, so we trade some prompt cost for recall. Top-K stays
+# at 10 (the magic comes from breadth — drop it and short queries
+# start missing relevant posts).
 FANOUT_PER_HALF = 25
 DEFAULT_TOP_K = 10
 # Cap how many date-anchored posts we splice into the result set;

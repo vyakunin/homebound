@@ -332,6 +332,8 @@ class BotWidgetView(TemplateView):
         ctx = super().get_context_data(**kwargs)
         ctx['bot_available'] = bot_is_available()
         ctx['bot_public'] = getattr(settings, "BOT_PUBLIC", False)
+        ctx['bot_whatsapp_url'] = getattr(settings, "BOT_CONTACT_WHATSAPP_URL", "")
+        ctx['bot_telegram_url'] = getattr(settings, "BOT_CONTACT_TELEGRAM_URL", "")
         return ctx
 
 
@@ -391,22 +393,44 @@ def bot_ask_api(request):
     ip = extract_client_ip(request)
     ip_hash = ip_hash_for(ip)
 
+    # Cap-exhausted handoff message — sent for both per-IP and site-wide
+    # 429s. Visitor gets the user's public DM links instead of nothing.
+    cap_message = (
+        "Мой LLM-бюджет на сегодня кончился. "
+        "Если есть вопрос — напиши мне в Telegram или WhatsApp, ссылки ниже."
+    )
+
     if is_site_rate_limited():
         return JsonResponse(
             {"error": "site_rate_limited",
-             "message": "The bot is busy right now — please try again in a few minutes."},
+             "message": cap_message,
+             "whatsapp_url": getattr(settings, "BOT_CONTACT_WHATSAPP_URL", ""),
+             "telegram_url": getattr(settings, "BOT_CONTACT_TELEGRAM_URL", "")},
             status=429,
         )
     if is_ip_rate_limited(ip_hash):
         return JsonResponse(
             {"error": "ip_rate_limited",
-             "message": "You've asked enough questions for this hour — please try again later."},
+             "message": "Ты на сегодня уже задал свой лимит вопросов. "
+                        "Если что — пиши напрямую, ссылки в виджете.",
+             "whatsapp_url": getattr(settings, "BOT_CONTACT_WHATSAPP_URL", ""),
+             "telegram_url": getattr(settings, "BOT_CONTACT_TELEGRAM_URL", "")},
             status=429,
         )
 
+    # Sonnet-tier eligibility: one premium call per IP per day, only
+    # for non-trivial questions. Trivial / repeated questions stay on
+    # Haiku — Sonnet doesn't add much for one-liners and Haiku handles
+    # the frank Vladimir voice fine.
+    from blog.bot_throttle import sonnet_eligible
+    if sonnet_eligible(ip_hash, question):
+        chosen_model = getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
+    else:
+        chosen_model = getattr(settings, "BOT_DEFAULT_MODEL", "claude-haiku-4-5")
+
     session_token = str(payload.get("session_token", ""))[:64]
     try:
-        result = bot_answer(question)
+        result = bot_answer(question, model=chosen_model)
     except BotUnavailableError as e:
         _log.error("bot_ask_api hard fail: %s", e, exc_info=True)
         BotTranscript.objects.create(
