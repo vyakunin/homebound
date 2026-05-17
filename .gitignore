@@ -29,3 +29,10 @@ tools/fb_activity_log_extension/package-lock.json
 
 # Local Claude Code state (per-checkout settings, skills, hooks)
 .claude/
+
+# Local-only rules and notes: machine-specific deployment paths, container
+# names, image registries, ssh command shapes, ops cheats. Public repo must
+# stay clean of these — canonical deployment docs live in the private
+# homebound-platform repo. See .cursor/rules/public_repo_hygiene.mdc.
+.cursor/rules/*.local.mdc
+*.local.md

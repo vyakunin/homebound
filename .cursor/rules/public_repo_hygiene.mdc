@@ -1,0 +1,46 @@
+---
+description: This is a public AGPL repo. Deployment-specific knowledge — paths, hostnames, container names, image tags, registry URLs, secret file paths, anything tied to a specific operator's infrastructure — does NOT belong in this repo.
+alwaysApply: true
+---
+
+# Public repo hygiene
+
+`homebound` ships under AGPL-3.0 and is intended for open-source enthusiasts running their own deployments. Anything tied to a specific operator's infrastructure stays out of tracked files here.
+
+## What belongs in this repo
+
+- Application code (Django app, extractors, extensions, tests)
+- Generic operational rules (Bazel patterns, testing standards, code style, Chrome memory accounting)
+- Architecture and design docs that describe the system abstractly
+- Sample / example configurations (e.g. `.env.example`, dev `docker-compose.yml` that points at local services)
+
+## What does NOT belong in this repo
+
+- **Hostnames, IPs, domains** of the operator's deployment (their LAN box, public site URL, registrar, DNS provider account ids)
+- **SSH key paths**, sudo passwords, paths under `/Users/<name>/` or `/opt/<stack>/`
+- **Container names** scoped to one stack (`pb_*` etc.) — generic compose service names (`web`, `db`) are fine
+- **Image registry paths** for the operator's private images (e.g. `ghcr.io/<owner>/<repo>:latest`) — except in the `.github/workflows/` that publishes them, where they're required
+- **Cloudflare tunnel ids / account ids / zone ids**, DNS record specifics
+- **Backup file paths**, snapshot timestamps
+- **Token file locations** (`~/tokens/...`), even by reference
+
+## Where deployment knowledge actually lives
+
+1. A **private companion repo** alongside this one, held by the operator. By convention, that repo holds the data-pipeline rules, deployment runbook, host topology, and the "no prod experimentation" rule. Read those BEFORE touching FB/Twitter import logic or anything that could affect prod.
+2. **`.cursor/rules/*.local.mdc`** (gitignored, see `.gitignore`) — machine-local cheat sheets the operator's Claude sessions can rely on without leaking. The kind of thing that goes here: ssh command shapes, SQL patterns for one-off ops, environment-specific networking workarounds, post-image-swap recovery procedures.
+3. **`*.local.md`** (gitignored) — ad-hoc local notes.
+
+## When you (Claude) catch yourself about to leak
+
+If you're about to write a hostname / container name / image URL / specific path into a tracked file, stop and ask:
+
+- "Would a third party who forked this repo and ran their own deployment care about this exact string?" If no, it's leakage — put it in the local cheat sheet instead, or in the private companion repo.
+- "Is this string an example placeholder that helps the reader understand what to put in their own config?" If yes, use `<placeholder>` syntax, not the operator's real values.
+
+## When you (Claude) catch the user about to leak
+
+If the user pastes deployment specifics into a chat that ends up in a commit message or a tracked doc, surface it: "this looks operator-specific — should it go in the private companion repo or the gitignored cheat sheet instead?" Don't quietly include it in the diff.
+
+## Commit messages
+
+Commit messages are public and immutable in git history. Same hygiene rules apply: describe WHAT changed in generic terms; deploy-specific facts ("pulled to homeserver at ip X", "rolled back tag Y") belong in homebound-platform notes or local logs.
