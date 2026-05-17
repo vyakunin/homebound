@@ -104,6 +104,22 @@ _TRAILING_NOTIF_RE = re.compile(r'\s*\d+[smhd]\s*(?:Mark\s+as\s+read)?\s*$', re.
 _LEADING_UNREAD_RE = re.compile(r'^Unread\s*', re.IGNORECASE)
 
 
+def _clean_reshare_commentary(raw: str) -> str:
+    """Strip the FB Activity-Log UI trailer from a ``reshareCommentary`` value.
+
+    The extension's ``extractReshareCommentary`` already strips the
+    "shared a post." action prefix, but leaves the visibility + time-of-day
+    affix glued on (e.g. ``"...текстPublic9:16 AM"``). Strip both that and a
+    bare trailing "View" so the result is purely the user's words. An empty
+    return means the row had no captured commentary.
+    """
+    if not raw:
+        return ''
+    text = _TRAILING_UI_RE.sub('', raw)
+    text = _TRAILING_VIEW_RE.sub('', text)
+    return text.strip()
+
+
 def _clean_text(raw: str) -> str:
     """Strip activity-log action prefix and trailing UI labels from harvested text.
 
@@ -900,11 +916,14 @@ def extract(
             if is_link_share:
                 record.extra['_is_link_share'] = '1'
             post_key_to_source_id[_post_key_from_url(post_key)] = source_id
-            # Store commentary hint from extension v2.4+ (None = field absent = old export)
+            # Store commentary hint from extension v2.4+ (None = field absent = old export).
+            # The extension strips the action prefix but leaves the visibility/time UI
+            # affix glued on — clean that here so downstream checks of "is there a
+            # user comment" don't false-positive on rows that have only metadata left.
             if is_reshare:
                 rc = raw.get('reshareCommentary')
                 if rc is not None:
-                    reshare_commentary_by_source_id[source_id] = str(rc)
+                    reshare_commentary_by_source_id[source_id] = _clean_reshare_commentary(str(rc))
 
         # ---------- Detect own profile ----------
         # Needed before media attachment to reclassify Marketplace/memory posts.
@@ -1216,15 +1235,26 @@ def extract(
                     is_reshare_by_source_id[sid] = False
             elif post_profile and post_profile != own_profile:
                 # User reshared someone else's post; source_url points to the original.
-                # FB copies the original post text into the activity log row —
-                # preserve it as reshared_from.content_text so it shows in a blockquote.
+                # Modern (2024+) FB Activity Log only renders the *user's commentary*
+                # in the row — the original poster's content is NOT inline. The DOM
+                # is three siblings: action header, commentary div, footer. So the
+                # row text (after _clean_text strips prefix + trailer) IS the
+                # commentary. Keep it in content_text and attribute the embed.
+                #
+                # Bare reshares (no commentary) produce an empty cleaned rc here;
+                # the FB embed iframe renders the original card on its own, so we
+                # leave reshared_from.content_text empty in both cases.
+                #
+                # Legacy note: older harvests (pre-2024 DOM) sometimes inlined the
+                # original-post body; those rows end up here with long content_text
+                # that's actually the original. A fresh re-export of those posts
+                # (FB re-renders them in the modern layout today) yields clean data.
                 record.reshared_from = ResharedFrom(
                     url=record.source_url,
                     author=_author_from_url(record.source_url, slug_to_name),
-                    content_text=record.content_text,
+                    content_text='',
                 )
                 record.source_url = ''
-                record.content_text = ''
 
         # ---------- Attach reaction counts ----------
         if reaction_counts:

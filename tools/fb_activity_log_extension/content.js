@@ -75,6 +75,15 @@ let _diagnosticRowSnapshots = []; // capped at 200 rows
 let _diagnosticConsoleLog = []; // structured log entries for export
 const DIAG_ROW_SNAPSHOT_CAP = 200;
 
+// Always-on (no diag flag): per-row outerHTML dumps for the first N detected
+// "shared a post." rows. Used to iterate on extractReshareCommentary against
+// real FB DOM — the current strip-all-anchors heuristic only separates plain
+// commentary from the embedded preview when the preview sits inside an <a>,
+// which empirically holds for ≤1% of harvested rows. Cap is intentionally
+// small so the debug_html/ directory stays under a few MB.
+const _reshareRowDomSamples = []; // [{postKey, html}]
+const RESHARE_DOM_SAMPLE_CAP = 30;
+
 /**
  * Structured logger. In diagnostic mode, accumulates entries for ZIP export.
  * Categories: harvest, enrich, media-dl, diag, error.
@@ -1563,6 +1572,15 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
     let reshareCommentary;
     if (/\bshared\s+a\s+post\b/i.test((row && row.innerText) || '')) {
       reshareCommentary = extractReshareCommentary(row);
+      // Capture the row's full outerHTML for the first RESHARE_DOM_SAMPLE_CAP
+      // reshare rows so we can iterate on extractReshareCommentary against
+      // real DOM samples. Written to debug_html/ at export time.
+      if (_reshareRowDomSamples.length < RESHARE_DOM_SAMPLE_CAP && row) {
+        const html = (row.outerHTML || '').slice(0, 250000);
+        if (html) {
+          _reshareRowDomSamples.push({ postKey, reshareCommentary, html });
+        }
+      }
     }
 
     const prev = postByKey.get(postKey);
@@ -2410,6 +2428,27 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
     const sanitized = key.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 80);
     const blob = new Blob([allHtmlDumps[key]], { type: 'text/html' });
     await saveBlobViaBackground(blob, `${exportDirName}/debug_html/${sanitized}.html`);
+  }
+
+  // Reshare row outerHTML dumps (always-on, first RESHARE_DOM_SAMPLE_CAP rows).
+  // Each file is wrapped in a minimal HTML scaffold so it can be opened
+  // directly in a browser to inspect the DOM. The first ~200 chars of the
+  // accompanying extracted commentary are embedded as a comment for context.
+  for (let i = 0; i < _reshareRowDomSamples.length; i++) {
+    const sample = _reshareRowDomSamples[i];
+    const sanitized = (sample.postKey || `row_${i}`).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 80);
+    const filename = `${exportDirName}/debug_html/reshare_row_${String(i).padStart(2, '0')}_${sanitized}.html`;
+    const commentary = (sample.reshareCommentary || '').slice(0, 300).replace(/-->/g, '-- >');
+    const wrapped =
+      '<!doctype html>\n' +
+      '<html><head><meta charset="utf-8"><title>FB reshare row sample</title></head>\n' +
+      '<body>\n' +
+      `<!-- postKey: ${sample.postKey || '(none)'} -->\n` +
+      `<!-- extracted reshareCommentary (first 300 chars): ${commentary} -->\n` +
+      sample.html + '\n' +
+      '</body></html>\n';
+    const blob = new Blob([wrapped], { type: 'text/html' });
+    await saveBlobViaBackground(blob, filename);
   }
 
   const readme = [

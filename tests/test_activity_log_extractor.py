@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from extractors.activity_log import (
+    _clean_reshare_commentary,
     _clean_text,
     _parse_fb_id_from_url,
     _parse_timestamp,
@@ -162,6 +163,32 @@ class TestCleanText:
         result = _clean_text(raw)
         # Only the action prefix "updated his status." should be stripped
         assert "U.S. news" in result
+
+
+class TestCleanReshareCommentary:
+    """The extension's ``extractReshareCommentary`` strips the action prefix
+    but leaves the visibility + time-of-day UI affix glued on. Cleaning empties
+    metadata-only strings (bare reshares) and preserves real commentary."""
+
+    def test_metadata_only_returns_empty(self):
+        assert _clean_reshare_commentary("Public9:34\u202fPM") == ""
+
+    def test_keeps_real_commentary_intact(self):
+        raw = "\u0421\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u0435, \u043a\u043e\u043d\u0435\u0447\u043d\u043e, \u043d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0435, \u043d\u043e...\n\u0410 \u0447\u0442\u043e \u0436\u0435 \u0441\u043b\u0443\u0447\u0438\u043b\u043e\u0441\u044c?Public9:16\u202fAM"
+        assert _clean_reshare_commentary(raw) == (
+            "\u0421\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u0435, \u043a\u043e\u043d\u0435\u0447\u043d\u043e, \u043d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0435, \u043d\u043e...\n\u0410 \u0447\u0442\u043e \u0436\u0435 \u0441\u043b\u0443\u0447\u0438\u043b\u043e\u0441\u044c?"
+        )
+
+    def test_strips_friends_visibility(self):
+        assert _clean_reshare_commentary("\u041b\u0430\u043f\u0435\u043d\u043a\u043e \u2014 \u0433\u043b\u044b\u0431\u0430Friends11:43\u202fPM") == "\u041b\u0430\u043f\u0435\u043d\u043a\u043e \u2014 \u0433\u043b\u044b\u0431\u0430"
+
+    def test_empty_string_returns_empty(self):
+        assert _clean_reshare_commentary("") == ""
+
+    def test_handles_view_suffix(self):
+        assert _clean_reshare_commentary("Important comment.Public3:21\u202fPMView") == (
+            "Important comment."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +765,64 @@ class TestResharePairLinking:
         records = self._extract_reshare_pair(tmp_path)
         source_ids = {r.source_id for r in records}
         assert "20000000011" not in source_ids
+
+    def test_unpaired_commented_reshare_keeps_commentary_in_content_text(self, tmp_path):
+        """Other-profile reshare with no matching other-profile entry (no
+        pair-link) and a non-empty ``reshareCommentary``: the row text IS the
+        user's commentary and must stay in ``content_text``.
+
+        Modern (2024+) FB Activity Log rows have three siblings — action
+        header (with anchors), commentary div (no anchors), footer — and do
+        NOT inline the embedded preview card. So the row text after
+        ``_clean_text`` IS the user's commentary; the original poster's body
+        is only ever rendered by the FB embed iframe at view time.
+
+        Regression: previously this unpaired path moved the row text into
+        ``reshared_from.content_text``, which mislabeled commentary as the
+        original poster's content and left content_text empty.
+        """
+        commentary = "Сравнение, конечно, некорректное, но...\nА что же случилось?"
+        own_entry = {
+            "fbId": "30000000010",
+            # source_url points at the original poster (FB activity log row links to the
+            # shared post's permalink). Numeric ID so _source_id_for_post returns it.
+            "url": "https://www.facebook.com/slantchev/posts/30000000010",
+            "text": f"shared a post.{commentary}Public9:34 PMView",
+            "reshareCommentary": f"{commentary}Public9:34 PM",
+            "timestamp": {"utime": 1700000000},
+        }
+        # Filler so own_profile detection settles on "vyakunin".
+        filler_posts = [
+            {
+                "fbId": f"3000007000{i}",
+                "url": f"https://www.facebook.com/vyakunin/posts/3000007000{i}",
+                "timestamp": {"utime": 1700000000 + i},
+                "text": f"added a new photo.Filler {i}Public",
+            }
+            for i in range(3)
+        ]
+        posts = {
+            "collectedAt": "2026-05-06T09:34:00.000Z",
+            "postsWithText": filler_posts + [own_entry],
+        }
+        (tmp_path / "test.zip").write_bytes(make_zip(posts))
+        extract(tmp_path / "test.zip", tmp_path / "out", dry_run=False)
+        records = [
+            r for r in read_records(tmp_path / "out" / "posts.binpb")
+            if r.source_id == "30000000010"
+        ]
+        assert len(records) == 1
+        post = records[0]
+        assert "Сравнение, конечно, некорректное" in post.content_text, (
+            f"User commentary must stay in content_text, got: {post.content_text!r}"
+        )
+        assert post.reshared_from is not None
+        assert "slantchev" in post.reshared_from.url
+        assert post.reshared_from.content_text == "", (
+            "reshared_from.content_text must be empty — modern FB Activity Log "
+            "rows do not inline the original poster's body; the FB embed iframe "
+            "renders it at view time"
+        )
 
     def test_reshare_from_real_activity_log_pattern(self, tmp_path):
         """Real Activity Log pattern: both entries have identical text and
