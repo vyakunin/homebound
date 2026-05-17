@@ -237,8 +237,13 @@ class SearchView(_InfiniteScrollMixin, ListView):
 
     def get_queryset(self):
         self.query = self.request.GET.get('q', '').strip()
-        raw_mode = self.request.GET.get('mode', SEARCH_MODE_KEYWORD).strip().lower()
-        self.mode = raw_mode if raw_mode in VALID_SEARCH_MODES else SEARCH_MODE_KEYWORD
+        raw_mode = self.request.GET.get('mode', '').strip().lower()
+        if raw_mode in VALID_SEARCH_MODES:
+            self.mode = raw_mode
+        else:
+            # No explicit ?mode=: prefer semantic when Voyage is wired up,
+            # fall back to keyword in environments without an embeddings key.
+            self.mode = SEARCH_MODE_SEMANTIC if is_available() else SEARCH_MODE_KEYWORD
         # Becomes True only when the user asked for semantic AND we actually
         # served semantic results. Used by the template to surface a "fell
         # back to keyword" banner when the Voyage key is missing.

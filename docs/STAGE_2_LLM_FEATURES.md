@@ -69,6 +69,62 @@ GET /api/search/semantic/?q=that+restaurant+in+2016&limit=10
 → [{post_id, title, snippet, source, created_at, similarity_score}, ...]
 ```
 
+### Production backfill plan (deferred)
+
+The Voyage API key is wired up on homeserver prod (mounted as a Docker
+secret via `/opt/stack/personal_blog/docker-compose.yml`), so the
+Semantic toggle is enabled and `blog.embeddings.is_available()` returns
+True. However, **no Post rows have embeddings yet** — semantic queries
+currently return zero results because `_semantic_queryset` filters on
+`embedding__isnull=False`. The frontend default still falls back
+to keyword search when there's no `?mode=` (search/`views.py`
+auto-picks semantic only when `is_available()`).
+
+**When to run the backfill:** wait until the post-extraction state is
+*stable enough that re-embedding is wasted work*. Specifically:
+
+- **No major extraction bugs in flight.** If a fix lands tomorrow that
+  rewrites `content_text` for a meaningful slice of posts, those rows
+  need re-embedding. Voyage cost is low, but each round still costs
+  human attention. Land big extraction work first, then backfill.
+- **Stable `source_id`s for dedup.** New imports must update existing
+  rows by `source_id` rather than creating duplicates — otherwise the
+  embedding column drifts out of sync with content. Confirm the
+  per-source merge logic (FB extension v2.x, wayback, etc.) is doing
+  field-level updates, not blind inserts.
+- **Migrations applied**, `pgvector` extension loaded (already true on
+  prod as of 2026-05-17), `Post.embedding` column present.
+
+**What to run** (single command, idempotent — only re-embeds rows whose
+`embed_input_for(title, content_text)` hash changed since last run):
+
+```bash
+ssh homeserver.local 'docker exec pb_web python manage.py generate_embeddings'
+# Useful flags:
+#   --limit N    cap to first N rows (smoke test)
+#   --batch 128  Voyage's hard limit; keep default
+#   --rehash     force re-embed every row (after a model upgrade)
+```
+
+**Cost & runtime** (as of 2026-05-17, ~9050 public posts):
+
+- Tokens: ~4.5M (≈500 tok/post average; Russian text is token-heavy).
+- Price: ~$0.10 at voyage-3-lite's $0.02 / 1M tokens.
+- Wall time: ~5–15 min (one process, ~71 batches of 128, network-bound).
+- Memory: trivial — vectors are 512×float32 = 2 KB/row.
+
+**After backfill — verification checklist:**
+
+1. `docker exec pb_web python -c "from blog.models import Post; from blog.models import PostVisibility; print(Post.objects.filter(visibility=PostVisibility.PUBLIC, embedding__isnull=True).count())"` → 0.
+2. `curl 'https://vyakunin.org/search/?q=украина&mode=semantic'` → non-zero results, no "fell back to keyword" banner.
+3. Spot-check 2–3 non-obvious queries ("posts where I was feeling
+   homesick", an English query against Russian content) — semantic
+   should beat the keyword path on phrase-of-intent searches.
+
+**Steady-state:** the command is safe to run on a cron after incremental
+imports — the hash check skips already-embedded rows. No need for a
+nightly schedule unless re-imports become frequent.
+
 ---
 
 ## 2.3 The Archivist (Private Memory & Synthesis)

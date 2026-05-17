@@ -240,9 +240,12 @@ def test_search_mode_semantic_falls_back_to_keyword_on_sqlite(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_search_mode_keyword_default(monkeypatch):
-    """Omitting mode= must continue to use the existing keyword path."""
+def test_search_default_mode_is_keyword_without_voyage_key(monkeypatch):
+    """When Voyage isn't configured, omitting ?mode= must fall back to
+    keyword (semantic is gated on ``is_available()`` to avoid 500s)."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.setenv("VOYAGE_API_KEY_FILE", "/nonexistent/path")
+    monkeypatch.setattr(Path, "home", lambda: Path("/nonexistent/home"))
     _make_public_post("p3", title="Pizza", text="pepperoni")
 
     response = Client().get("/search/?q=pizza")
@@ -251,6 +254,20 @@ def test_search_mode_keyword_default(monkeypatch):
     assert response.context["semantic_active"] is False
     posts = list(response.context["posts"])
     assert any(p.slug == "p3" for p in posts)
+
+
+@pytest.mark.django_db
+def test_search_default_mode_is_semantic_when_voyage_key_present(monkeypatch):
+    """When Voyage is configured, omitting ?mode= should default to
+    semantic. On SQLite the semantic SQL isn't reachable, so the view
+    falls back to keyword internally, but the resolved ``mode`` exposed
+    in context must reflect the user-visible default."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "sk-test-123")
+    _make_public_post("p5", title="Croissant", text="butter")
+
+    response = Client().get("/search/?q=croissant")
+    assert response.status_code == 200
+    assert response.context["mode"] == "semantic"
 
 
 @pytest.mark.django_db
