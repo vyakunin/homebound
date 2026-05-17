@@ -173,6 +173,44 @@ _OLD_TWITTER_REPLY_WITH_PARENT_IMAGE = '''
 </body></html>
 '''
 
+_OLD_TWITTER_REPLY_WITH_ANCESTOR = '''
+<html><body>
+<div class="tweet ancestor permalink-ancestor-tweet"
+     data-tweet-id="700"
+     data-screen-name="otheruser"
+     data-conversation-id="700">
+  <p class="tweet-text">parent post</p>
+</div>
+<div class="tweet permalink-tweet"
+     data-tweet-id="701"
+     data-screen-name="vyakunin"
+     data-conversation-id="700"
+     data-is-reply-to="true">
+  <p class="tweet-text">добро пожаловать в клуб</p>
+  <a class="tweet-timestamp"><span data-time="1567530900"></span></a>
+</div>
+</body></html>
+'''
+
+_OLD_TWITTER_REPLY_DEEP_THREAD = '''
+<html><body>
+<div class="tweet ancestor permalink-ancestor-tweet"
+     data-tweet-id="710" data-screen-name="rootuser" data-conversation-id="710">
+  <p class="tweet-text">thread root</p>
+</div>
+<div class="tweet ancestor"
+     data-tweet-id="711" data-screen-name="middleuser" data-conversation-id="710">
+  <p class="tweet-text">middle reply</p>
+</div>
+<div class="tweet permalink-tweet"
+     data-tweet-id="712" data-screen-name="vyakunin"
+     data-conversation-id="710" data-is-reply-to="true">
+  <p class="tweet-text">если дискретная — тоже</p>
+  <a class="tweet-timestamp"><span data-time="1567530950"></span></a>
+</div>
+</body></html>
+'''
+
 
 class TestParseOldTwitterHtml:
     def test_single_tweet(self):
@@ -225,6 +263,53 @@ class TestParseOldTwitterHtml:
         assert parsed['tweetId'] == '601'
         assert parsed['media_urls'] == []
 
+    def test_reply_context_from_ancestor_div(self):
+        """A reply tweet's parent is rendered as a div.tweet.ancestor.
+        Parser uses data-is-reply-to=true + the closest ancestor in DOM."""
+        parsed = _parse_archived_tweet(
+            _OLD_TWITTER_REPLY_WITH_ANCESTOR, '20190903000000',
+            expected_tweet_id='701',
+        )
+        assert parsed is not None
+        assert parsed['reply_to_url'] == 'https://twitter.com/otheruser/status/700'
+        assert parsed['reply_to_author'] == 'otheruser'
+        assert parsed['quote_tweet_url'] == ''
+
+    def test_reply_context_picks_direct_parent_in_deep_thread(self):
+        """In a deep thread the parser must pick the immediate parent
+        (middleuser/711), not the conversation root (rootuser/710)."""
+        parsed = _parse_archived_tweet(
+            _OLD_TWITTER_REPLY_DEEP_THREAD, '20190903000000',
+            expected_tweet_id='712',
+        )
+        assert parsed is not None
+        assert parsed['reply_to_url'] == 'https://twitter.com/middleuser/status/711'
+        assert parsed['reply_to_author'] == 'middleuser'
+
+    def test_non_reply_has_empty_reply_context(self):
+        parsed = _parse_archived_tweet(_OLD_TWITTER_SINGLE, '20190903000000')
+        assert parsed['reply_to_url'] == ''
+        assert parsed['reply_to_author'] == ''
+
+    def test_real_archived_reply_2019(self):
+        """Regression test against an actual archived 2019 reply page.
+        Fixture: tests/fixtures/wayback/old_reply_1169669387906764801.html
+        — vyakunin's "ага, за касамару например?" replying to @mich261213."""
+        import pathlib
+        fixture = pathlib.Path(__file__).parent / 'fixtures' / 'wayback' / 'old_reply_1169669387906764801.html'
+        if not fixture.exists():
+            pytest.skip(f'fixture missing: {fixture}')
+        html_str = fixture.read_text()
+        parsed = _parse_archived_tweet(
+            html_str, '20190920065521',
+            expected_tweet_id='1169669387906764801',
+        )
+        assert parsed is not None
+        assert parsed['tweetId'] == '1169669387906764801'
+        assert 'касамару' in parsed['text']
+        assert parsed['reply_to_author'] == 'mich261213'
+        assert parsed['reply_to_url'] == 'https://twitter.com/mich261213/status/1169657491640266753'
+
 
 # ---------------------------------------------------------------------------
 # Modern Twitter HTML parsing (article[data-testid="tweet"])
@@ -265,6 +350,17 @@ _MODERN_THREAD = '''
 <article data-testid="tweet">
   <div data-testid="tweetText">Another reply</div>
   <a href="/vyakunin/status/902">Link</a>
+</article>
+</body></html>
+'''
+
+_MODERN_REPLY_NO_PARENT_ARTICLE = '''
+<html><body>
+<article data-testid="tweet">
+  <div>Replying to <a href="/otheruser">@otheruser</a></div>
+  <div data-testid="tweetText">standalone reply, parent not in snapshot</div>
+  <a href="/vyakunin/status/910">Link</a>
+  <time datetime="2022-06-01T10:30:00Z"></time>
 </article>
 </body></html>
 '''
@@ -325,3 +421,48 @@ class TestParseModernTwitterHtml:
 
     def test_no_article(self):
         assert _parse_archived_tweet('<html><p>No tweet</p></html>', '20220515103000') is None
+
+    def test_reply_context_from_prior_article(self):
+        """In a conversation snapshot, the article preceding target is the parent."""
+        parsed = _parse_archived_tweet(
+            _MODERN_THREAD, '20220515103000', expected_tweet_id='901',
+        )
+        assert parsed is not None
+        assert parsed['reply_to_url'] == 'https://twitter.com/otheruser/status/900'
+        assert parsed['reply_to_author'] == 'otheruser'
+
+    def test_reply_context_replying_to_hint(self):
+        """When the parent article isn't in the snapshot, fall back to "Replying to" hint."""
+        parsed = _parse_archived_tweet(
+            _MODERN_REPLY_NO_PARENT_ARTICLE, '20220601103000',
+            expected_tweet_id='910',
+        )
+        assert parsed is not None
+        # No parent status ID is recoverable — author-only URL is returned.
+        assert parsed['reply_to_url'] == 'https://twitter.com/otheruser'
+        assert parsed['reply_to_author'] == 'otheruser'
+
+    def test_first_article_no_reply_context(self):
+        """Target is the first article — no preceding parent, no Replying hint."""
+        parsed = _parse_archived_tweet(_MODERN_SINGLE, '20220515103000')
+        assert parsed['reply_to_url'] == ''
+        assert parsed['reply_to_author'] == ''
+
+    def test_real_archived_modern_reply_2022(self):
+        """Regression test against a real archived 2022 modern reply page.
+        Fixture: tests/fixtures/wayback/modern_reply_1567792120173580288.html
+        — vyakunin's "why?" replying to @apmassaro3."""
+        import pathlib
+        fixture = pathlib.Path(__file__).parent / 'fixtures' / 'wayback' / 'modern_reply_1567792120173580288.html'
+        if not fixture.exists():
+            pytest.skip(f'fixture missing: {fixture}')
+        html_str = fixture.read_text()
+        parsed = _parse_archived_tweet(
+            html_str, '20220908083120',
+            expected_tweet_id='1567792120173580288',
+        )
+        assert parsed is not None
+        assert parsed['tweetId'] == '1567792120173580288'
+        assert parsed['text'] == 'why?'
+        assert parsed['reply_to_author'] == 'apmassaro3'
+        assert parsed['reply_to_url'] == 'https://twitter.com/apmassaro3/status/1567763015675658241'

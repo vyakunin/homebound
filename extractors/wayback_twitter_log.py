@@ -235,6 +235,9 @@ def _parse_old_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expecte
                 href = f'https://twitter.com{href}'
             quote_tweet_url = href
 
+    # Extract reply context (in_reply_to). Old Twitter exposes this as data attrs on div.tweet.
+    reply_to_url, reply_to_author = _extract_old_reply_context(main_tweet)
+
     return {
         'tweetId': tweet_id,
         'url': tweet_url,
@@ -243,7 +246,86 @@ def _parse_old_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expecte
         'timestamp': {'utime': epoch} if epoch else {},
         'media_urls': media_urls,
         'quote_tweet_url': quote_tweet_url,
+        'reply_to_url': reply_to_url,
+        'reply_to_author': reply_to_author,
     }
+
+
+def _extract_old_reply_context(main_tweet) -> tuple[str, str]:
+    """Extract (reply_to_url, reply_to_author) from old-style Twitter HTML.
+
+    Old Twitter (2019-era) tweet permalink pages render the parent (and other
+    thread ancestors) as additional ``div.tweet`` elements with class
+    ``ancestor``. The focused tweet has ``data-is-reply-to="true"`` and
+    ``data-conversation-id`` pointing at the thread root.
+
+    Strategy: when the target is flagged as a reply, walk up the DOM to find
+    the closest ``div.tweet.ancestor`` preceding it (the DIRECT parent — last
+    in document order before the focused tweet). Fall back to the conversation-
+    root ancestor (matched by ``data-tweet-id == data-conversation-id``).
+    """
+    if main_tweet.get('data-is-reply-to', '') != 'true':
+        # Some archived snapshots omit data-is-reply-to but still have a different
+        # conversation-id. Detect that as a fallback.
+        conv = main_tweet.get('data-conversation-id', '')
+        tid = main_tweet.get('data-tweet-id', '')
+        if not (conv and tid and conv != tid):
+            return '', ''
+
+    soup = main_tweet.find_parent() or main_tweet
+    while soup.parent is not None:
+        soup = soup.parent
+    ancestors = [
+        d for d in soup.find_all('div', class_='tweet')
+        if d is not main_tweet and 'ancestor' in (d.get('class') or [])
+    ]
+    if not ancestors:
+        return '', ''
+
+    # Direct parent = the ancestor closest to the focused tweet in document order
+    # (last ancestor before the target). Without explicit edges we approximate
+    # by taking the ancestor whose ``data-tweet-id`` is largest but ≤ target ID,
+    # which preserves chronological order in a thread.
+    target_id_str = main_tweet.get('data-tweet-id', '')
+    try:
+        target_id = int(target_id_str) if target_id_str else None
+    except ValueError:
+        target_id = None
+
+    direct_parent = None
+    if target_id is not None:
+        candidates = []
+        for a in ancestors:
+            try:
+                aid = int(a.get('data-tweet-id', '0') or '0')
+            except ValueError:
+                continue
+            if aid and aid < target_id:
+                candidates.append((aid, a))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            direct_parent = candidates[0][1]
+
+    if not direct_parent:
+        # Fallback to the conversation-root ancestor.
+        conv = main_tweet.get('data-conversation-id', '')
+        if conv:
+            for a in ancestors:
+                if a.get('data-tweet-id', '') == conv:
+                    direct_parent = a
+                    break
+        if not direct_parent:
+            direct_parent = ancestors[-1]
+
+    parent_id = direct_parent.get('data-tweet-id', '')
+    parent_handle = direct_parent.get('data-screen-name', '')
+    if not parent_id:
+        return '', ''
+    if parent_handle:
+        url = f'https://twitter.com/{parent_handle}/status/{parent_id}'
+    else:
+        url = f'https://twitter.com/i/status/{parent_id}'
+    return url, parent_handle
 
 
 def _parse_modern_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expected_tweet_id: str | None = None) -> dict | None:
@@ -319,6 +401,11 @@ def _parse_modern_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expe
         if 'pbs.twimg.com/media' in src:
             media_urls.append(src)
 
+    # Extract reply context: the article immediately preceding target_article in
+    # document order is the parent in a conversation chain. The "Replying to @x"
+    # block (if present) gives the parent author without needing the parent article.
+    reply_to_url, reply_to_author = _extract_modern_reply_context(target_article, articles)
+
     return {
         'tweetId': tweet_id,
         'url': tweet_url,
@@ -327,7 +414,59 @@ def _parse_modern_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expe
         'timestamp': {'iso': timestamp_iso} if timestamp_iso else {'utime': epoch},
         'media_urls': media_urls,
         'quote_tweet_url': '',  # Modern HTML QT detection would need more work
+        'reply_to_url': reply_to_url,
+        'reply_to_author': reply_to_author,
     }
+
+
+def _extract_modern_reply_context(target_article, all_articles) -> tuple[str, str]:
+    """Extract (reply_to_url, reply_to_author) from modern Twitter HTML.
+
+    Strategy: the article(s) before target_article in document order form the
+    conversation chain. The article immediately preceding target_article is the
+    direct parent. Falls back to scanning for a "Replying to @user" block when
+    the parent tweet article is not in the snapshot.
+    """
+    target_idx = None
+    for i, article in enumerate(all_articles):
+        if article is target_article:
+            target_idx = i
+            break
+    if target_idx is None or target_idx == 0:
+        # No preceding article — but may still find "Replying to" hint.
+        return _modern_replying_to_hint(target_article)
+
+    parent = all_articles[target_idx - 1]
+    parent_url = ''
+    parent_author = ''
+    for link in parent.find_all('a', href=True):
+        href = link.get('href', '')
+        if '/status/' in href and '/likes' not in href:
+            parent_url = href if href.startswith('http') else f'https://twitter.com{href}'
+            parent_author = _extract_handle_from_status_url(parent_url)
+            break
+
+    if not parent_url:
+        return _modern_replying_to_hint(target_article)
+    return parent_url, parent_author
+
+
+def _modern_replying_to_hint(target_article) -> tuple[str, str]:
+    """When the parent article isn't in the snapshot, infer reply target from
+    the "Replying to @user" block inside target_article. Returns the parent
+    author's handle (no status ID — parent tweet URL is unknown).
+    """
+    for div in target_article.find_all('div'):
+        text = div.get_text(strip=True)
+        if text.startswith('Replying to'):
+            anchor = div.find('a', href=True)
+            if anchor:
+                href = anchor.get('href', '').lstrip('/')
+                handle = href.split('/', 1)[0]
+                if handle:
+                    return f'https://twitter.com/{handle}', handle
+            break
+    return '', ''
 
 
 # ---------------------------------------------------------------------------
@@ -393,9 +532,54 @@ def _build_records_from_cdx(
     }
 
 
+def _fetch_html_with_cache(
+    tweet_id: str,
+    snapshot: dict,
+    client: WaybackClient,
+    html_cache_dir: Path | None,
+) -> tuple[str | None, bool]:
+    """Return (html_text, fetched_from_network). Uses cache first if available.
+
+    The cache is keyed by tweet_id (snowflake ID, stable forever). Archive.org
+    snapshots themselves are immutable, so a cached HTML page never goes stale
+    for the same (tweet_id, snapshot_ts) pair. We don't re-cache when the
+    snapshot timestamp changes — that's rare enough (would require a new CDX
+    crawl) that we'd rebuild the cache from scratch.
+    """
+    archive_ts = snapshot.get('timestamp', '')
+    original_url = snapshot.get('url', snapshot.get('original', ''))
+    if not archive_ts or not original_url:
+        return None, False
+
+    if html_cache_dir is not None:
+        cache_path = html_cache_dir / f'{tweet_id}.html'
+        if cache_path.exists():
+            try:
+                return cache_path.read_text(encoding='utf-8', errors='replace'), False
+            except Exception as e:
+                logger.warning('Failed to read HTML cache for %s: %s', tweet_id, e)
+
+    try:
+        ts_dt = _cdx_ts_to_datetime(archive_ts)
+        memento = client.get_memento(original_url, timestamp=ts_dt, mode=Mode.original)
+        if memento.status_code == 200:
+            text = memento.text
+            if html_cache_dir is not None and text:
+                cache_path = html_cache_dir / f'{tweet_id}.html'
+                try:
+                    cache_path.write_text(text, encoding='utf-8')
+                except Exception as e:
+                    logger.warning('Failed to write HTML cache for %s: %s', tweet_id, e)
+            return text, True
+    except (MementoPlaybackError, WaybackException):
+        raise
+    return None, True
+
+
 def _fetch_and_build_records(
     best_per_tweet: dict[str, dict],
     client: WaybackClient,
+    html_cache_dir: Path | None = None,
 ) -> tuple[list[PostRecord], int, int, int]:
     """Fetch archived pages and build PostRecords with content.
 
@@ -405,6 +589,7 @@ def _fetch_and_build_records(
     snapshots_fetched = 0
     tweets_with_content = 0
     skipped = 0
+    cache_hits = 0
 
     sorted_tweets = sorted(best_per_tweet.items())
     total = len(sorted_tweets)
@@ -412,8 +597,8 @@ def _fetch_and_build_records(
     for i, (tweet_id, snapshot) in enumerate(sorted_tweets):
         if (i + 1) % 25 == 0:
             logger.info(
-                'Progress: %d/%d tweets (%d with content, %d failed)',
-                i + 1, total, tweets_with_content, skipped,
+                'Progress: %d/%d tweets (%d with content, %d cache hits, %d failed)',
+                i + 1, total, tweets_with_content, cache_hits, skipped,
             )
 
         archive_ts = snapshot.get('timestamp', '')
@@ -422,14 +607,14 @@ def _fetch_and_build_records(
             skipped += 1
             continue
 
-        # Use wayback package's get_memento with built-in rate limiting
         page_html = None
         try:
-            ts_dt = _cdx_ts_to_datetime(archive_ts)
-            memento = client.get_memento(original_url, timestamp=ts_dt, mode=Mode.original)
-            if memento.status_code == 200:
-                page_html = memento.text
-                snapshots_fetched += 1
+            page_html, fetched = _fetch_html_with_cache(tweet_id, snapshot, client, html_cache_dir)
+            if page_html:
+                if fetched:
+                    snapshots_fetched += 1
+                else:
+                    cache_hits += 1
         except MementoPlaybackError as e:
             if i < 3:
                 logger.warning('Memento playback error for %s: %s', tweet_id, e)
@@ -493,13 +678,23 @@ def _fetch_and_build_records(
                     original_url=media_url,
                 ))
 
-            # Quote tweet → reshared_from
+            # Quote tweet wins over reply-context (a quoted tweet is explicit
+            # content reuse; a reply is conversational metadata). When this tweet
+            # has neither, reshared_from stays empty.
             qt_url = parsed.get('quote_tweet_url', '')
+            reply_url = parsed.get('reply_to_url', '')
+            reply_author = parsed.get('reply_to_author', '')
             if qt_url:
                 record.reshared_from = ResharedFrom(
                     url=qt_url,
                     author=_extract_handle_from_status_url(qt_url),
                 )
+            elif reply_url:
+                record.reshared_from = ResharedFrom(
+                    url=reply_url,
+                    author=reply_author or _extract_handle_from_status_url(reply_url),
+                )
+                record.extra['reply_context'] = 'true'
 
         post_by_source_id[tweet_id] = record
 
@@ -522,6 +717,7 @@ def extract(
     cdx_cache: str | None = None,
     no_fetch: bool = False,
     limit: int | None = None,
+    html_cache_dir: Path | None = None,
 ) -> dict:
     """Extract tweets for a handle from Wayback Machine.
 
@@ -567,9 +763,12 @@ def extract(
         if no_fetch:
             return _build_records_from_cdx(best_per_tweet, output_dir, dry_run)
 
+        if html_cache_dir is not None:
+            html_cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info('Using HTML cache at %s — cached pages skip the network', html_cache_dir)
         logger.info('Fetching archived pages via wayback package (2 req/s)...')
         records, snapshots_fetched, tweets_with_content, skipped = _fetch_and_build_records(
-            best_per_tweet, client,
+            best_per_tweet, client, html_cache_dir=html_cache_dir,
         )
 
     logger.info(
@@ -611,6 +810,13 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--cdx-cache', type=str, help='Cache file for CDX responses')
     parser.add_argument('--no-fetch', action='store_true', help='CDX metadata only, no page fetching')
+    parser.add_argument('--limit', type=int, default=None, help='Limit to N most recent tweets')
+    parser.add_argument(
+        '--html-cache', type=Path, default=None,
+        help='Directory to cache raw archived HTML per tweet (<id>.html). On '
+             'subsequent runs, cached tweets skip the network entirely. Lets '
+             'you iterate on the parser without re-paying the ~80min fetch cost.',
+    )
 
     args = parser.parse_args()
 
@@ -621,6 +827,8 @@ def main():
         dry_run=args.dry_run,
         cdx_cache=args.cdx_cache,
         no_fetch=args.no_fetch,
+        limit=args.limit,
+        html_cache_dir=args.html_cache,
     )
 
     logger.info(

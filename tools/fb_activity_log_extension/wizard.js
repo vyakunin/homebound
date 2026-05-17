@@ -100,7 +100,7 @@ function getCaps() {
     maxImages: num('cap-images'),
     maxVideos: num('cap-videos'),
     mediaAllowlistUrls,
-    useTabExtraction: document.getElementById('use-tab-extraction')?.checked ?? false,
+    useTabExtraction: document.getElementById('use-tab-extraction')?.checked ?? true,
   };
 }
 
@@ -337,8 +337,10 @@ function startZipProgressPolling(statusUpdater) {
               : `Downloading media: ${done}/${tot} (${ok} saved${err ? `, ${err} failed` : ''})… ${elapsedStr}`;
           pct = tot === 0 ? 88 : 46 + Math.min(46, Math.round((done / Math.max(1, tot)) * 46));
         }
-      } else if (p.stage === 'zip_build') {
-        msg = `${p.detail || 'Building ZIP…'} (${elapsedStr})`;
+      } else if (p.stage === 'zip_build' || p.stage === 'metadata') {
+        // v2.8.0 streams JSON to disk instead of packaging a ZIP.
+        const fallback = p.stage === 'metadata' ? 'Saving metadata…' : 'Building ZIP…';
+        msg = `${p.detail || fallback} (${elapsedStr})`;
         pct = 96;
       } else {
         msg = `Working… (${elapsedStr})`;
@@ -452,29 +454,34 @@ async function autoZipAndDownload() {
   await showExportSummary().catch(() => {});
   const skipMedia = document.getElementById('skip-media')?.checked || false;
   const stopZipPoll = startZipProgressPolling((msg) => setStatus(msg));
+  const finishBtn = document.getElementById('btn-finish-now');
+  finishBtn.classList.remove('hidden');
+  finishBtn.disabled = false;
   setStatus(
     skipMedia
-      ? 'Building ZIP (skipping media)…'
-      : 'Building ZIP — fetching media can take several minutes. Status updates below.',
+      ? 'Saving JSON metadata (skipping media)…'
+      : 'Streaming media to disk — slow stages can be cut short with "Finish now".',
   );
 
   try {
     const res = await sendPhase('media_zip', { skipMedia });
     if (!res?.ok) {
-      setStatus(res?.error || 'ZIP failed', true);
+      setStatus(res?.error || 'Export failed', true);
       document.getElementById('btn-zip').classList.remove('hidden');
       return;
     }
     const d = res.data;
+    const stoppedEarly = d?.stoppedEarly === true;
     if (skipMedia) {
-      setStatus('✓ ZIP downloaded (media skipped). Run the Python extractor to import posts.');
+      setStatus('✓ Metadata saved (media skipped). Run the Python extractor to import posts.');
     } else {
       const written = d.mediaFilesWritten;
       const errors = d.mediaErrorsCount;
+      const prefix = stoppedEarly ? '✓ Finished early — ' : '✓ Export complete — ';
       const msg =
         errors > 0
-          ? `✓ ZIP downloaded — ${written} media files saved, ${errors} failed (see media_errors.json).`
-          : `✓ ZIP downloaded — ${written} media files saved.`;
+          ? `${prefix}${written} media files saved, ${errors} failed (see media_errors.json).`
+          : `${prefix}${written} media files saved.`;
       setStatus(msg);
     }
     showStep('step-done');
@@ -482,6 +489,8 @@ async function autoZipAndDownload() {
     setStatus(String(e), true);
     document.getElementById('btn-zip').classList.remove('hidden');
   } finally {
+    finishBtn.classList.add('hidden');
+    finishBtn.disabled = true;
     stopZipPoll();
   }
 }
@@ -770,6 +779,20 @@ function bindUi() {
   document.getElementById('btn-zip').addEventListener('click', async () => {
     document.getElementById('btn-zip').classList.add('hidden');
     await autoZipAndDownload();
+  });
+
+  // Cut the media-fetch / enrichment phase short and save whatever has been
+  // collected so far. Sends STOP_PHASE, which sets the content-script token's
+  // `cancelled` flag — enrichment + media download pool both bail at their next
+  // cancellation checkpoint, and runMediaAndZipInner falls through to its
+  // streaming-save section unconditionally (writes posts.json + media files
+  // collected up to that point to disk via chrome.downloads.download).
+  document.getElementById('btn-finish-now').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-finish-now');
+    btn.disabled = true;
+    btn.textContent = 'Finishing…';
+    setStatus('Finishing early — saving what has been collected so far.');
+    await sendStop();
   });
 
   document.getElementById('btn-reset').addEventListener('click', async () => {

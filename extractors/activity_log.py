@@ -586,8 +586,50 @@ def _mux_video_audio(video_path: Path, audio_path: Path) -> Path | None:
     return None
 
 
+class _DirSource:
+    """ZipFile-like adapter for directory-format exports (extension v2.8.0+).
+
+    The streaming-to-disk wizard writes each file directly under a Downloads
+    subdirectory instead of accumulating bytes in a JSZip blob. This adapter
+    lets ``extract()`` consume either a ZIP path or a directory path with
+    zero branching at the call sites.
+    """
+
+    def __init__(self, dir_path: Path):
+        self._dir = Path(dir_path)
+        self._names: list[str] | None = None
+
+    def namelist(self) -> list[str]:
+        if self._names is None:
+            collected: list[str] = []
+            for p in self._dir.rglob('*'):
+                if p.is_file():
+                    rel = p.relative_to(self._dir)
+                    collected.append(str(rel).replace('\\', '/'))
+            self._names = collected
+        return self._names
+
+    def open(self, name: str, mode: str = 'rb'):  # pragma: no cover - thin wrapper
+        if mode not in ('r', 'rb'):
+            raise ValueError(f'unsupported mode: {mode}')
+        return open(self._dir / name, 'rb')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def _open_export_source(path: Path):
+    """Return a context manager exposing namelist() + open() for either format."""
+    if path.is_dir():
+        return _DirSource(path)
+    return zipfile.ZipFile(path, 'r')
+
+
 def _copy_media_from_zip(
-    zf: zipfile.ZipFile,
+    zf,
     zip_name: str,
     media_dir: Path,
     created_at: datetime | None,
@@ -669,14 +711,19 @@ def extract(
     media_dir: Path | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Extract posts and comments from an Activity Log ZIP.
+    """Extract posts and comments from an Activity Log export.
+
+    ``zip_path`` may be either a single ZIP file (extension v2.7.x and earlier)
+    or a directory tree (extension v2.8.0 streaming-to-disk format). The
+    directory format has the same file names at top level, with ``media/`` as
+    a subdirectory holding the media files referenced by media_manifest.json.
 
     Returns a summary dict with counts.
     """
     if media_dir is None:
         media_dir = output_dir / 'media'
 
-    with zipfile.ZipFile(zip_path, 'r') as zf:
+    with _open_export_source(zip_path) as zf:
         names = set(zf.namelist())
 
         # Load posts

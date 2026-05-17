@@ -1,0 +1,63 @@
+---
+description: Avoid re-scraping content we already have; design notes for FB/X extensions and wayback to be incremental rather than full-refresh
+alwaysApply: true
+---
+
+# Incremental crawling (homebound)
+
+Every source we scrape (FB Activity Log, X timeline, wayback archive) currently does a full sweep on each run, then relies on importer-side deduplication (`(source, source_id)` upsert with `--update-existing`) to avoid duplicate DB rows. That works for correctness, but it wastes time and amplifies the memory pressure that's already a problem in the FB extension.
+
+**Goal:** each subsequent crawl pays for the NEW posts/comments only, not the entire history.
+
+## What's already incremental
+
+| Source | Status |
+|---|---|
+| **Wayback** | `--html-cache <dir>` persists raw archived HTML by tweet id. Re-runs skip the network for cached tweet ids; only NEW snapshots in the CDX cache cost archive.org bandwidth. Subsequent parser iterations are sub-minute. |
+| **Importer** | `import_posts` skips existing `(source, source_id)` by default; `--update-existing` merges per-field for `reshared_from` so a partial later import doesn't blank a prior fuller one. |
+
+## What's NOT incremental yet
+
+| Source | Wasted work each run |
+|---|---|
+| **FB Activity Log extension** | Scrolls every row from the top of the log every run. To capture the 100 new posts since last week, the extension currently re-scrolls and re-harvests all 5000 prior posts. Memory and time scale with full history. |
+| **X extension** | Same shape — re-scrolls the entire timeline; relies on importer dedup. |
+| **Wayback CDX search** | Currently always queries CDX from scratch when no `--cdx-cache`; with the cache, we DO save the query. But we don't query for NEW tweets added since the last cache write — that requires a delta query, not a fresh sweep. |
+
+## Design: FB / X extensions
+
+The activity log is newest-first. A natural "stop when we hit previously-seen posts" cursor:
+
+1. **Persist a `seenPostKeys` Set in `chrome.storage.local`** across extension runs. Keys are the same content-stable hash the Python `_source_id_for_post` produces (or just the post URL if hashing is too expensive client-side).
+2. **During harvest, count consecutive seen-postKeys.** Once we hit N consecutive (e.g. 50) already-seen posts, conclude "scroll has reached previously-scraped territory" — break the scroll loop with `stoppedBecause: 'caughtUpToCursor'`.
+3. **Update the cursor.** At the end of a successful harvest, add the new post keys to `seenPostKeys` and write it back.
+4. **Force-refresh override.** Wizard checkbox "Re-scrape from beginning (ignore seen cursor)" for the rare case the user wants a full refresh (e.g. format change in posts.json, schema evolution).
+
+Pitfall to avoid: don't rely on the section-date heading for the cursor (FB shows reshares under the resharer's date, not original date — non-monotonic). Use the content-stable key.
+
+## Design: wayback delta queries
+
+The wayback CDX cache is currently a full list snapshot. Two options for delta:
+
+1. **Re-query CDX with `from=<last_cache_ts>` filter.** archive.org supports time-range filters. Periodic delta queries return only new snapshots; merge with the cache.
+2. **Just re-query everything periodically.** CDX queries are cheap (~5 s). The cache is keyed on tweet id; new snapshots overwrite when newer.
+
+Option 2 is simpler and probably fine — the cost is in the memento fetch, not the CDX query.
+
+## What "format changed" looks like
+
+Sometimes we DO want to re-process even already-stored content:
+
+- The extension schema bumps (e.g. v2.7 → v2.8 added `timestamp.source: 'graphql'`). Posts already in `seenPostKeys` should NOT be re-scraped, but their stored cache entry might need a re-parse.
+- The Python `_source_id_for_post` algorithm changes. All posts need their source_id recomputed; the existing rows in DB stay (FK from comments), but the new entries arrive with new IDs and dedup-by-source_id loses its anchor.
+
+For both: bump a `schemaVersion` field in `chrome.storage.local`. When the extension reads the cursor, if `schemaVersion` doesn't match the current code's expectation, invalidate the cursor and force a full re-scrape.
+
+## Implementation order
+
+1. Cursor in FB extension (highest ROI — memory pain is here).
+2. Cursor in X extension (mirrors FB).
+3. Wayback delta query (if/when cache size becomes a concern; not urgent at 1.8 GB).
+4. Schema-version invalidation (paired with #1 and #2 from day one).
+
+Bake the cursor into the extension *before* trying to support multi-tab harvesting or background scheduling — those features depend on knowing "where did we last leave off?"

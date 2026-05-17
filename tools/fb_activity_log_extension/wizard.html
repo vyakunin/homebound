@@ -64,7 +64,7 @@
         Diagnostic mode (adds timestamp + row HTML debug fields to ZIP)
       </label>
       <label class="checkbox-label">
-        <input type="checkbox" id="use-tab-extraction" />
+        <input type="checkbox" id="use-tab-extraction" checked />
         Tab-based media extraction (opens each post in a background tab — slower but finds images/video in reels)
       </label>
       <label class="media-allowlist-label">
@@ -139,12 +139,13 @@
     </section>
 
     <section id="step-zip" class="step hidden" data-step-num="6">
-      <h2>6. ZIP</h2>
+      <h2>6. Export</h2>
       <!-- Step 13: pre-ZIP export summary and skip-media checkbox -->
       <div id="export-summary" class="export-summary hidden"></div>
       <progress id="zip-progress" max="100" value="0" class="hidden"></progress>
-      <p class="hint">Media files are fetched now. CDN links expire — save your ZIP within a few hours of harvesting.</p>
-      <button type="button" id="btn-zip" class="primary hidden">Retry download ZIP</button>
+      <p class="hint">Media files stream to disk as each post is fetched. If a tab gets closed or fetching stalls, click "Finish now" to skip the rest and write out whatever's been collected so far.</p>
+      <button type="button" id="btn-zip" class="primary hidden">Retry export</button>
+      <button type="button" id="btn-finish-now" class="danger hidden">Finish now (save what's collected)</button>
     </section>
 
     <section id="step-done" class="step hidden" data-step-num="6">
@@ -156,7 +157,7 @@
     <p id="status" class="status" aria-live="polite"></p>
 
     <!-- Query string busts extension disk cache after updates (bump when editing JS). -->
-    <script src="activity_log_urls.js?v=2.2.22"></script>
-    <script src="wizard.js?v=2.2.22"></script>
+    <script src="activity_log_urls.js?v=2.8.6"></script>
+    <script src="wizard.js?v=2.8.6"></script>
   </body>
 </html>

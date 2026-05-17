@@ -1,0 +1,42 @@
+---
+description: When user reports a data/rendering/memory issue, reproduce in a unit test first; if not possible, instrument the data-collection so the next crawl captures what's needed
+alwaysApply: true
+---
+
+# TDD for user-reported issues (homebound)
+
+When the user flags an issue — "this post has the wrong timestamp", "rendering is broken on /search", "Chrome is eating memory during extension run", "import dropped reshares" — the response sequence is:
+
+## 1. Reproduce in a unit test FIRST
+
+Write a failing test that captures the symptom, before touching the fix:
+
+- **Data issue:** craft a fixture mirroring the bad data shape (real export JSON, real archived HTML, real DB row), assert the expected behaviour, watch the test fail.
+- **Rendering issue:** add a Django template test (`tests/test_views.py`) hitting the broken URL with fixture data, assert the broken state.
+- **Importer issue:** add a `test_import_posts.py` case with the input that triggers the bug.
+- **Parser issue:** add a fixture file (e.g. `tests/fixtures/wayback/<scenario>.html`) and a regression test that calls the parser on it.
+
+This is the project's strongest defence against the same bug recurring. Every existing fix in `tests/test_wayback_twitter_extractor.py`, `tests/test_activity_log_extractor.py`, `tests/test_import_posts.py` followed this shape — the test names map directly to the bugs they captured.
+
+## 2. Fix; run the test; run the suite
+
+`bazel test //tests:<specific>` to confirm the new test passes; then `bazel test //tests:all` to confirm no regression. The Node-side tests for the extensions live under `tools/<ext>/test/` — `npm test` from that directory.
+
+## 3. When unit-testing isn't possible: instrument the pipeline
+
+Some issues can't be reproduced offline — they need a live FB session, a particular archived snapshot age, or a long-running Chrome renderer to manifest. In those cases, the next-best move is to **update the data-collection layer so the relevant signals are captured the next time we collect**, then iterate offline.
+
+Recent precedents:
+
+- **Memory bloat in the FB extension wasn't reproducible without 5000+ comment rows.** v2.8.6 added per-round snapshots (DOM node count, V8 heap, accumulator sizes) into `memory_debug.json` so we can diagnose offline.
+- **Wayback parser tuning was costing an 80-minute archive.org fetch per iteration.** Added `--html-cache` to persist raw archived HTML; subsequent parser changes re-parse the cache in seconds.
+- **GraphQL walker for FB timestamps had no real-world response sample.** Added `graphql_debug.json` (first 5 timestamp-bearing responses, capped at 100 KB each) so the next export gives us tunable fixtures.
+- **Reshared timestamps gap (27% of FB posts).** Diagnostic dump above will produce real GraphQL bodies for the reshare path; walker can be updated against actual response shapes instead of guessing.
+
+The general pattern: every time we hit a "I can't test this without another crawl" wall, we should add a diagnostic emit so the next crawl pays for itself. Treat the export dir's `*_debug.json` files as first-class outputs, not optional clutter.
+
+## Anti-patterns
+
+- Fixing without a test, then running the full suite to "make sure nothing broke" — the bug isn't covered, so the same regression will land again in three months.
+- Adding logs in production paths instead of fixture-based tests when fixtures are feasible. If you can construct the bad input as a string or JSON in the test, you don't need to wait for the next crawl.
+- Letting `graphql_debug.json` / `memory_debug.json` / `permalink_debug.json` quietly bit-rot. When you finish diagnosing, either commit a snapshot as a fixture (and a test that uses it) or document why the diagnostic stays live.

@@ -293,9 +293,18 @@ class Command(BaseCommand):
         post.location_name = loc.name if loc else ''
         post.location_lat = loc.lat if loc else None
         post.location_lng = loc.lng if loc else None
-        post.reshared_from_author = reshared.author if reshared else ''
-        post.reshared_from_url = reshared.url if reshared else ''
-        post.reshared_content_text = reshared.content_text if reshared else ''
+        # Reshared fields merge per-field: each pipeline (wayback reply-context,
+        # x.com extension full quote, FB Graph attached object, ...) writes only
+        # the fields it knows. An empty value from one pipeline must not blank
+        # another pipeline's contribution. To clear a reshare manually, edit the
+        # DB row directly — re-imports never clear.
+        if reshared:
+            if reshared.author:
+                post.reshared_from_author = reshared.author
+            if reshared.url:
+                post.reshared_from_url = reshared.url
+            if reshared.content_text:
+                post.reshared_content_text = reshared.content_text
         hint = 0
         if record.extra:
             try:

@@ -203,6 +203,64 @@ class TestImportRoundTrip:
         assert post.reshared_from_author == "New"
         assert post.reshared_content_text == "new embed"
 
+    def test_update_existing_merges_reshared_per_field(self):
+        """Partial reshared (URL+author only, no content_text) overwrites those
+        fields but preserves existing content_text from a prior fuller import."""
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        r1 = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_merge_1",
+            created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            content_text="commentary",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+            reshared_from=ResharedFrom(
+                author="OldAuthor",
+                url="https://www.facebook.com/old",
+                content_text="full quote body",
+            ),
+        )
+        cmd._import_record(r1, PostSource.FACEBOOK, None, False, counts, False)
+        r2 = dataclasses.replace(
+            r1,
+            reshared_from=ResharedFrom(
+                author="NewAuthor",
+                url="https://www.facebook.com/new",
+                content_text="",
+            ),
+        )
+        cmd._import_record(r2, PostSource.FACEBOOK, None, False, counts, True)
+        post = Post.objects.get(source_id="fb_merge_1")
+        assert post.reshared_from_url == "https://www.facebook.com/new"
+        assert post.reshared_from_author == "NewAuthor"
+        assert post.reshared_content_text == "full quote body"
+
+    def test_update_existing_preserves_reshared_when_record_empty(self):
+        """--update-existing must not blank reshared fields when the new record
+        carries no reshare info. Two pipelines (wayback reply-context + x.com
+        extension quote tweets) write to the same row from different angles."""
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        r1 = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_preserve_1",
+            created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            content_text="commentary",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+            reshared_from=ResharedFrom(
+                author="Original",
+                url="https://www.facebook.com/original",
+                content_text="full body",
+            ),
+        )
+        cmd._import_record(r1, PostSource.FACEBOOK, None, False, counts, False)
+        r2 = dataclasses.replace(r1, reshared_from=None)
+        cmd._import_record(r2, PostSource.FACEBOOK, None, False, counts, True)
+        post = Post.objects.get(source_id="fb_preserve_1")
+        assert post.reshared_from_url == "https://www.facebook.com/original"
+        assert post.reshared_from_author == "Original"
+        assert post.reshared_content_text == "full body"
+
     def test_tag_shared_across_posts(self):
         """When two posts have the same tag, only one Tag object is created."""
         record1 = _make_sample_record()

@@ -1,11 +1,72 @@
 /**
  * FB Activity Log wizard — content script. Personal/local use only.
- * Depends on lib/jszip.min.js (loads before this file, exposes global JSZip).
+ * v2.8.0+: media + JSON stream to disk per-file via chrome.downloads.download;
+ * no JSZip / generateAsync peak in heap.
  */
 
 // Per-invocation cancellation token (Step 2: fix abort-flag race condition).
 // Each RUN_PHASE creates a new token; STOP_PHASE cancels the latest one.
 let _currentToken = { cancelled: false };
+
+// Post-id → Unix epoch seconds, populated by page_hook.js (MAIN-world).
+// FB's activity-log GraphQL responses carry `creation_time` for each post node;
+// the DOM-rendered row pill only shows date-without-time for old posts, so
+// without this cache we'd fall back to noon-UTC for the vast majority.
+// page_hook emits entries under several id aliases (post_id, fbid, full URL),
+// so we accept lookups under any of them.
+const _postTimestampCache = new Map();
+// Diagnostic dump of the first few raw GraphQL response bodies the page_hook
+// observed. Persisted into graphql_debug.json in the export dir so we can
+// iterate on the timestamp walker without doing a full re-export each time
+// FB renames a JSON field.
+const _graphqlSamples = [];
+const _GRAPHQL_SAMPLES_CAP = 5;
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', (ev) => {
+    if (!ev || ev.source !== window) return;
+    const d = ev.data;
+    if (!d || d.__fbExport !== true) return;
+    if (d.type === 'POST_TIMESTAMPS') {
+      const entries = Array.isArray(d.entries) ? d.entries : [];
+      for (const e of entries) {
+        if (!e) continue;
+        const id = e.postId == null ? '' : String(e.postId);
+        const ts = typeof e.creationTime === 'number' ? e.creationTime : null;
+        if (id && ts && ts > 0) _postTimestampCache.set(id, ts);
+      }
+    } else if (d.type === 'GRAPHQL_SAMPLE') {
+      if (_graphqlSamples.length < _GRAPHQL_SAMPLES_CAP) {
+        _graphqlSamples.push({
+          url: typeof d.url === 'string' ? d.url.slice(0, 500) : '',
+          body: typeof d.body === 'string' ? d.body : '',
+          truncated: !!d.truncated,
+          totalLength: typeof d.totalLength === 'number' ? d.totalLength : 0,
+          emittedAt: typeof d.emittedAt === 'number' ? d.emittedAt : Date.now(),
+        });
+      }
+    }
+  });
+}
+
+function lookupPrecisePostTimestamp(postKey, fbId) {
+  // page_hook emits entries under whichever ids appeared on the GraphQL node:
+  // the full URL, post_id, story_id, fbid, etc. Try every key we have.
+  const keys = [];
+  if (postKey) {
+    keys.push(postKey);
+    const stripped = stripCommentParamsUrl(postKey);
+    if (stripped && stripped !== postKey) keys.push(stripped);
+    // pfbid token alone
+    const pfbid = (postKey.match(/(pfbid[A-Za-z0-9]+)/) || [])[1];
+    if (pfbid) keys.push(pfbid);
+  }
+  if (fbId) keys.push(String(fbId));
+  for (const k of keys) {
+    const v = _postTimestampCache.get(k);
+    if (v) return v;
+  }
+  return null;
+}
 
 // ── Diagnostic mode ───────────────────────────────────────────────────────────
 // Enabled by the wizard "Diagnostic mode" checkbox; passed in RUN_PHASE messages.
@@ -30,8 +91,32 @@ function fbLog(level, category, message, data) {
   }
 }
 
-// delayMs, fetchWithTimeout, randomPauseMs are loaded from lib/shared/timing.js
-// (see manifest.json content_scripts). Canonical source: tools/extension_shared/timing.js.
+// delayMs, delayMsCancellable, fetchWithTimeout, randomPauseMs are loaded from
+// lib/shared/timing.js (see manifest.json content_scripts). Canonical source:
+// tools/extension_shared/timing.js.
+
+// Stream a single Blob to disk via the background service worker so the wizard
+// heap doesn't accumulate binary bytes across the run. Falls back to revoking
+// the object URL on a generous delay (the download is queued, not streamed
+// from the URL after dispatch, so revoke after a few seconds is fine — but we
+// wait for the background's response, which fires only after download completes
+// or times out, so the URL is safe to revoke immediately).
+async function saveBlobViaBackground(blob, filename) {
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'FB_EXPORT_SAVE_FILE',
+      blobUrl,
+      filename,
+    });
+    return Boolean(res && res.ok);
+  } catch (e) {
+    console.error('[fb-export] saveBlobViaBackground error', filename, e);
+    return false;
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
 
 // Step 3: tightened URL filter — excludes profile/groups/events/messages/marketplace/settings/pages/about/link wrappers.
 function interestingBase(href) {
@@ -296,8 +381,14 @@ const PERMALINK_ENRICH_MAX_WALL_MS = 10000;
 /** If this many posts in a row yield no image, stop enrichment. 15 for tab mode (real DOM), 8 for fetch mode (SPA shells). */
 const PERMALINK_ENRICH_STOP_AFTER_CONSECUTIVE_MISS_FETCH = 8;
 const PERMALINK_ENRICH_STOP_AFTER_CONSECUTIVE_MISS_TAB = 15;
-/** Max posts to attempt with tab-based extraction (tab approach is slow: ~18-20s per post). */
-const PERMALINK_TAB_EXTRACT_MAX_POSTS = 50;
+/** Max posts to attempt with tab-based extraction (tab approach is slow:
+ * ~18-20s per post). Truly-unlimited tab cycling crashes Chrome — at scale,
+ * the sequential open/load/script/close cycle accumulates renderer state
+ * faster than the browser can reclaim it, and the user reports "Chrome hung
+ * up the whole browser" within ~30 min. Cap at a value that bounds total
+ * wall-clock to ~100 min worst case (300 × 20s ÷ concurrency 2). User can
+ * raise via the wizard's "Max images" input. */
+const PERMALINK_TAB_EXTRACT_MAX_POSTS_DEFAULT = 300;
 
 /** True if URL looks like a user-content CDN image (not UI sprites). */
 function isAcceptableCdnUrl(s) {
@@ -786,7 +877,16 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
   const effImg = effectiveImageCap(c);
   const imagesInMerged = merged.filter((m) => !isVideoMediaUrl(m.url)).length;
   const imageRoom = Math.max(0, effImg - imagesInMerged);
-  const maxOgByCap = Math.min(MAX_PERMALINK_OG_FETCH, imageRoom);
+  // `caps.maxImages == 0` from the wizard means "use safe default", not "run
+  // forever" — truly-unlimited tab-extraction at scale hangs Chrome (see the
+  // PERMALINK_TAB_EXTRACT_MAX_POSTS_DEFAULT comment). When the user wants
+  // more than the safe default, they raise the wizard's "Max images" input
+  // explicitly.
+  const wantsExplicitCap = c.maxImages > 0;
+  const ogFetchCap = wantsExplicitCap
+    ? Math.min(c.maxImages, imageRoom)
+    : Math.min(MAX_PERMALINK_OG_FETCH, imageRoom);
+  const maxOgByCap = ogFetchCap;
 
   const useTabExtraction = !!(caps?.useTabExtraction);
   const consecutiveMissLimit = useTabExtraction
@@ -849,9 +949,16 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
   }
 
   let done = 0;
-  const rawMaxAttempts = useTabExtraction
-    ? Math.min(candidates.length, PERMALINK_TAB_EXTRACT_MAX_POSTS)
-    : Math.min(candidates.length, MAX_PERMALINK_FETCH_ATTEMPTS);
+  // Per-mode attempt cap, bounded against Chrome resource exhaustion. When the
+  // user sets maxImages > 0 they're explicitly opting in — we respect that
+  // (but the consecutive-miss watchdog still guards against runaway).
+  const tabAttemptCap = wantsExplicitCap
+    ? Math.min(c.maxImages, candidates.length)
+    : Math.min(PERMALINK_TAB_EXTRACT_MAX_POSTS_DEFAULT, candidates.length);
+  const fetchAttemptCap = wantsExplicitCap
+    ? Math.min(c.maxImages, candidates.length)
+    : Math.min(MAX_PERMALINK_FETCH_ATTEMPTS, candidates.length);
+  const rawMaxAttempts = useTabExtraction ? tabAttemptCap : fetchAttemptCap;
   const maxAttempts = Math.min(rawMaxAttempts, maxOgByCap > 0 ? maxOgByCap : rawMaxAttempts);
   const targetMsg = Math.min(candidates.length, maxOgByCap);
   const enrichT0 = Date.now();
@@ -1362,15 +1469,20 @@ function collectProfileLinksFromRow(row, profileLinkMap) {
   });
 }
 
-function harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, ownPostsOnly = false, profileLinkMap = null) {
-  document.querySelectorAll('a[href]').forEach((a) => {
+function harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, ownPostsOnly = false, profileLinkMap = null, token = null) {
+  const anchors = document.querySelectorAll('a[href]');
+  for (let i = 0; i < anchors.length; i++) {
+    // On a heavy DOM (5000+ comment rows) the sweep can take 30 s+; without a
+    // cancel check inside it, Stop wouldn't register until the sweep finished.
+    if (token && token.cancelled) break;
+    const a = anchors[i];
     const href = a.href;
-    if (!interestingBase(href)) return;
+    if (!interestingBase(href)) continue;
     const norm = normalize(href);
     urls.add(norm);
 
     const { commentId, replyCommentId } = parseCommentQuery(href);
-    if (!commentId) return;
+    if (!commentId) continue;
 
     // When ownPostsOnly, only keep comments on posts whose URL path starts with
     // the user's own profile name (e.g. facebook.com/vyakunin/posts/...).
@@ -1378,13 +1490,22 @@ function harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, ownPost
       try {
         const postUrl = new URL(norm);
         const pathParts = postUrl.pathname.split('/').filter(Boolean);
-        if (pathParts[0] !== _ownProfileName) return;
+        if (pathParts[0] !== _ownProfileName) continue;
       } catch (_) {}
     }
 
     const row = findRowContainer(a);
     const timestamp = extractTimestamp(row, a, { diagnosticEnabled: _diagnosticEnabled });
     const fbId = extractFbId(href);
+    // Upgrade timestamp from GraphQL cache when the DOM row exposed only a date.
+    if (!timestamp.utime) {
+      const precise = lookupPrecisePostTimestamp(href, fbId);
+      if (precise) {
+        timestamp.utime = precise;
+        timestamp.source = 'graphql';
+        timestamp.rawText = null;
+      }
+    }
     const text = extractRowTextForAnchor(a, a.href);
     const key = commentKey(commentId, replyCommentId);
     const prev = commentByKey.get(key);
@@ -1400,24 +1521,39 @@ function harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, ownPost
     }
     collectMediaFromRow(row, norm, 'comment', mediaCandidates, caps);
     collectProfileLinksFromRow(row, profileLinkMap);
-  });
+  }
 }
 
-function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMap = null) {
-  document.querySelectorAll('a[href]').forEach((a) => {
+function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMap = null, token = null) {
+  const anchors = document.querySelectorAll('a[href]');
+  for (let i = 0; i < anchors.length; i++) {
+    if (token && token.cancelled) break;
+    const a = anchors[i];
     const href = a.href;
-    if (!interestingBase(href)) return;
+    if (!interestingBase(href)) continue;
     const norm = normalize(href);
     urls.add(norm);
 
     const postKey = stripCommentParamsUrl(href);
     if (!postKey.includes('/posts/') && !postKey.includes('pfbid') && !postKey.includes('story_fbid') && !postKey.includes('permalink') && !postKey.includes('/photo') && !postKey.includes('/reel/') && !postKey.includes('/videos/')) {
-      return;
+      continue;
     }
 
     const row = findRowContainer(a);
     const timestamp = extractTimestamp(row, a, { diagnosticEnabled: _diagnosticEnabled });
     const fbId = extractFbId(postKey);
+    // Upgrade timestamp with precise epoch from GraphQL response cache (page_hook.js)
+    // when the row pill only gave us a date heading. Clear rawText so the
+    // Python importer (_parse_timestamp) doesn't prefer the month-name fallback
+    // over our authoritative GraphQL value.
+    if (!timestamp.utime) {
+      const precise = lookupPrecisePostTimestamp(postKey, fbId);
+      if (precise) {
+        timestamp.utime = precise;
+        timestamp.source = 'graphql';
+        timestamp.rawText = null;
+      }
+    }
     const text = extractRowTextForAnchor(a, a.href);
 
     // For reshare rows ("shared a post."), extract user commentary separately.
@@ -1457,7 +1593,7 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
       collectMediaFromRow(row, postKey, 'post', mediaCandidates, caps);
     }
     collectProfileLinksFromRow(row, profileLinkMap);
-  });
+  }
 }
 
 function getConfig(mode) {
@@ -1501,6 +1637,74 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
   let lastItemCount = 0;
   let stableItemCount = 0;
   const STABLE_ITEM_ROUNDS = 25;
+  // Hard wall-clock cap: if FB's "load more" pipeline hangs (visible as the
+  // never-resolving loading spinner that no longer adds new posts), don't keep
+  // scrolling forever. 5 min of zero net new items is treated as a stall.
+  const STALL_TIMEOUT_MS = 5 * 60 * 1000;
+  // Halfway through a stall, attempt one wake-up nudge before giving up:
+  // scroll up by a viewport, dispatch a scroll event, scroll back down. FB's
+  // lazy loader often re-engages after this. If it doesn't, we still bail at
+  // STALL_TIMEOUT_MS — net cost is one wasted minute per harvest.
+  const STALL_WAKE_AT_MS = STALL_TIMEOUT_MS / 2;
+  let stallWakeAttempted = false;
+  let lastItemAddedAt = Date.now();
+  let stalled = false;
+  // Safe defaults when the user opts into "unlimited" (caps.maxComments == 0 or
+  // caps.maxPosts == 0). The activity-log DOM gets too heavy past ~3000 rows —
+  // Chrome's renderer locks up and the Stop button can't be processed because
+  // the JS thread loses CPU (reported by user 2026-05-16 at 5083 comments).
+  // The user can raise the cap explicitly via wizard input; the safe default
+  // protects accidental "0 = forever" runs from hanging the browser.
+  const SAFE_DEFAULT_COMMENTS = 3000;
+  const SAFE_DEFAULT_POSTS = 2000;
+  const effectiveCommentsCap = caps.maxComments > 0 ? caps.maxComments : SAFE_DEFAULT_COMMENTS;
+  const effectivePostsCap = caps.maxPosts > 0 ? caps.maxPosts : SAFE_DEFAULT_POSTS;
+  // Periodic checkpoint: every CHECKPOINT_EVERY rounds, dump current harvest
+  // state to chrome.storage.local under the same key the final return value
+  // uses. If the tab dies before runScrollHarvest can return cleanly, the most
+  // recent checkpoint survives — the wizard's ZIP/export step reads from this
+  // key, so partial data still flows downstream.
+  const CHECKPOINT_EVERY = 15;
+  // Memory diagnostics: every MEMSAMPLE_EVERY rounds, capture a snapshot
+  // (V8 heap, DOM node count, our accumulator sizes). Bundled into
+  // memory_debug.json at export time so we can tell whether memory bloat is
+  // (a) FB-side DOM weight, (b) our JS heap (accumulators), or (c) both.
+  const MEMSAMPLE_EVERY = 5;
+  const memSamples = [];
+  function captureMemSnapshot() {
+    const pm = (typeof performance !== 'undefined' && performance.memory) ? performance.memory : null;
+    return {
+      round: rounds,
+      tsMs: Date.now() - startTime,
+      domAllNodes: document.querySelectorAll('*').length,
+      domAnchors: document.querySelectorAll('a[href]').length,
+      domArticles: document.querySelectorAll('[role="article"]').length,
+      // V8 heap is per-isolate (shared with FB's main world), gives total JS
+      // memory pressure not just our extension's.
+      jsHeapUsedMB: pm ? Math.round(pm.usedJSHeapSize / (1024 * 1024)) : null,
+      jsHeapTotalMB: pm ? Math.round(pm.totalJSHeapSize / (1024 * 1024)) : null,
+      jsHeapLimitMB: pm ? Math.round(pm.jsHeapSizeLimit / (1024 * 1024)) : null,
+      // Our accumulator sizes — quantifies extension-side state growth
+      urls: urls.size,
+      commentByKey: commentByKey.size,
+      postByKey: postByKey.size,
+      mediaCandidates: mediaCandidates.length,
+      profileLinks: profileLinkMap.size,
+      // page_hook timestamp cache size
+      tsCache: typeof _postTimestampCache !== 'undefined' ? _postTimestampCache.size : 0,
+    };
+  }
+  const storageKey = kind === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
+  async function writeCheckpoint(stoppedBecauseLabel, stoppedEarlyFlag) {
+    try {
+      const partial = buildScrollHarvestReturn(
+        kind, modeLabel, stoppedBecauseLabel, stoppedEarlyFlag,
+        urls, commentByKey, postByKey, mediaCandidates, profileLinkMap,
+        caps, rounds,
+      );
+      await chrome.storage.local.set({ [storageKey]: partial });
+    } catch (_) { /* best-effort */ }
+  }
   // Step 11: scroll-back and idle timing
   const scrollBackInterval = 25 + Math.floor(Math.random() * 11); // 25–35 rounds
   let nextScrollBackAt = scrollBackInterval;
@@ -1508,18 +1712,42 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
   let nextIdleAt = idleInterval;
   const startTime = Date.now();
 
-  while (rounds < CONFIG.maxRounds && stable < CONFIG.stableRoundsBeforeStop && stableItemCount < STABLE_ITEM_ROUNDS && !token.cancelled) {
+  while (rounds < CONFIG.maxRounds && stable < CONFIG.stableRoundsBeforeStop && stableItemCount < STABLE_ITEM_ROUNDS && !token.cancelled && !stalled) {
     if (kind === 'comments') {
-      harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, commentsOwnPostsOnly, profileLinkMap);
+      harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, commentsOwnPostsOnly, profileLinkMap, token);
     } else {
-      harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMap);
+      harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMap, token);
     }
 
-    if (kind === 'comments' && caps.maxComments > 0 && commentByKey.size >= caps.maxComments) {
+    // Treat maxComments=0 / maxPosts=0 as "use safe default" rather than
+    // literally unlimited. Past ~3000 rows the renderer hangs and the user
+    // loses the ability to Stop cleanly.
+    if (kind === 'comments' && commentByKey.size >= effectiveCommentsCap) {
       break;
     }
-    if (kind === 'posts' && caps.maxPosts > 0 && postByKey.size >= caps.maxPosts) {
+    if (kind === 'posts' && postByKey.size >= effectivePostsCap) {
       break;
+    }
+
+    // Periodic checkpoint: persist the partial state every CHECKPOINT_EVERY
+    // rounds so a tab-kill (Chrome OOM, user force-quits) doesn't lose
+    // everything in-memory. Cheap (~few hundred KB write); fire-and-forget.
+    if (rounds > 0 && rounds % CHECKPOINT_EVERY === 0) {
+      writeCheckpoint('checkpoint_in_progress', false).catch(() => {});
+    }
+    // Periodic memory snapshot: lets us tell offline whether memory bloat is
+    // FB-side DOM weight or our extension's accumulators.
+    if (rounds === 0 || rounds % MEMSAMPLE_EVERY === 0) {
+      const snap = captureMemSnapshot();
+      memSamples.push(snap);
+      console.info('[fb-export][mem]', kind, `r${rounds}`,
+        `dom=${snap.domAllNodes}`, `articles=${snap.domArticles}`,
+        `heap=${snap.jsHeapUsedMB}MB/${snap.jsHeapTotalMB}MB`,
+        `our=${snap.urls}u/${snap.commentByKey}c/${snap.postByKey}p`);
+      // Also persist so a tab kill doesn't lose the samples.
+      chrome.storage.local.set({
+        [`fbcExport_${kind}_mem_samples`]: memSamples,
+      }).catch(() => {});
     }
 
     // Step 9: periodic progress reporting via chrome.storage (fire-and-forget)
@@ -1534,27 +1762,31 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
       }).catch(() => {});
     }
 
-    await delayMs(randomPauseMs(120, 0.55));
+    await delayMsCancellable(randomPauseMs(120, 0.55), token);
+    if (token.cancelled) break;
 
     // Step 10: click "See More" buttons before scrolling
     await clickLoadMoreIfPresent();
+    if (token.cancelled) break;
 
     window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' in window ? 'instant' : 'auto' });
 
-    await delayMs(randomPauseMs(CONFIG.scrollPauseMs, 0.42));
+    await delayMsCancellable(randomPauseMs(CONFIG.scrollPauseMs, 0.42), token);
+    if (token.cancelled) break;
 
     // Step 11: reading micro-pause (18% chance)
     if (Math.random() < 0.18) {
-      await delayMs(randomPauseMs(4000, 0.6));
+      await delayMsCancellable(randomPauseMs(4000, 0.6), token);
     } else if (Math.random() < 0.07) {
-      await delayMs(randomPauseMs(mode === 'full' ? 2200 : 950, 0.45));
+      await delayMsCancellable(randomPauseMs(mode === 'full' ? 2200 : 950, 0.45), token);
     }
+    if (token.cancelled) break;
 
     // Step 11: scroll-back jitter every ~30 rounds
     if (rounds === nextScrollBackAt && !token.cancelled) {
       const scrollBack = Math.round(Math.random() * window.innerHeight * 0.25);
       window.scrollBy(0, -scrollBack);
-      await delayMs(randomPauseMs(750, 0.2));
+      await delayMsCancellable(randomPauseMs(750, 0.2), token);
       window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' in window ? 'instant' : 'auto' });
       nextScrollBackAt = rounds + 25 + Math.floor(Math.random() * 11);
     }
@@ -1562,9 +1794,10 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
     // Step 11: idle break every ~70 rounds (full mode only)
     if (rounds === nextIdleAt && !token.cancelled && mode === 'full') {
       const idleSec = 45 + Math.floor(Math.random() * 76); // 45–120s
-      await delayMs(idleSec * 1000);
+      await delayMsCancellable(idleSec * 1000, token);
       nextIdleAt = rounds + 55 + Math.floor(Math.random() * 31);
     }
+    if (token.cancelled) break;
 
     const h = document.body.scrollHeight;
     if (h === lastHeight) stable += 1;
@@ -1573,9 +1806,32 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
 
     // Step 7: item-count stability
     const currentItems = urls.size;
-    if (currentItems === lastItemCount) stableItemCount += 1;
-    else stableItemCount = 0;
+    if (currentItems === lastItemCount) {
+      stableItemCount += 1;
+    } else {
+      stableItemCount = 0;
+      lastItemAddedAt = Date.now();
+    }
     lastItemCount = currentItems;
+
+    // Stall watchdog. At the halfway point we try a "wake" nudge before the
+    // full bail-out — many "FB stopped loading" cases recover once we trigger
+    // a fresh scroll event from a slightly higher viewport position.
+    const stallMs = Date.now() - lastItemAddedAt;
+    if (!stallWakeAttempted && stallMs > STALL_WAKE_AT_MS) {
+      stallWakeAttempted = true;
+      console.info('[fb-export]', kind, 'idle for', Math.round(stallMs / 1000), 's — attempting wake-up nudge');
+      try {
+        window.scrollBy(0, -window.innerHeight);
+        await delayMsCancellable(1200, token);
+        window.dispatchEvent(new Event('scroll'));
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' in window ? 'instant' : 'auto' });
+      } catch (_) { /* best-effort */ }
+    }
+    if (stallMs > STALL_TIMEOUT_MS) {
+      console.warn('[fb-export]', kind, 'stalled — no new items in', Math.round(stallMs / 1000), 's, stopping');
+      stalled = true;
+    }
 
     rounds += 1;
 
@@ -1593,6 +1849,8 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
     stoppedBecause = 'capComments';
   } else if (kind === 'posts' && caps.maxPosts > 0 && postByKey.size >= caps.maxPosts) {
     stoppedBecause = 'capPosts';
+  } else if (stalled) {
+    stoppedBecause = 'stalled';
   } else if (stableItemCount >= STABLE_ITEM_ROUNDS) {
     stoppedBecause = 'itemStable';
   } else if (rounds >= CONFIG.maxRounds && stable < CONFIG.stableRoundsBeforeStop) {
@@ -1672,6 +1930,62 @@ function dedupeMediaCandidates(list) {
     out.push(m);
   }
   return out;
+}
+
+// Snapshot of harvest state in the same shape as runScrollHarvest's final
+// return. Used for periodic checkpointing so a tab crash mid-harvest still
+// leaves usable data in chrome.storage.local.
+function buildScrollHarvestReturn(
+  kind, modeLabel, stoppedBecause, stoppedEarly,
+  urls, commentByKey, postByKey, mediaCandidates, profileLinkMap,
+  caps, rounds,
+) {
+  const collectedAt = new Date().toISOString();
+  const { out: mediaOut } = sliceMediaCandidatesForOutput(mediaCandidates, caps);
+  if (kind === 'comments') {
+    const commentsWithText = [...commentByKey.values()].sort((a, b) =>
+      String(a.commentId).localeCompare(String(b.commentId)),
+    );
+    upgradeTimeOnlyTimestamps(commentsWithText, collectedAt);
+    return {
+      phase: 'comments',
+      mode: modeLabel,
+      stoppedBecause,
+      stoppedEarly,
+      caps,
+      collectedAt,
+      rounds,
+      uniqueUrls: [...urls].sort(),
+      count: urls.size,
+      commentsWithText,
+      commentsWithTextCount: commentsWithText.length,
+      commentsWithNonEmptyTextCount: commentsWithText.filter((c) => (c.text || '').length > 0).length,
+      mediaCandidates: mediaOut,
+      mediaCapped: false,
+      profileLinks: Object.fromEntries(profileLinkMap),
+    };
+  }
+  const postsWithText = [...postByKey.values()].sort((a, b) =>
+    String(a.postKey).localeCompare(String(b.postKey)),
+  );
+  upgradeTimeOnlyTimestamps(postsWithText, collectedAt);
+  return {
+    phase: 'posts',
+    mode: modeLabel,
+    stoppedBecause,
+    stoppedEarly,
+    caps,
+    collectedAt,
+    rounds,
+    uniqueUrls: [...urls].sort(),
+    count: urls.size,
+    postsWithText,
+    postsWithTextCount: postsWithText.length,
+    postsWithNonEmptyTextCount: postsWithText.filter((p) => (p.text || '').length > 0).length,
+    mediaCandidates: mediaOut,
+    mediaCapped: false,
+    profileLinks: Object.fromEntries(profileLinkMap),
+  };
 }
 
 /**
@@ -1798,12 +2112,19 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
     );
   }
 
-  if (typeof JSZip === 'undefined') {
-    throw new Error('JSZip not loaded');
-  }
+  // v2.8.0 streaming-to-disk:
+  //   - Each fetched media file is handed off to chrome.downloads.download
+  //     via the background service worker so it lands on disk immediately.
+  //     The wizard heap never holds the binary bytes after the per-file await.
+  //   - JSON files (small, ~5 MB total) stream the same way at the end.
+  //   - No JSZip, no zip.generateAsync(blob) peak.
+  // All files land under Downloads/<exportDirName>/. The Python extractor
+  // accepts that directory as input (in addition to the legacy single-ZIP
+  // format from <=v2.7.x).
+  const extVer = chrome.runtime.getManifest?.()?.version || 'unknown';
+  const tsSafe = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+  const exportDirName = `fb-activity-export-v${extVer}-${tsSafe}`;
 
-  const zip = new JSZip();
-  const mediaFolder = zip.folder('media');
   const mediaErrors = [];
   // Step 6: build media_manifest for Python extractor linkage
   const mediaManifest = [];
@@ -1820,7 +2141,7 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
       err: 0,
     });
     if (totalMedia > 0) {
-      console.info(`[fb-export] downloading ${totalMedia} media file(s) (timeout ${CDN_MEDIA_FETCH_TIMEOUT_MS / 1000}s each)`);
+      console.info(`[fb-export] streaming ${totalMedia} media file(s) to disk under ${exportDirName}/media (timeout ${CDN_MEDIA_FETCH_TIMEOUT_MS / 1000}s each)`);
     }
     // Step 11: reduce full-mode concurrency from 4 to 2, use random delays
     const concurrency = 2;
@@ -1846,15 +2167,16 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
-        const buf = await res.arrayBuffer();
-        if (buf.byteLength === 0) {
+        const blob = await res.blob();
+        if (blob.size === 0) {
           throw new Error('empty body');
         }
         const ext = guessExt(item.url, res.headers.get('content-type'));
         // Step 6: filename uses stable slug derived from sourcePermalink
         const slug = permalinkSlug(item.sourcePermalink);
         const name = `${slug}_${String(index).padStart(5, '0')}${ext}`;
-        mediaFolder.file(name, buf);
+        const ok = await saveBlobViaBackground(blob, `${exportDirName}/media/${name}`);
+        if (!ok) throw new Error('download API rejected file');
         mediaManifest.push({
           filename: name,
           sourcePermalink: item.sourcePermalink,
@@ -1901,64 +2223,101 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
   }
 
   await writeZipProgress({
-    stage: 'zip_build',
+    stage: 'metadata',
     detail: skipMedia
-      ? 'Building JSON + manifest (media skipped)…'
-      : 'Compressing files and encoding ZIP (large exports can take 1–2 min)…',
+      ? 'Saving JSON + manifest (media skipped)…'
+      : 'Saving JSON metadata files…',
   });
 
   // Merge profile links from both harvest phases (comments + posts)
   const profileLinks = { ...(posts?.profileLinks ?? {}), ...(comments?.profileLinks ?? {}) };
 
-  zip.file('comments.json', JSON.stringify(comments ?? { note: 'no comments phase run' }, null, 2));
-  zip.file('posts.json', JSON.stringify(posts ?? { note: 'no posts phase run' }, null, 2));
-  zip.file('permalink_debug.json', JSON.stringify(permalinkDebugExport, null, 2));
-  zip.file('media_errors.json', JSON.stringify(mediaErrors, null, 2));
-  // Step 6: add media_manifest.json so Python extractor can link files to posts
-  zip.file('media_manifest.json', JSON.stringify(mediaManifest, null, 2));
-  // Reaction counts collected from live post pages (post URL → integer count).
+  const metadataFiles = [
+    { name: 'comments.json', content: comments ?? { note: 'no comments phase run' } },
+    { name: 'posts.json', content: posts ?? { note: 'no posts phase run' } },
+    { name: 'permalink_debug.json', content: permalinkDebugExport },
+    { name: 'media_errors.json', content: mediaErrors },
+    { name: 'media_manifest.json', content: mediaManifest },
+    { name: 'profile_links.json', content: profileLinks },
+  ];
   if (Object.keys(allReactionCounts).length > 0) {
-    zip.file('reaction_counts.json', JSON.stringify(allReactionCounts, null, 2));
+    metadataFiles.push({ name: 'reaction_counts.json', content: allReactionCounts });
   }
-  // Link attachments collected from live post pages (post URL → [{url, title, image}]).
   if (Object.keys(allLinkAttachments).length > 0) {
-    zip.file('link_attachments.json', JSON.stringify(allLinkAttachments, null, 2));
+    metadataFiles.push({ name: 'link_attachments.json', content: allLinkAttachments });
   }
-  // HTML dumps of first few enriched post pages (for offline debugging)
-  const htmlDumpKeys = Object.keys(allHtmlDumps);
-  if (htmlDumpKeys.length > 0) {
-    const htmlFolder = zip.folder('debug_html');
-    for (const key of htmlDumpKeys) {
-      const sanitized = key.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 80);
-      htmlFolder.file(`${sanitized}.html`, allHtmlDumps[key]);
-    }
-  }
-  // Profile link map: display name → Facebook profile URL (for mention enrichment)
-  zip.file('profile_links.json', JSON.stringify(profileLinks, null, 2));
-  zip.file(
-    'README.txt',
-    [
-      'FB Activity Log export (personal tool; not affiliated with Meta).',
-      '',
-      'comments.json / posts.json: Activity Log scroll harvest.',
-      'permalink_debug.json: harvest counts + per-post permalink fetch signals (HTML length, fetchMode, parser flags, optional htmlHeadSample).',
-      'media/: row thumbnails + permalink og:image fetch (~10s wall budget per enrich, ~4s per URL); CDN downloads use separate timeouts.',
-      'media_manifest.json: maps each media file to its source post/comment URL.',
-      'profile_links.json: display name → Facebook profile URL mapping for mention enrichment.',
-      'media_errors.json: failed fetches.',
-      '',
-      `Generated: ${new Date().toISOString()}`,
-    ].join('\n'),
-  );
+  // Diagnostic: dump the first few raw GraphQL responses page_hook captured.
+  // Lets us inspect FB's response shape offline and tune the timestamp walker
+  // (collectPostTimestamps in page_hook.js) without forcing a fresh export
+  // each iteration.
+  metadataFiles.push({
+    name: 'graphql_debug.json',
+    content: {
+      capturedSamples: _graphqlSamples.length,
+      cap: _GRAPHQL_SAMPLES_CAP,
+      timestampCacheSize: _postTimestampCache.size,
+      timestampCacheFirstKeys: [..._postTimestampCache.keys()].slice(0, 10),
+      samples: _graphqlSamples,
+    },
+  });
 
-  const blob = await zip.generateAsync({ type: 'blob' });
-  const dlUrl = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = dlUrl;
-  const extVer = chrome.runtime.getManifest?.()?.version || 'unknown';
-  a.download = `fb-activity-export-v${extVer}-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.zip`;
-  a.click();
-  URL.revokeObjectURL(dlUrl);
+  // Diagnostic: dump memory snapshots taken during the harvest phases.
+  // memSamples for each phase live under fbcExport_<phase>_mem_samples — pull
+  // them out of storage so they survive into the export.
+  try {
+    const memStored = await chrome.storage.local.get([
+      'fbcExport_comments_mem_samples',
+      'fbcExport_posts_mem_samples',
+    ]);
+    metadataFiles.push({
+      name: 'memory_debug.json',
+      content: {
+        commentsHarvest: memStored.fbcExport_comments_mem_samples ?? [],
+        postsHarvest: memStored.fbcExport_posts_mem_samples ?? [],
+        legend: {
+          domAllNodes: 'document.querySelectorAll("*").length — total DOM nodes',
+          domArticles: 'document.querySelectorAll("[role=article]").length — comment/post rows',
+          jsHeapUsedMB: 'performance.memory.usedJSHeapSize — V8 isolate heap (shared FB + our extension)',
+          jsHeapTotalMB: 'performance.memory.totalJSHeapSize — committed by V8',
+          jsHeapLimitMB: 'performance.memory.jsHeapSizeLimit — process cap',
+          urls: 'our extension accumulator: harvested URLs',
+          commentByKey: 'our extension accumulator: comments',
+          postByKey: 'our extension accumulator: posts',
+          mediaCandidates: 'our extension accumulator: media URLs',
+          tsCache: 'page_hook GraphQL timestamp cache entries',
+        },
+      },
+    });
+  } catch (_) { /* best-effort */ }
+  for (const f of metadataFiles) {
+    const blob = new Blob([JSON.stringify(f.content, null, 2)], { type: 'application/json' });
+    await saveBlobViaBackground(blob, `${exportDirName}/${f.name}`);
+  }
+
+  // HTML dumps of first few enriched post pages (for offline debugging).
+  const htmlDumpKeys = Object.keys(allHtmlDumps);
+  for (const key of htmlDumpKeys) {
+    const sanitized = key.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 80);
+    const blob = new Blob([allHtmlDumps[key]], { type: 'text/html' });
+    await saveBlobViaBackground(blob, `${exportDirName}/debug_html/${sanitized}.html`);
+  }
+
+  const readme = [
+    'FB Activity Log export (personal tool; not affiliated with Meta).',
+    '',
+    `Generator: extension v${extVer} (streaming-to-disk format).`,
+    'Each file in this directory is saved as a separate download — no ZIP.',
+    'media/: image and video files referenced by media_manifest.json.',
+    'comments.json / posts.json: Activity Log scroll harvest.',
+    'permalink_debug.json: harvest counts + per-post permalink fetch signals.',
+    'media_manifest.json: maps each media file to its source post/comment URL.',
+    'profile_links.json: display name → Facebook profile URL mapping.',
+    'media_errors.json: per-URL fetch failures.',
+    '',
+    `Generated: ${new Date().toISOString()}`,
+  ].join('\n');
+  const readmeBlob = new Blob([readme], { type: 'text/plain' });
+  await saveBlobViaBackground(readmeBlob, `${exportDirName}/README.txt`);
 
   return {
     phase: 'media_zip',

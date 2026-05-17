@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FB Activity Log Export (personal)",
-  "version": "2.7.9",
-  "description": "Wizard: Activity Log comments, posts, and best-effort media ZIP. Personal/local use; not affiliated with Meta.",
+  "version": "2.8.6",
+  "description": "Wizard: Activity Log comments, posts, streaming media export, GraphQL timestamp recovery, Finish-Now bail-out. Personal/local use; not affiliated with Meta.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -19,7 +19,7 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["activeTab", "storage", "tabs", "sidePanel", "scripting", "webRequest"],
+  "permissions": ["activeTab", "storage", "tabs", "sidePanel", "scripting", "webRequest", "downloads"],
   "host_permissions": [
     "*://*.facebook.com/*",
     "*://*.fbcdn.net/*"
@@ -34,7 +34,18 @@
         "https://www.facebook.com/allactivity*",
         "https://www.facebook.com/me/allactivity*"
       ],
-      "js": ["lib/jszip.min.js", "lib/shared/timing.js", "lib/shared/zip_helpers.js", "lib/extract_timestamp.js", "content.js"],
+      "js": ["page_hook.js"],
+      "all_frames": false,
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.facebook.com/*/allactivity*",
+        "https://www.facebook.com/allactivity*",
+        "https://www.facebook.com/me/allactivity*"
+      ],
+      "js": ["lib/shared/timing.js", "lib/shared/zip_helpers.js", "lib/extract_timestamp.js", "content.js"],
       "all_frames": false,
       "run_at": "document_idle"
     }

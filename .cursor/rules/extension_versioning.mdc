@@ -1,0 +1,39 @@
+---
+description: Versioning rule for the FB Activity Log + X Activity Export Chrome extensions
+alwaysApply: true
+---
+
+# Chrome Extension Versioning
+
+Applies to `tools/fb_activity_log_extension/manifest.json` and `tools/x_activity_export_extension/manifest.json`. These are personal, single-user extensions — semver's "communicate breaking changes to consumers" doesn't apply. What versioning IS useful for:
+
+1. **Reload distinguishability** — after `chrome://extensions` → Reload, the version number should be different from the one Chrome had cached. Lets the user verify the disk state actually loaded.
+2. **Recall** — "broken in 2.8.4" beats "broken last Thursday".
+
+## Rule
+
+The version is `MAJOR.MINOR.PATCH`. Apply per edit (or per coherent set of edits about to be reload-tested):
+
+- **Patch (`x.y.PATCH`) — bump on EVERY reload-worthy edit.** UI tweak, parser tune, new test, bug fix, refactor, diagnostic toggle. Default for ~90% of changes. If the user is about to reload the extension to test, the version must already be higher than what's installed.
+- **Minor (`x.MINOR.0`) — bump when the export format changes.** Fields added/removed/renamed in `posts.json` / `comments.json` / any of the export-dir JSON files; new files appearing in the export; new chrome permissions; new content_scripts entry. Signals "the Python extractor or downstream pipeline may need to follow."
+- **Major (`MAJOR.0.0`) — rare.** Manifest version migrations (MV3 → MV4 when Google forces it), or a fundamental reorientation of what the extension does. Don't use for "feels big" — use for "the upstream contract changed."
+
+## Files to update together
+
+When you change the manifest's `version`, update **all** of:
+
+1. `manifest.json` → `"version": "..."`
+2. `wizard.html` → cache-bust query string `v=...` on `<script src="...?v=..."></script>` (both `activity_log_urls.js` and `wizard.js`) — otherwise Chrome may serve cached JS even after a reload
+3. **Don't update the description** unless the user-visible scope of the extension actually changed (e.g. a new permission, a new phase). Description drift is a bug-report nuisance.
+
+## Anti-patterns (caught in practice)
+
+**Stacking many changes under one version**, then jumping (e.g. `2.8.0 → 2.8.0 → 2.8.0 → 2.8.0 → 2.9.0`). Cause: forgetting to bump per change. Effect: when the user reports a bug in 2.8.0, you can't tell which iteration of "2.8.0" they ran. The disk state diverged from the version string by 4 commits.
+
+**Skipping the patch tier for "feels like a feature"** (e.g. bumping `2.8.0 → 2.9.0` for a GraphQL hook that's additive and behind a diagnostic dump). The hook is patch-tier under this rule — it doesn't change the export format. Only bump minor when downstream pipelines need to follow.
+
+**Forgetting the cache-bust string in wizard.html.** Symptoms: wizard UI appears unchanged after reload but content.js / page_hook.js / background.js *did* update. Chrome's extension page caches the side-panel JS aggressively.
+
+## When the user notices version drift
+
+If the user asks "why is it still on 2.8.0?", the answer is: "I forgot to bump per change." Fix: roll the version to the correct counted value (`2.8.0 + N` where N is the number of reload-worthy edits since the last bump), and update the cache-bust to match. Then save the rule somewhere if not already saved.

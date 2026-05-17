@@ -237,6 +237,61 @@ class TestParseTimestamp:
 # 4. Mojibake: fix_facebook_encoding applied to activity log text
 # ---------------------------------------------------------------------------
 
+class TestDirectoryInput:
+    """Extension v2.8.0 streams files to a directory instead of a single ZIP.
+    The extractor must accept the directory form natively."""
+
+    def _make_dir_export(self, tmp_path: Path) -> Path:
+        posts = load_fixture("sample_activity_log_posts.json")
+        comments = load_fixture("sample_activity_log_comments.json")
+        export_dir = tmp_path / "fb-activity-export-v2.8.0-2026-05-16T18-49-36"
+        export_dir.mkdir()
+        (export_dir / "posts.json").write_text(json.dumps(posts))
+        (export_dir / "comments.json").write_text(json.dumps(comments))
+        return export_dir
+
+    def test_directory_export_round_trips(self, tmp_path):
+        export_dir = self._make_dir_export(tmp_path)
+        summary = extract(export_dir, tmp_path / "out", dry_run=False)
+        records = list(read_records(tmp_path / "out" / "posts.binpb"))
+        # Same fixtures used by TestCommentMatching — comments should attach
+        # to the "Hello world" post just like in the ZIP test path.
+        post_abc = next(r for r in records if "Hello world" in r.content_text)
+        comment_ids = {c.source_id for c in post_abc.comments}
+        assert "100001111111" in comment_ids
+        assert summary["posts"] >= 1
+
+    def test_directory_export_finds_media_in_subdir(self, tmp_path):
+        export_dir = tmp_path / "fb-activity-export-v2.8.0-2026-05-16T18-49-36"
+        export_dir.mkdir()
+        (export_dir / "media").mkdir()
+        # Minimal posts fixture with a known media filename.
+        post = {
+            "type": "post",
+            "url": "https://www.facebook.com/vyakunin/posts/1234567890",
+            "text": "hello with media",
+            "time": "2024-01-01 12:00",
+            "timestamp": {"utime": 1704110400},
+            "year": 2024,
+        }
+        posts = {"postsWithText": [post], "profileLinks": {}, "collectedAt": "2024-01-01T12:00:00Z"}
+        (export_dir / "posts.json").write_text(json.dumps(posts))
+        (export_dir / "comments.json").write_text(json.dumps({"commentsWithText": []}))
+        (export_dir / "media_manifest.json").write_text(json.dumps([{
+            "filename": "sample_00000.jpg",
+            "sourcePermalink": post["url"],
+            "originalUrl": "https://scontent.fcdn.net/v/sample.jpg",
+            "context": "test",
+        }]))
+        (export_dir / "media" / "sample_00000.jpg").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        summary = extract(export_dir, tmp_path / "out", dry_run=False)
+        # If the extractor copied the media, the file must now live under the
+        # output dir's media/ tree.
+        out_media_files = list((tmp_path / "out" / "media").rglob("*.jpg"))
+        assert summary["posts"] >= 1
+        assert len(out_media_files) >= 1
+
+
 class TestMojibakeFixApplied:
     def test_cyrillic_round_trip(self):
         original = "Привет мир"

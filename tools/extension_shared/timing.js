@@ -7,6 +7,21 @@ function delayMs(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Cancellable sleep: polls token.cancelled every ~`chunkMs` and resolves early
+// when the token is flipped. Used by scroll harvest so the "Stop" button takes
+// effect within `chunkMs` of being clicked, instead of waiting for a long
+// idle/scroll-pause sleep to fire its setTimeout.
+async function delayMsCancellable(ms, token, chunkMs = 250) {
+  if (ms <= 0) return;
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (token && token.cancelled) return;
+    const remaining = end - Date.now();
+    if (remaining <= 0) return;
+    await delayMs(Math.min(chunkMs, remaining));
+  }
+}
+
 // Abort fetch after timeoutMs so ZIP/media steps cannot hang forever on a bad URL.
 async function fetchWithTimeout(url, timeoutMs, options = {}) {
   const ctrl = new AbortController();
@@ -28,5 +43,5 @@ function randomPauseMs(baseMs, spread = 0.4) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { delayMs, fetchWithTimeout, randomPauseMs };
+  module.exports = { delayMs, delayMsCancellable, fetchWithTimeout, randomPauseMs };
 }

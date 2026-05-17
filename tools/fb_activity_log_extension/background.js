@@ -376,6 +376,56 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  // ── Stream a single file to disk via chrome.downloads (avoids accumulating
+  //    bytes in the wizard heap). Called per-media-file by content.js.
+  //    msg = { blobUrl: string, filename: string (relative to Downloads/) }
+  if (msg.type === 'FB_EXPORT_SAVE_FILE') {
+    (async () => {
+      try {
+        if (typeof msg.blobUrl !== 'string' || !msg.blobUrl) {
+          sendResponse({ ok: false, error: 'missing blobUrl' });
+          return;
+        }
+        if (typeof msg.filename !== 'string' || !msg.filename) {
+          sendResponse({ ok: false, error: 'missing filename' });
+          return;
+        }
+        const downloadId = await chrome.downloads.download({
+          url: msg.blobUrl,
+          filename: msg.filename,
+          conflictAction: 'uniquify',
+          saveAs: false,
+        });
+        const finalState = await new Promise((resolve) => {
+          // 5 min per-file ceiling. Most media files are <1 MB and complete in
+          // well under a second; large videos (up to ~30 MB) can take longer
+          // on slow connections. The wait protects against the
+          // chrome.downloads queue getting stuck silently — if the timeout
+          // hits, we resolve as 'timeout' and the wizard records a media
+          // error for that URL rather than hanging the whole export.
+          const timeoutMs = 5 * 60 * 1000;
+          const t = setTimeout(() => {
+            chrome.downloads.onChanged.removeListener(listener);
+            resolve('timeout');
+          }, timeoutMs);
+          const listener = (delta) => {
+            if (delta.id !== downloadId) return;
+            if (delta.state && delta.state.current !== 'in_progress') {
+              clearTimeout(t);
+              chrome.downloads.onChanged.removeListener(listener);
+              resolve(delta.state.current);
+            }
+          };
+          chrome.downloads.onChanged.addListener(listener);
+        });
+        sendResponse({ ok: finalState === 'complete', state: finalState, downloadId });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err) });
+      }
+    })();
+    return true;
+  }
+
   // ── Diagnostic webRequest capture control ──
   if (msg.type === 'FB_EXPORT_DIAG_START_WEBREQUEST') {
     const diagTabId = msg.tabId;
