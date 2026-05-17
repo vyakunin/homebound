@@ -102,11 +102,13 @@
         <button type="button" id="save-urls">Save URLs</button>
       </details>
       <details class="date-filter-details">
-        <summary>Date filter (one month at a time — bounds memory, lets you resume across sessions)</summary>
-        <p class="hint">When set, the wizard appends <code>&amp;year=YYYY&amp;month=MM</code> to both URLs above. Leave blank to scrape the unfiltered feed (memory-heavy on large archives).</p>
+        <summary>Date range (auto-iterates month-by-month — bounds memory on long archives)</summary>
+        <p class="hint">The wizard scrapes each month newest→oldest and merges results into one ZIP. Leave both empty for the unfiltered feed. Leave one side empty for "everything before X" (set <em>to</em>) or "everything after X" (set <em>from</em>).</p>
         <div class="caps-grid">
-          <label>Year <input type="number" id="filter-year" min="2004" max="2099" step="1" inputmode="numeric" placeholder="e.g. 2019" /></label>
-          <label>Month (1-12) <input type="number" id="filter-month" min="1" max="12" step="1" inputmode="numeric" placeholder="e.g. 10" /></label>
+          <label>From year <input type="number" id="from-year" min="2004" max="2099" step="1" inputmode="numeric" placeholder="oldest YYYY" /></label>
+          <label>From month (1-12) <input type="number" id="from-month" min="1" max="12" step="1" inputmode="numeric" placeholder="MM" /></label>
+          <label>To year <input type="number" id="to-year" min="2004" max="2099" step="1" inputmode="numeric" placeholder="newest YYYY" /></label>
+          <label>To month (1-12) <input type="number" id="to-month" min="1" max="12" step="1" inputmode="numeric" placeholder="MM" /></label>
         </div>
       </details>
       <button type="button" id="btn-start-wizard" class="primary">Start wizard</button>
@@ -165,7 +167,7 @@
     <p id="status" class="status" aria-live="polite"></p>
 
     <!-- Query string busts extension disk cache after updates (bump when editing JS). -->
-    <script src="activity_log_urls.js?v=2.8.9"></script>
-    <script src="wizard.js?v=2.8.9"></script>
+    <script src="activity_log_urls.js?v=2.8.10"></script>
+    <script src="wizard.js?v=2.8.10"></script>
   </body>
 </html>

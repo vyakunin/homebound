@@ -217,15 +217,22 @@ async function loadUrlFields() {
     comments: d.comments,
     posts: d.posts,
   };
-  const r = await chrome.storage.local.get(['fbCustomUrls', 'fbDateFilter']);
+  const r = await chrome.storage.local.get(['fbCustomUrls', 'fbDateRange']);
   document.getElementById('url-comments').value = r.fbCustomUrls?.comments || defaults.comments;
   document.getElementById('url-posts').value = r.fbCustomUrls?.posts || defaults.posts;
-  // Restore year/month so the filter survives across wizard reloads. Empty
-  // values render as blank inputs (= no filter).
-  const yi = document.getElementById('filter-year');
-  const mi = document.getElementById('filter-month');
-  if (yi) yi.value = r.fbDateFilter?.year ? String(r.fbDateFilter.year) : '';
-  if (mi) mi.value = r.fbDateFilter?.month ? String(r.fbDateFilter.month) : '';
+  // Restore the from/to date range so it survives across wizard reloads.
+  // Empty values render as blank inputs (= no filter).
+  const range = r.fbDateRange || {};
+  const fields = [
+    ['from-year', range.fromYear],
+    ['from-month', range.fromMonth],
+    ['to-year', range.toYear],
+    ['to-month', range.toMonth],
+  ];
+  for (const [id, val] of fields) {
+    const el = document.getElementById(id);
+    if (el) el.value = val ? String(val) : '';
+  }
 }
 
 // Append year/month query params to an Activity Log URL when the user has
@@ -250,17 +257,132 @@ function applyDateFilter(url, year, month) {
   }
 }
 
-async function getNavUrls() {
+// Compute the list of (year, month) tuples covered by a from/to range,
+// newest-first (matches FB's natural feed ordering). Returns [] when both
+// sides are empty (signals: no filter, scrape the unfiltered feed) and when
+// the inputs are inconsistent (inverted range, out-of-bounds, half-specified).
+//
+// Partial empty sides are clamped to sensible defaults:
+//   - empty `from` → 2004-01 (Facebook launch)
+//   - empty `to`   → current year/month (passed in as nowY/nowM for testability)
+// A "half-specified" side (year set but month empty, or vice versa) is treated
+// as fully empty — both year AND month must be set on a side for it to count.
+function generateMonthRange(fromY, fromM, toY, toM, nowY, nowM) {
+  // "Empty side" = both year and month are null/undefined/''. Treat a typed
+  // 0 (or any other invalid value) as NON-empty so it fails validation
+  // rather than getting silently clamped to the default.
+  const isEmpty = (v) => v === null || v === undefined || v === '';
+  const hasFromY = !isEmpty(fromY);
+  const hasFromM = !isEmpty(fromM);
+  const hasToY = !isEmpty(toY);
+  const hasToM = !isEmpty(toM);
+  // Half-specified sides (year set without month, or vice versa) are
+  // ambiguous → treat as empty to keep semantics simple.
+  const hasFrom = hasFromY && hasFromM;
+  const hasTo = hasToY && hasToM;
+  if (!hasFrom && !hasTo) return [];
+
+  const fY = hasFrom ? parseInt(String(fromY), 10) : 2004;
+  const fM = hasFrom ? parseInt(String(fromM), 10) : 1;
+  const tY = hasTo ? parseInt(String(toY), 10) : nowY;
+  const tM = hasTo ? parseInt(String(toM), 10) : nowM;
+
+  if (![fY, fM, tY, tM].every(Number.isFinite)) return [];
+  if (fY < 2004 || fY > 2099 || tY < 2004 || tY > 2099) return [];
+  if (fM < 1 || fM > 12 || tM < 1 || tM > 12) return [];
+
+  const fromKey = fY * 12 + (fM - 1);
+  const toKey = tY * 12 + (tM - 1);
+  if (fromKey > toKey) return [];
+
+  const out = [];
+  for (let k = toKey; k >= fromKey; k--) {
+    out.push({ year: Math.floor(k / 12), month: (k % 12) + 1 });
+  }
+  return out;
+}
+
+async function getDateRange() {
+  const r = await chrome.storage.local.get(['fbDateRange']);
+  return r.fbDateRange || {};
+}
+
+// Merge two harvest results into one (same shape as buildScrollHarvestReturn
+// in content.js). Used when iterating month-by-month: each per-month sendPhase
+// returns a result for that month only; we merge them client-side so the
+// final ZIP step sees a single combined dataset.
+//
+// Dedupe keys:
+//   - uniqueUrls          : Set<string>
+//   - commentsWithText    : Map<commentId, item>
+//   - postsWithText       : Map<postKey,   item>
+//   - mediaCandidates     : Map<url,       item>
+//   - profileLinks        : object merge   (same name from either side wins last)
+function mergeHarvestResults(prev, curr) {
+  if (!prev) return curr ? { ...curr } : null;
+  if (!curr) return { ...prev };
+
+  const phase = curr.phase || prev.phase;
+  const itemsKey = phase === 'comments' ? 'commentsWithText' : 'postsWithText';
+  const idKey = phase === 'comments' ? 'commentId' : 'postKey';
+  const countKey = `${itemsKey}Count`;
+  const nonEmptyCountKey = itemsKey.replace('WithText', 'WithNonEmptyText') + 'Count';
+
+  const urlSet = new Set([...(prev.uniqueUrls || []), ...(curr.uniqueUrls || [])]);
+
+  const itemMap = new Map();
+  for (const it of (prev[itemsKey] || [])) {
+    if (it && it[idKey] !== undefined) itemMap.set(it[idKey], it);
+  }
+  for (const it of (curr[itemsKey] || [])) {
+    if (it && it[idKey] !== undefined) itemMap.set(it[idKey], it);
+  }
+  const items = [...itemMap.values()].sort((a, b) =>
+    String(a[idKey]).localeCompare(String(b[idKey])),
+  );
+
+  const mediaMap = new Map();
+  for (const m of (prev.mediaCandidates || [])) {
+    if (m && m.url) mediaMap.set(m.url, m);
+  }
+  for (const m of (curr.mediaCandidates || [])) {
+    if (m && m.url) mediaMap.set(m.url, m);
+  }
+
+  return {
+    phase,
+    mode: curr.mode || prev.mode,
+    stoppedBecause: curr.stoppedBecause || prev.stoppedBecause,
+    stoppedEarly: !!(prev.stoppedEarly || curr.stoppedEarly),
+    caps: curr.caps || prev.caps,
+    collectedAt: curr.collectedAt || prev.collectedAt,
+    rounds: (prev.rounds || 0) + (curr.rounds || 0),
+    uniqueUrls: [...urlSet].sort(),
+    count: urlSet.size,
+    [itemsKey]: items,
+    [countKey]: items.length,
+    [nonEmptyCountKey]: items.filter((it) => (it.text || '').length > 0).length,
+    mediaCandidates: [...mediaMap.values()],
+    mediaCapped: !!(prev.mediaCapped || curr.mediaCapped),
+    profileLinks: { ...(prev.profileLinks || {}), ...(curr.profileLinks || {}) },
+  };
+}
+
+async function getNavUrls(monthOverride) {
   const d = defaultActivityLogUrls();
-  const r = await chrome.storage.local.get(['fbCustomUrls', 'fbDateFilter']);
+  const r = await chrome.storage.local.get(['fbCustomUrls']);
   const baseComments = (r.fbCustomUrls?.comments || d.comments).trim();
   const basePosts = (r.fbCustomUrls?.posts || d.posts).trim();
-  const year = r.fbDateFilter?.year;
-  const month = r.fbDateFilter?.month;
-  return {
-    comments: applyDateFilter(baseComments, year, month),
-    posts: applyDateFilter(basePosts, year, month),
-  };
+  // monthOverride is set during multi-month iteration so each tab navigation
+  // points at one specific month. When the wizard isn't iterating (no range
+  // set), the base URLs are used as-is.
+  if (monthOverride && monthOverride.year && monthOverride.month) {
+    return {
+      comments: applyDateFilter(baseComments, monthOverride.year, monthOverride.month),
+      posts: applyDateFilter(basePosts, monthOverride.year, monthOverride.month),
+    };
+  }
+  return { comments: baseComments, posts: basePosts };
 }
 
 async function saveUrlFields() {
@@ -273,16 +395,20 @@ async function saveUrlFields() {
   setStatus('URLs saved.');
 }
 
-// Auto-persist the date filter on every keystroke so the user doesn't need
-// to click a separate Save button. The inputs live in their own <details>
+// Auto-persist the date range on every change so the user doesn't need to
+// click a separate Save button. The inputs live in their own <details>
 // block and a "remember to click Save" UX would be missed by everyone.
-async function saveDateFilterFromInputs() {
-  const yearRaw = document.getElementById('filter-year')?.value || '';
-  const monthRaw = document.getElementById('filter-month')?.value || '';
+async function saveDateRangeFromInputs() {
+  const read = (id) => {
+    const raw = document.getElementById(id)?.value || '';
+    return raw ? parseInt(raw, 10) : null;
+  };
   await chrome.storage.local.set({
-    fbDateFilter: {
-      year: yearRaw ? parseInt(yearRaw, 10) : null,
-      month: monthRaw ? parseInt(monthRaw, 10) : null,
+    fbDateRange: {
+      fromYear: read('from-year'),
+      fromMonth: read('from-month'),
+      toYear: read('to-year'),
+      toMonth: read('to-month'),
     },
   });
 }
@@ -483,7 +609,14 @@ async function showExportSummary() {
   summary.classList.remove('hidden');
 }
 
+// Wizard-side stop flag for the multi-month iteration loop. The Stop button
+// always signals the content script (current month), but in multi-month mode
+// it ALSO sets this flag so the loop aborts instead of advancing to the next
+// month.
+let _multiMonthStopRequested = false;
+
 async function sendStop() {
+  _multiMonthStopRequested = true;
   const tab = await getActiveTab();
   if (!tab?.id) return;
   try {
@@ -491,6 +624,109 @@ async function sendStop() {
   } catch (_e) {
     /* content script may not be injected */
   }
+}
+
+// Read current year/month — used to clamp empty `to` in date range.
+function nowYearMonth() {
+  const d = new Date();
+  return { year: d.getFullYear(), month: d.getMonth() + 1 };
+}
+
+// Compute the month list to iterate over from persisted fbDateRange. Returns
+// [] if no range is set (signals: single-pass legacy mode).
+async function computeMonthsToIterate() {
+  const r = await getDateRange();
+  const { year: nowY, month: nowM } = nowYearMonth();
+  return generateMonthRange(r.fromYear, r.fromMonth, r.toYear, r.toMonth, nowY, nowM);
+}
+
+// Run one phase (comments OR posts) across a list of months. Navigates the
+// active tab to each month's filtered URL, calls sendPhase, merges per-month
+// results into a wizard-side accumulator. After the last month, writes the
+// combined result to chrome.storage.local under `fbcExport_<phase>` so the
+// existing ZIP step picks it up unchanged.
+async function runPhaseAcrossMonths(phase, months, phaseOpts = {}) {
+  const monthLabel = (m) => `${m.year}-${String(m.month).padStart(2, '0')}`;
+  const progressBarId = phase === 'comments' ? 'harvest-comments-progress' : 'harvest-posts-progress';
+  const stopBtnId = phase === 'comments' ? 'btn-stop' : 'btn-stop-posts';
+  const stepId = phase === 'comments' ? 'step-harvest-comments' : 'step-harvest-posts';
+  const harvestBtnId = phase === 'comments' ? 'btn-harvest-comments' : 'btn-harvest-posts';
+  const storageKey = phase === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
+
+  showStep(stepId);
+  document.getElementById(harvestBtnId)?.classList.add('hidden');
+  document.getElementById(stopBtnId).disabled = false;
+
+  let merged = null;
+  for (let i = 0; i < months.length; i++) {
+    if (_multiMonthStopRequested) break;
+    const m = months[i];
+    const label = monthLabel(m);
+    setStatus(`${phase}: month ${i + 1}/${months.length} — ${label} — navigating…`);
+
+    // Navigate to the month-filtered URL. On failure, skip month but continue.
+    try {
+      const urls = await getNavUrls(m);
+      await navigateTab(phase === 'comments' ? urls.comments : urls.posts);
+    } catch (e) {
+      setStatus(`${label}: navigation failed (${String(e)}) — skipping`, true);
+      continue;
+    }
+    if (_multiMonthStopRequested) break;
+
+    setStatus(`${phase}: month ${i + 1}/${months.length} — ${label} — harvesting…`);
+    const stopPolling = startProgressPolling(progressBarId, (msg) =>
+      setStatus(`${label}: ${msg}`),
+    );
+    try {
+      const res = await sendPhase(phase, phaseOpts);
+      stopPolling();
+      if (!res?.ok) {
+        setStatus(`${label}: ${res?.error || 'harvest failed'} — continuing`, true);
+        continue;
+      }
+      merged = mergeHarvestResults(merged, res.data);
+      // Persist after every month so a tab kill doesn't lose everything.
+      await chrome.storage.local.set({ [storageKey]: merged });
+    } catch (e) {
+      stopPolling();
+      setStatus(`${label}: ${String(e)} — continuing`, true);
+      continue;
+    }
+  }
+
+  document.getElementById(stopBtnId).disabled = true;
+  if (merged) {
+    setStatus(harvestSummaryText(merged) + ` (across ${months.length} month${months.length === 1 ? '' : 's'})`);
+  } else {
+    setStatus(`${phase}: no data collected across ${months.length} months`, true);
+  }
+  return merged;
+}
+
+// Multi-month orchestrator. Runs the user-selected phases (comments / posts)
+// across the months in `months`, then triggers the existing ZIP/download
+// step (which reads from fbcExport_comments / fbcExport_posts — both written
+// by runPhaseAcrossMonths).
+async function runMultiMonthSession(months) {
+  _multiMonthStopRequested = false;
+  const mode = getHarvestMode();
+
+  // Clear any stale single-month checkpoints from a previous run so the ZIP
+  // step doesn't pick up leftover data from a different session.
+  await chrome.storage.local.remove(['fbcExport_comments', 'fbcExport_posts']);
+
+  if (mode.comments) {
+    const opts = { commentsOwnPostsOnly: getWizardPrefsPayload().commentsOwnPostsOnly };
+    await runPhaseAcrossMonths('comments', months, opts);
+    if (_multiMonthStopRequested) {
+      setStatus('Stopped — exporting what was collected so far…');
+    }
+  }
+  if (mode.posts && !_multiMonthStopRequested) {
+    await runPhaseAcrossMonths('posts', months);
+  }
+  await autoZipAndDownload();
 }
 
 // ── Harvest functions ────────────────────────────────────────────────────────
@@ -740,22 +976,40 @@ function bindUi() {
     saveUrlFields().catch((e) => setStatus(String(e), true));
   });
 
-  for (const id of ['filter-year', 'filter-month']) {
+  for (const id of ['from-year', 'from-month', 'to-year', 'to-month']) {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', () => {
-        saveDateFilterFromInputs().catch((e) => setStatus(String(e), true));
+        saveDateRangeFromInputs().catch((e) => setStatus(String(e), true));
       });
     }
   }
 
-  document.getElementById('btn-start-wizard').addEventListener('click', () => {
+  document.getElementById('btn-start-wizard').addEventListener('click', async () => {
     const mode = getHarvestMode();
     if (!mode.comments && !mode.posts) {
       setStatus('Select at least one item to harvest.', true);
       return;
     }
     markSkippedSteps(mode);
+
+    // Multi-month auto-iteration: kicks in when the user set a date range.
+    // The orchestrator navigates between months itself and merges per-month
+    // results, so it bypasses the per-step nav UI entirely.
+    let months = [];
+    try {
+      months = await computeMonthsToIterate();
+    } catch (e) {
+      setStatus(`Failed to read date range: ${e}`, true);
+      return;
+    }
+    if (months.length > 0) {
+      setStatus(`Date range active — iterating ${months.length} month${months.length === 1 ? '' : 's'} newest→oldest.`);
+      runMultiMonthSession(months).catch((e) => setStatus(String(e), true));
+      return;
+    }
+
+    // Legacy single-pass flow (no date range).
     if (mode.comments) {
       proceedIntroToCommentsFlow().catch((e) => setStatus(String(e), true));
     } else {
@@ -914,5 +1168,5 @@ document.addEventListener('DOMContentLoaded', () => {
 // Pure-function exports for Node-side unit tests. Side-effect-free; safe to
 // import in jsdom-less environments.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { applyDateFilter };
+  module.exports = { applyDateFilter, generateMonthRange, mergeHarvestResults };
 }
