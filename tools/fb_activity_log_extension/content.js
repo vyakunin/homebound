@@ -1702,6 +1702,9 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
       profileLinks: profileLinkMap.size,
       // page_hook timestamp cache size
       tsCache: typeof _postTimestampCache !== 'undefined' ? _postTimestampCache.size : 0,
+      // DOM pruning effectiveness (rows we've replaced with placeholders)
+      prunedRows: totalPruned,
+      pruningPlaceholders: document.querySelectorAll('[data-fb-export-placeholder]').length,
     };
   }
 
@@ -1717,6 +1720,64 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
     const pm = (typeof performance !== 'undefined' && performance.memory) ? performance.memory : null;
     if (!pm) return false;
     return (pm.usedJSHeapSize / (1024 * 1024)) > HEAP_PRESSURE_MB;
+  }
+
+  // DOM pruning: free the FB-side memory cost of harvested rows. Each
+  // activity-log row carries ~hundreds of DOM nodes (avatars, action
+  // buttons, reaction counts, etc.) plus React state and event listeners.
+  // After we've extracted the row's text+permalink+media into our Maps, the
+  // row's DOM contribution is pure dead weight. The 2026-05-17 memory_debug
+  // showed 258k DOM nodes by end of comments phase; pruning rows already in
+  // our `urls` Set should claw back 60-80% of that.
+  //
+  // Strategy: only prune rows FAR above the current viewport (the user has
+  // long scrolled past them; FB's intersection observers have stopped caring
+  // about them). Replace the row's container with a height-preserving
+  // placeholder div so scroll geometry stays identical. Mark rows with
+  // data-fbExportPruned to skip on subsequent passes.
+  //
+  // Safety: if FB's React re-renders content into our placeholders (i.e.
+  // they get repopulated), we'd see growth resume. The next memory_debug
+  // run will reveal whether the strategy worked or got reverted; if it
+  // failed, we'd see DOM counts climb again despite pruning calls firing.
+  const PRUNE_EVERY = 5;             // every N rounds
+  const PRUNE_ABOVE_VIEWPORT_PX = 5000; // only rows >5000px above viewport
+  let totalPruned = 0;
+  function pruneHarvestedRowsAboveViewport() {
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const pruneBelowY = scrollY - PRUNE_ABOVE_VIEWPORT_PX;
+    if (pruneBelowY <= 0) return 0;
+    let pruned = 0;
+    // Pull a stable snapshot of harvested URLs once.
+    const harvested = urls; // Set<string> of normalized URLs
+    if (harvested.size === 0) return 0;
+    // We iterate anchors (cheaper than scanning every row). Each anchor
+    // points back to its row container via findRowContainer.
+    const anchors = document.querySelectorAll('a[href]');
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      if (!a.href || !interestingBase(a.href)) continue;
+      const norm = normalize(a.href);
+      if (!harvested.has(norm)) continue;
+      const row = findRowContainer(a);
+      if (!row || row.dataset.fbExportPruned === '1') continue;
+      const rect = row.getBoundingClientRect();
+      // rect.bottom is relative to viewport; add scrollY for absolute
+      const absoluteBottom = rect.bottom + scrollY;
+      if (absoluteBottom >= pruneBelowY) continue; // still close to viewport
+      const h = Math.max(0, Math.round(rect.height));
+      if (h === 0) continue; // already collapsed
+      try {
+        const placeholder = document.createElement('div');
+        placeholder.style.minHeight = h + 'px';
+        placeholder.style.background = 'transparent';
+        placeholder.dataset.fbExportPlaceholder = '1';
+        placeholder.dataset.fbExportPruned = '1';
+        row.replaceWith(placeholder);
+        pruned += 1;
+      } catch (_) { /* element may have been re-rendered already */ }
+    }
+    return pruned;
   }
   const storageKey = kind === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
   async function writeCheckpoint(stoppedBecauseLabel, stoppedEarlyFlag) {
@@ -1772,6 +1833,17 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
       chrome.storage.local.set({
         [`fbcExport_${kind}_mem_samples`]: memSamples,
       }).catch(() => {});
+    }
+
+    // DOM pruning: free already-harvested rows that are far above the viewport.
+    // FB's intersection observers don't care about them anymore; we have their
+    // data; their DOM is pure dead weight. Run every PRUNE_EVERY rounds.
+    if (rounds > 0 && rounds % PRUNE_EVERY === 0) {
+      const pruned = pruneHarvestedRowsAboveViewport();
+      if (pruned > 0) {
+        totalPruned += pruned;
+        console.info('[fb-export]', kind, `pruned ${pruned} harvested rows from DOM (total ${totalPruned})`);
+      }
     }
 
     // Heap-pressure check: if the renderer is climbing toward freeze territory,
