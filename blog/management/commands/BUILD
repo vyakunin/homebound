@@ -48,3 +48,14 @@ py_library(
         requirement("Django"),
     ],
 )
+
+py_library(
+    name = "generate_embeddings",
+    srcs = ["generate_embeddings.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//blog:embeddings",
+        "//blog:models",
+        requirement("Django"),
+    ],
+)

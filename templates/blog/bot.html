@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+
+{% block title %}Ask Vladimir — Vladimir Yakunin{% endblock %}
+{% block meta_description %}Ask Vladimir a question about his public blog posts. The bot answers from the public corpus only.{% endblock %}
+
+{% block extra_head %}
+<meta name="robots" content="noindex,nofollow">
+<style>
+  .bot-page { max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  .bot-page h1 { font-size: 1.6rem; margin-bottom: 0.5rem; }
+  .bot-page__intro { color: var(--text-muted, #666); font-size: 0.95rem; margin-bottom: 1.5rem; }
+  .bot-form { display: flex; gap: 0.5rem; flex-direction: column; }
+  .bot-form__textarea { width: 100%; min-height: 6rem; padding: 0.75rem; font: inherit; border: 1px solid var(--border, #ccc); border-radius: 6px; box-sizing: border-box; resize: vertical; background: var(--bg, #fff); color: var(--text, #111); }
+  .bot-form__row { display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; }
+  .bot-form__hint { color: var(--text-muted, #888); font-size: 0.85rem; margin-right: auto; }
+  .bot-form__btn { padding: 0.5rem 1.25rem; font: inherit; border: 0; border-radius: 6px; background: var(--accent, #2868d6); color: #fff; cursor: pointer; }
+  .bot-form__btn:disabled { opacity: 0.6; cursor: progress; }
+  .bot-result { margin-top: 1.5rem; padding: 1rem 1.25rem; border-left: 3px solid var(--accent, #2868d6); background: var(--surface, #f7f9fc); border-radius: 0 6px 6px 0; }
+  .bot-result__answer p:first-child { margin-top: 0; }
+  .bot-result__answer p:last-child { margin-bottom: 0; }
+  .bot-result__answer pre { background: rgba(0,0,0,0.05); padding: 0.6rem 0.8rem; overflow-x: auto; border-radius: 4px; }
+  .bot-result__sources { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px dashed var(--border, #ccc); font-size: 0.9rem; }
+  .bot-result__sources strong { display: block; margin-bottom: 0.3rem; color: var(--text-muted, #666); }
+  .bot-result__sources ul { margin: 0; padding-left: 1.2rem; }
+  .bot-error { margin-top: 1rem; padding: 0.75rem 1rem; background: #fff4f4; border-left: 3px solid #d62828; border-radius: 0 6px 6px 0; color: #8a1a1a; }
+  .bot-gate-warning { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: #fff8e0; border-left: 3px solid #d6a228; border-radius: 0 6px 6px 0; color: #6a4e0a; font-size: 0.85rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bot-page">
+  <h1>Ask Vladimir</h1>
+  <p class="bot-page__intro">
+    A small chatbot that answers using only the public posts at vyakunin.org. It will refuse questions
+    that go beyond what's in the corpus — family details, private matters, anything not in the blog.
+    Answers may be wrong; verify by clicking through to the cited posts.
+  </p>
+
+  {% if not bot_public %}
+    <p class="bot-gate-warning">
+      <strong>Preview mode.</strong> This widget is gated behind <code>?bot=1</code> and not linked from the
+      site. Sample transcripts go to the owner for review before public launch.
+    </p>
+  {% endif %}
+
+  {% if not bot_available %}
+    <p class="bot-error">The bot service is currently offline.</p>
+  {% else %}
+    <form class="bot-form" id="bot-form" novalidate>
+      <textarea
+        class="bot-form__textarea"
+        id="bot-question"
+        placeholder="Ask anything…"
+        maxlength="4000"
+        required></textarea>
+      <div class="bot-form__row">
+        <span class="bot-form__hint" id="bot-hint"></span>
+        <button class="bot-form__btn" type="submit" id="bot-submit">Ask</button>
+      </div>
+    </form>
+
+    <div class="bot-result" id="bot-result" hidden>
+      <div class="bot-result__answer" id="bot-answer"></div>
+      <div class="bot-result__sources" id="bot-sources" hidden>
+        <strong>Cited posts</strong>
+        <ul id="bot-sources-list"></ul>
+      </div>
+    </div>
+    <div class="bot-error" id="bot-error" hidden></div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  var form = document.getElementById('bot-form');
+  if (!form) return;
+  var textarea = document.getElementById('bot-question');
+  var submit = document.getElementById('bot-submit');
+  var hint = document.getElementById('bot-hint');
+  var result = document.getElementById('bot-result');
+  var answerEl = document.getElementById('bot-answer');
+  var sourcesWrap = document.getElementById('bot-sources');
+  var sourcesList = document.getElementById('bot-sources-list');
+  var errorEl = document.getElementById('bot-error');
+
+  // The `?bot=1` token is forwarded with each request so the API gate
+  // stays consistent with the page-render gate. After BOT_PUBLIC=True
+  // the server ignores this token but it costs nothing to keep sending.
+  var hasGateToken = new URLSearchParams(window.location.search).get('bot') === '1';
+
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var question = (textarea.value || '').trim();
+    if (!question) return;
+
+    errorEl.hidden = true;
+    result.hidden = true;
+    sourcesWrap.hidden = true;
+    submit.disabled = true;
+    hint.textContent = 'Thinking…';
+
+    try {
+      var resp = await fetch('/api/bot/ask/', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          question: question,
+          bot: hasGateToken ? '1' : undefined,
+        }),
+      });
+      var body = await resp.json().catch(function() { return {}; });
+
+      if (!resp.ok) {
+        errorEl.textContent = body.message || ('Error ' + resp.status);
+        errorEl.hidden = false;
+        return;
+      }
+
+      answerEl.innerHTML = body.answer_html || '';
+      if (body.sources && body.sources.length) {
+        sourcesList.innerHTML = body.sources.map(function(s) {
+          var url = (s.url || '').replace(/"/g, '&quot;');
+          var title = (s.title || s.slug || '').replace(/</g, '&lt;');
+          return '<li><a href="' + url + '">' + title + '</a></li>';
+        }).join('');
+        sourcesWrap.hidden = false;
+      }
+      result.hidden = false;
+    } catch (e) {
+      errorEl.textContent = 'Network error — please try again.';
+      errorEl.hidden = false;
+    } finally {
+      submit.disabled = false;
+      hint.textContent = '';
+    }
+  });
+})();
+</script>
+{% endblock %}

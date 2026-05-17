@@ -1,3 +1,4 @@
+import logging
 import random
 import re
 from collections import Counter
@@ -12,12 +13,27 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
 from django.utils.timezone import now
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 from django.views.generic import ListView, DetailView, CreateView, UpdateView, TemplateView
 
+from blog.embeddings import EmbeddingsUnavailableError, embed_query, is_available
 from blog.forms import PostForm
 from blog.models import Post, PostVisibility, PostSource, Tag
 from blog.stop_words import STOP_WORDS
+
+_log = logging.getLogger(__name__)
+
+# Modes for the unified /search/ page. "keyword" preserves the existing FTS
+# behaviour; "semantic" runs an embedding lookup. The HTML toggle hands the
+# choice back via ?mode=…
+SEARCH_MODE_KEYWORD = "keyword"
+SEARCH_MODE_SEMANTIC = "semantic"
+VALID_SEARCH_MODES = (SEARCH_MODE_KEYWORD, SEARCH_MODE_SEMANTIC)
+
+# Pure-semantic SQL needs both pgvector (Postgres) AND a configured Voyage
+# key; tests using SQLite or environments without the key silently fall
+# back to keyword search rather than 500.
+SEMANTIC_TOP_K = 50
 
 # ── Word-cloud NLP helpers ────────────────────────────────────────────────────
 
@@ -221,37 +237,281 @@ class SearchView(_InfiniteScrollMixin, ListView):
 
     def get_queryset(self):
         self.query = self.request.GET.get('q', '').strip()
+        raw_mode = self.request.GET.get('mode', SEARCH_MODE_KEYWORD).strip().lower()
+        self.mode = raw_mode if raw_mode in VALID_SEARCH_MODES else SEARCH_MODE_KEYWORD
+        # Becomes True only when the user asked for semantic AND we actually
+        # served semantic results. Used by the template to surface a "fell
+        # back to keyword" banner when the Voyage key is missing.
+        self.semantic_active = False
         if not self.query:
             return Post.objects.none()
         base_qs = Post.objects.filter(visibility=PostVisibility.PUBLIC)
+
+        if self.mode == SEARCH_MODE_SEMANTIC and self._is_postgres() and is_available():
+            semantic_qs = self._semantic_queryset(base_qs)
+            if semantic_qs is not None:
+                self.semantic_active = True
+                return semantic_qs
+
         if self._is_postgres():
-            from django.db.models import Q as DbQ
-            # Russian FTS handles inflection but doesn't lexemize Latin/English
-            # words. Adding a `simple`-config rank covers Latin tokens, and an
-            # ILIKE fallback catches anything Postgres's URL tokenizer swallows
-            # (e.g. URL paths kept as a single `url` token).
-            ru_query = SearchQuery(self.query, config='russian')
-            simple_query = SearchQuery(self.query, config='simple')
-            ru_vector = SearchVector('content_text', 'title', config='russian')
-            simple_vector = SearchVector('content_text', 'title', config='simple')
-            return (
-                base_qs
-                .annotate(rank=SearchRank(ru_vector, ru_query) + SearchRank(simple_vector, simple_query))
-                .filter(DbQ(rank__gt=0) | DbQ(content_text__icontains=self.query) | DbQ(title__icontains=self.query))
-                .order_by('-rank', '-created_at')
-                .prefetch_related(*_FULL_PREFETCH)
-            )
-        # Fallback for non-PostgreSQL environments (e.g. SQLite in tests)
+            return self._fts_queryset(base_qs)
+        # Fallback for non-PostgreSQL environments (e.g. SQLite in tests).
         from django.db.models import Q as DbQ
         return base_qs.filter(
             DbQ(content_text__icontains=self.query) | DbQ(title__icontains=self.query)
         ).prefetch_related(*_FULL_PREFETCH)
 
+    def _fts_queryset(self, base_qs):
+        from django.db.models import Q as DbQ
+        # Russian FTS handles inflection but doesn't lexemize Latin/English
+        # words. Adding a `simple`-config rank covers Latin tokens, and an
+        # ILIKE fallback catches anything Postgres's URL tokenizer swallows
+        # (e.g. URL paths kept as a single `url` token).
+        ru_query = SearchQuery(self.query, config='russian')
+        simple_query = SearchQuery(self.query, config='simple')
+        ru_vector = SearchVector('content_text', 'title', config='russian')
+        simple_vector = SearchVector('content_text', 'title', config='simple')
+        return (
+            base_qs
+            .annotate(rank=SearchRank(ru_vector, ru_query) + SearchRank(simple_vector, simple_query))
+            .filter(DbQ(rank__gt=0) | DbQ(content_text__icontains=self.query) | DbQ(title__icontains=self.query))
+            .order_by('-rank', '-created_at')
+            .prefetch_related(*_FULL_PREFETCH)
+        )
+
+    def _semantic_queryset(self, base_qs):
+        """Embed the query, rank rows by cosine distance to the post
+        embedding. Returns ``None`` on any failure so the caller can fall
+        back to keyword search without leaking a 500 to the user."""
+        try:
+            qvec = embed_query(self.query).vector
+        except EmbeddingsUnavailableError as e:
+            _log.warning("Semantic search degraded to keyword: %s", e)
+            return None
+        from pgvector.django import CosineDistance
+        return (
+            base_qs
+            .filter(embedding__isnull=False)
+            .annotate(distance=CosineDistance('embedding', qvec))
+            .order_by('distance')[:SEMANTIC_TOP_K]
+            .prefetch_related(*_FULL_PREFETCH)
+        )
+
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['query'] = self.query
+        ctx['mode'] = self.mode
+        ctx['semantic_active'] = self.semantic_active
+        ctx['semantic_available'] = is_available()
         ctx['result_count'] = ctx['paginator'].count
         return ctx
+
+
+_BOT_GATE_QUERY_PARAM = "bot"
+
+
+class BotWidgetView(TemplateView):
+    """Landing page for the public bot. Hard-gated behind ``?bot=1``
+    until ``BOT_PUBLIC`` is set to True in settings (i.e. the user has
+    reviewed sample transcripts and lifted the gate). When gated, any
+    request without ``?bot=1`` returns 404 — there's no link to the
+    page from elsewhere on the site, so this is purely a defense
+    against accidental discovery."""
+
+    template_name = 'blog/bot.html'
+
+    def dispatch(self, request, *args, **kwargs):
+        if not getattr(settings, "BOT_PUBLIC", False):
+            if request.GET.get(_BOT_GATE_QUERY_PARAM) != "1":
+                from django.http import Http404
+                raise Http404
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        from blog.bot import is_available as bot_is_available
+        ctx = super().get_context_data(**kwargs)
+        ctx['bot_available'] = bot_is_available()
+        ctx['bot_public'] = getattr(settings, "BOT_PUBLIC", False)
+        return ctx
+
+
+from django.views.decorators.csrf import csrf_exempt as _csrf_exempt
+
+
+@_csrf_exempt
+@require_POST
+def bot_ask_api(request):
+    """JSON endpoint the widget posts to. Two layers of throttling
+    (per-IP + site-wide) on top of nginx's own rate-limit zones, and a
+    sign-off gate that mirrors the widget view: anonymous visitors hit
+    a 404 here too if BOT_PUBLIC is False and they don't carry the
+    ``?bot=1`` token (we accept it on either the GET querystring or
+    inside the JSON body for the API-style usage).
+
+    CSRF-exempt: the bot is public/unauthenticated, so CSRF tokens add
+    no real security here — the only thing CSRF would block is
+    cross-origin POSTs, but the bot deliberately accepts them (e.g. an
+    RSS reader embedding the widget on a third-party page is fine)."""
+    import json as _json
+    from django.http import Http404
+
+    from blog.bot import BotUnavailableError, answer as bot_answer
+    from blog.bot import is_available as bot_is_available
+    from blog.bot_throttle import (
+        extract_client_ip, ip_hash_for, is_ip_rate_limited, is_site_rate_limited,
+    )
+    from blog.models import BotTranscript
+
+    try:
+        payload = _json.loads(request.body or b"{}")
+    except _json.JSONDecodeError:
+        return JsonResponse({"error": "invalid_json"}, status=400)
+
+    is_gate_open = getattr(settings, "BOT_PUBLIC", False)
+    gate_token_ok = (
+        request.GET.get(_BOT_GATE_QUERY_PARAM) == "1"
+        or str(payload.get("bot", "")) == "1"
+    )
+    if not is_gate_open and not gate_token_ok:
+        raise Http404
+
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        return JsonResponse({"error": "question_required"}, status=400)
+    if len(question) > 4000:
+        return JsonResponse({"error": "question_too_long"}, status=400)
+
+    if not bot_is_available():
+        return JsonResponse(
+            {"error": "bot_unavailable",
+             "message": "The bot service is currently offline."},
+            status=503,
+        )
+
+    ip = extract_client_ip(request)
+    ip_hash = ip_hash_for(ip)
+
+    if is_site_rate_limited():
+        return JsonResponse(
+            {"error": "site_rate_limited",
+             "message": "The bot is busy right now — please try again in a few minutes."},
+            status=429,
+        )
+    if is_ip_rate_limited(ip_hash):
+        return JsonResponse(
+            {"error": "ip_rate_limited",
+             "message": "You've asked enough questions for this hour — please try again later."},
+            status=429,
+        )
+
+    session_token = str(payload.get("session_token", ""))[:64]
+    try:
+        result = bot_answer(question)
+    except BotUnavailableError as e:
+        _log.error("bot_ask_api hard fail: %s", e, exc_info=True)
+        BotTranscript.objects.create(
+            ip_hash=ip_hash, session_token=session_token,
+            question=question, answer="", error=str(e),
+        )
+        return JsonResponse(
+            {"error": "bot_unavailable",
+             "message": "The bot couldn't generate an answer — please try again later."},
+            status=503,
+        )
+
+    BotTranscript.objects.create(
+        ip_hash=ip_hash,
+        session_token=session_token,
+        question=question,
+        answer=result.answer,
+        cited_slugs=result.cited_slugs,
+        model=result.model,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cache_read_input_tokens=result.cache_read_input_tokens,
+        latency_ms=result.latency_ms,
+    )
+
+    sources = [
+        {"slug": s, "title": t, "url": f"/post/{s}/"}
+        for s, t in zip(result.cited_slugs, result.cited_titles, strict=True)
+    ]
+    # Server-side markdown rendering. Trust boundary: only the bot's
+    # own Anthropic responses pass through this path, so we accept the
+    # default Markdown→HTML output without bleach sanitization (the
+    # adversary model is "Claude writes weird markdown", not "Claude
+    # injects <script>"). The `extra` extension covers fenced code +
+    # tables; `nl2br` turns single newlines into <br> so the widget
+    # respects the model's line breaks.
+    import markdown as _md
+    answer_html = _md.markdown(
+        result.answer,
+        extensions=['extra', 'nl2br', 'sane_lists'],
+    )
+    return JsonResponse({
+        "answer": result.answer,
+        "answer_html": answer_html,
+        "sources": sources,
+        "model": result.model,
+    })
+
+
+@require_GET
+def semantic_search_api(request):
+    """JSON endpoint mirroring the semantic branch of SearchView. Used by
+    headless clients (the future authoring MCP, the public-facing bot
+    widget). Returns 503 when embeddings are unavailable so callers can
+    react explicitly rather than guessing why results are empty."""
+    query = request.GET.get('q', '').strip()
+    try:
+        limit = max(1, min(int(request.GET.get('limit', '10')), SEMANTIC_TOP_K))
+    except ValueError:
+        limit = 10
+    if not query:
+        return JsonResponse({'query': '', 'results': [], 'available': is_available()})
+    if not is_available():
+        return JsonResponse(
+            {'query': query, 'results': [], 'available': False,
+             'error': 'embeddings_unavailable'},
+            status=503,
+        )
+    from django.db import connection
+    if connection.vendor != 'postgresql':
+        # Tests / dev environments without pgvector. Treat as "unavailable"
+        # rather than crashing — the API contract is that callers handle
+        # the soft-fail.
+        return JsonResponse(
+            {'query': query, 'results': [], 'available': False,
+             'error': 'pgvector_unavailable'},
+            status=503,
+        )
+    try:
+        qvec = embed_query(query).vector
+    except EmbeddingsUnavailableError as e:
+        _log.warning("Semantic API soft-fail: %s", e)
+        return JsonResponse(
+            {'query': query, 'results': [], 'available': False,
+             'error': 'embeddings_unavailable'},
+            status=503,
+        )
+    from pgvector.django import CosineDistance
+    rows = (
+        Post.objects.filter(visibility=PostVisibility.PUBLIC, embedding__isnull=False)
+        .annotate(distance=CosineDistance('embedding', qvec))
+        .order_by('distance')
+        .only('slug', 'title', 'content_text', 'created_at')[:limit]
+    )
+    results = [
+        {
+            'slug': p.slug,
+            'title': p.title,
+            'snippet': (p.content_text or '')[:200],
+            'created_at': p.created_at.isoformat(),
+            'distance': float(p.distance),
+        }
+        for p in rows
+    ]
+    return JsonResponse({'query': query, 'results': results, 'available': True})
 
 
 def _word_cloud_counts(texts: list[str], max_words: int = 100) -> list[tuple[str, int]]:

@@ -1,0 +1,67 @@
+# Generic local-dev compose for the homebound public blog.
+#
+# Production runs out of the private platform overlay
+# (~/cursor_projects/homebound-platform/deployment/docker-compose.yml), which
+# expects an externally-managed database. This file is the developer-facing
+# stack: a pgvector Postgres + Django web container that mirrors prod schema.
+#
+# Bring up:
+#     docker compose up -d
+# Restore a prod snapshot into the local db:
+#     gunzip -c /tmp/personal_blog_YYYYMMDD.sql.gz \
+#       | docker compose exec -T db psql -U postgres personal_blog
+# Run migrations (add pgvector ext + embedding column):
+#     docker compose exec web python manage.py migrate
+
+services:
+  db:
+    # pgvector 0.x on top of Postgres 15. Matches prod's intended upgrade
+    # target; the existing prod image is plain postgres:15 and will swap to
+    # pgvector at the Phase 5 deploy.
+    image: pgvector/pgvector:pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: personal_blog
+      # Match prod (homeserver pb_postgres) so restored dumps land with the
+      # same OWNER. Password is dev-only.
+      POSTGRES_USER: blog
+      POSTGRES_PASSWORD: blog
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      # Loopback-only so we never accidentally expose a dev DB to the LAN.
+      - "127.0.0.1:55432:5432"
+
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DJANGO_SETTINGS_MODULE: django_config.settings
+      DEBUG: "True"
+      SECRET_KEY: dev-secret-key-do-not-use-in-production
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      DB_NAME: personal_blog
+      DB_USER: blog
+      DB_PASSWORD: blog
+      DB_HOST: db
+      DB_PORT: "5432"
+      # Voyage embeddings: mount the user's token file into the container.
+      VOYAGE_API_KEY_FILE: /run/secrets/voyage_api_key
+    secrets:
+      - voyage_api_key
+    volumes:
+      - ./media:/app/media
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             gunicorn django_config.wsgi:application --bind 0.0.0.0:8000 --workers 2"
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  db_data:
+
+secrets:
+  voyage_api_key:
+    file: ${HOME}/tokens/homebound_voyage_key

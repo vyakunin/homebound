@@ -98,6 +98,53 @@ django_py_test(
     data = [":fixtures"],
 )
 
+django_py_test(
+    name = "test_bot",
+    srcs = ["test_bot.py"],
+    deps = [
+        "//blog:adapters",
+        "//blog:bot",
+        "//blog:bot_retrieval",
+        "//blog:bot_throttle",
+        "//blog:embeddings",
+        "//blog:feeds",
+        "//blog:forms",
+        "//blog:models",
+        "//blog:sitemaps",
+        "//blog:stop_words",
+        "//blog:templatetags",
+        "//blog:urls",
+        "//blog:views",
+        "//django_config:urls",
+        ":conftest_lib",
+        requirement("django-allauth"),
+        requirement("anthropic"),
+        requirement("Markdown"),
+    ],
+)
+
+django_py_test(
+    name = "test_semantic_search",
+    srcs = ["test_semantic_search.py"],
+    deps = [
+        "//blog:adapters",
+        "//blog:embeddings",
+        "//blog:feeds",
+        "//blog:forms",
+        "//blog:models",
+        "//blog:sitemaps",
+        "//blog:stop_words",
+        "//blog:templatetags",
+        "//blog:urls",
+        "//blog:views",
+        "//django_config:urls",
+        ":conftest_lib",
+        requirement("django-allauth"),
+        requirement("httpx"),
+    ],
+    data = [":fixtures"],
+)
+
 # Extractor tests are standalone — no Django dep needed
 py_test(
     name = "test_google_plus_extractor",
@@ -201,4 +248,5 @@ py_test(
         requirement("lxml"),
         requirement("pytest"),
     ],
+    data = [":fixtures"],
 )

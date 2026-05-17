@@ -21,6 +21,9 @@ dependencies = [
     "betterproto[compiler]==1.2.5",
     "grpcio-tools==1.78.0",
     "wayback==0.4.5",
+    "httpx==0.28.1",
+    "pgvector==0.4.1",
+    "anthropic==0.74.0",
 ]
 
 [tool.ruff]

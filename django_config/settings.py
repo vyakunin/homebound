@@ -58,6 +58,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'django_config.context_processors.analytics',
+                'django_config.context_processors.bot_settings',
             ],
         },
     },
@@ -133,6 +134,18 @@ ACCOUNT_LOGOUT_REDIRECT_URL = '/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 POSTS_PER_PAGE = 20
+
+# Public bot widget — gated behind ?bot=1 until the user has reviewed
+# sample transcripts (see no_prod_experimentation.mdc). Flip to True
+# only after sign-off lands; ./bot/ then becomes publicly accessible
+# and a small "Ask Vladimir" footer link appears.
+BOT_PUBLIC = os.environ.get('BOT_PUBLIC', 'False') == 'True'
+
+# Rate limits (Django-layer; nginx is the hard limit). Per-IP is soft —
+# 30 questions/hour/visitor — meant to dissuade scraping while allowing
+# a real conversation. The site-wide cap is the cost ceiling.
+BOT_PER_IP_RATE_LIMIT_PER_HOUR = int(os.environ.get('BOT_PER_IP_RATE_LIMIT_PER_HOUR', '30'))
+BOT_SITE_RATE_LIMIT_PER_HOUR = int(os.environ.get('BOT_SITE_RATE_LIMIT_PER_HOUR', '500'))
 
 # Optional analytics snippet rendered just before </head> on every page.
 # Set to the full <script>…</script> for GoatCounter / Plausible / etc.

@@ -17,6 +17,19 @@
              autofocus>
       <button class="search-form__btn" type="submit">Search</button>
     </div>
+    <div class="search-form__modes">
+      <label>
+        <input type="radio" name="mode" value="keyword"
+               {% if mode != "semantic" %}checked{% endif %}>
+        Keyword
+      </label>
+      <label{% if not semantic_available %} title="Semantic search unavailable — Voyage API key not configured."{% endif %}>
+        <input type="radio" name="mode" value="semantic"
+               {% if mode == "semantic" %}checked{% endif %}
+               {% if not semantic_available %}disabled{% endif %}>
+        Semantic
+      </label>
+    </div>
   </form>
 
   {% if query %}
@@ -27,6 +40,9 @@
         1 result for <strong>{{ query }}</strong>
       {% else %}
         {{ result_count }} results for <strong>{{ query }}</strong>
+      {% endif %}
+      {% if mode == "semantic" and not semantic_active %}
+        <em>(semantic unavailable — showing keyword matches)</em>
       {% endif %}
     </p>
   {% endif %}

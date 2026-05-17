@@ -76,7 +76,13 @@
   </main>
 
   <footer class="site-footer">
-    <p>Personal blog. Posts imported from Google+, Facebook, and Twitter.</p>
+    <p>
+      Personal blog. Posts imported from Google+, Facebook, and Twitter.
+      {% if BOT_PUBLIC %}
+        <span class="site-footer__sep">·</span>
+        <a href="/bot/" class="site-footer__bot-link">Ask Vladimir</a>
+      {% endif %}
+    </p>
   </footer>
 
 </div>

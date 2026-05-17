@@ -1,5 +1,10 @@
 from django.db import models
 from django.utils.text import slugify
+from pgvector.django import VectorField
+
+# Embedding dimension for Voyage's `voyage-3-lite` model. Kept as a module
+# constant so the migration, model field, and embeddings adapter agree on it.
+EMBEDDING_DIM = 512
 
 
 class PostSource(models.IntegerChoices):
@@ -74,6 +79,13 @@ class Post(models.Model):
     reaction_count = models.IntegerField(default=0)
     comment_count = models.IntegerField(default=0)
     media_count = models.IntegerField(default=0)
+
+    # Semantic search vector + bookkeeping. SHA-256 over the canonical
+    # embed-input lets the backfill skip rows whose text hasn't changed.
+    embedding = VectorField(dimensions=EMBEDDING_DIM, null=True, blank=True)
+    content_hash = models.CharField(max_length=64, blank=True, db_index=True)
+    embedding_model = models.CharField(max_length=64, blank=True)
+    embedded_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -203,6 +215,42 @@ class PostTag(models.Model):
 
     def __str__(self):
         return f"{self.post} — {self.tag}"
+
+
+class BotTranscript(models.Model):
+    """One public-bot question/answer pair. Logged for the user's
+    Phase-4 sample-transcript review before the widget goes public, and
+    kept around afterward as an audit + throttle counter (see
+    ``blog/bot_throttle.py``).
+
+    Only the IP HASH is stored — the bot view feeds the visitor's IP
+    through ``ip_hash_for`` (salt + SHA-256) before insert; raw IPs
+    never touch the DB. ``cited_slugs`` is JSON for SQLite compat in
+    tests; on Postgres it works the same.
+    """
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    ip_hash = models.CharField(max_length=64, db_index=True)
+    session_token = models.CharField(max_length=64, blank=True, db_index=True)
+    question = models.TextField()
+    answer = models.TextField(blank=True)
+    cited_slugs = models.JSONField(default=list)
+    model = models.CharField(max_length=64, blank=True)
+    input_tokens = models.IntegerField(default=0)
+    output_tokens = models.IntegerField(default=0)
+    cache_read_input_tokens = models.IntegerField(default=0)
+    latency_ms = models.IntegerField(default=0)
+    error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['ip_hash', '-created_at'], name='bottx_ip_recent'),
+        ]
+
+    def __str__(self):
+        snippet = (self.question or '')[:60]
+        return f"BotTranscript({self.created_at:%Y-%m-%d %H:%M}, q={snippet!r})"
 
 
 class ProfileLink(models.Model):

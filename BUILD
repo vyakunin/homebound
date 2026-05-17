@@ -57,13 +57,26 @@ py_binary(
     data = ["//blog:migrations"],
     env = {"DJANGO_SETTINGS_MODULE": "django_config.settings"},
     deps = [
+        # Django's startup checks load ROOT_URLCONF, which transitively
+        # imports the entire view layer — migrate needs the runserver
+        # superset of deps for `manage.py` to even start.
         "//django_config:settings",
+        "//django_config:urls",
         "//blog:adapters",
+        "//blog:admin",
         "//blog:apps",
+        "//blog:forms",
         "//blog:models",
+        "//blog:views",
+        "//blog/templatetags:blog_tags",
+        "//blog/templatetags:init",
         requirement("Django"),
         requirement("psycopg2-binary"),
         requirement("django-allauth"),
+        requirement("requests"),
+        requirement("PyJWT"),
+        requirement("cryptography"),
+        requirement("Pillow"),
     ],
 )
 
