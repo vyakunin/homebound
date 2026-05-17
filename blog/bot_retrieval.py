@@ -94,12 +94,24 @@ def _fts_hits(query: str) -> list[BotHit]:
     simple_q = SearchQuery(query, config="simple")
     ru_v = SearchVector("content_text", "title", config="russian")
     simple_v = SearchVector("content_text", "title", config="simple")
+
+    # Token-level ILIKE OR — covers gaps the Russian dictionary leaves.
+    # PG's russian config doesn't unify prefixed verbs (болел/приболел
+    # are different lemmas) so a question like "ты болел недавно?" misses
+    # a post that says "приболел". ILIKE on the substring "болел" finds
+    # it. We drop tokens shorter than 4 chars to suppress noise like
+    # articles and "ты".
+    tokens = [t for t in query.split() if len(t) >= 4]
+    ilike_q = Q()
+    for t in tokens:
+        ilike_q |= Q(content_text__icontains=t) | Q(title__icontains=t)
+
     qs = (
         Post.objects.only(
             "id", "slug", "title", "content_text", "created_at", "visibility",
         ).filter(visibility=PostVisibility.PUBLIC)
         .annotate(rank=SearchRank(ru_v, ru_q) + SearchRank(simple_v, simple_q))
-        .filter(Q(rank__gt=0) | Q(content_text__icontains=query) | Q(title__icontains=query))
+        .filter(Q(rank__gt=0) | Q(content_text__icontains=query) | Q(title__icontains=query) | ilike_q)
         .order_by("-rank", "-created_at")[:FANOUT_PER_HALF]
     )
     return [_post_to_hit(p, keyword_rank=float(p.rank), semantic_distance=None) for p in qs]
