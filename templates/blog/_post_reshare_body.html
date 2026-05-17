@@ -7,24 +7,35 @@
 </div>
 
 {# ── Reshared content body ──────────────────────────────────────────── #}
-{# Show EITHER the blockquote (when we have reshared text) OR the Facebook   #}
-{# embed iframe (when we don't). Never both — the iframe loads the same      #}
-{# text via data-show-text="true", which duplicates the blockquote content.  #}
-{% if post.reshared_content_text and post.reshared_content_text != "(original post not available)" %}
-  {% if not post.reshared_from_url or not post.reshared_content_text|is_fb_unavailable_reshare_notice %}
-    <blockquote class="gplus-reshare-embed"><div class="gplus-reshare-embed-inner">{{ post.reshared_content_text|linebreaksbr }}</div></blockquote>
-  {% endif %}
-{% elif post.reshared_from_url %}
-  {% if post|fb_reshare_embed_iframe_ok %}
-    <div class="gplus-fb-post-embed">
-      <div class="fb-post"
-        data-href="{{ post.reshared_from_url }}"
-        data-width="500"
-        data-show-text="true"></div>
+{# Mirror the Twitter pattern (templates/blog/_tweet_embed.html): when we     #}
+{# have an embeddable original URL, render the official FB embed div with    #}
+{# any captured text as FALLBACK content INSIDE the div. FB's JS SDK         #}
+{# replaces the div with a rich iframe on load and the fallback disappears.  #}
+{# If the SDK fails/blocks, the fallback stays visible. No duplication       #}
+{# either way (the embed's own data-show-text="true" handles the loaded      #}
+{# state; the inner blockquote handles the unloaded state).                  #}
+{% if post.reshared_from_url and post|fb_reshare_embed_iframe_ok %}
+  <div class="gplus-fb-post-embed">
+    <div class="fb-post"
+      data-href="{{ post.reshared_from_url }}"
+      data-width="500"
+      data-show-text="true">
+      {% if post.reshared_content_text and post.reshared_content_text != "(original post not available)" and not post.reshared_content_text|is_fb_unavailable_reshare_notice %}
+        <blockquote cite="{{ post.reshared_from_url }}" class="gplus-reshare-embed fb-xfbml-parse-ignore"><div class="gplus-reshare-embed-inner">{{ post.reshared_content_text|linebreaksbr }}</div></blockquote>
+      {% endif %}
     </div>
+  </div>
+{% elif post.reshared_from_url %}
+  {# Self-referential permalink (fb_reshare_embed_iframe_ok = False).         #}
+  {# FB would refuse to embed it, so we fall back to the captured text only. #}
+  {% if post.reshared_content_text and post.reshared_content_text != "(original post not available)" and not post.reshared_content_text|is_fb_unavailable_reshare_notice %}
+    <blockquote class="gplus-reshare-embed"><div class="gplus-reshare-embed-inner">{{ post.reshared_content_text|linebreaksbr }}</div></blockquote>
   {% else %}
     <span class="gplus-reshare-note" title="Embedded story has the same permalink as this post on Facebook">
       Embedded preview not available (same link as this post).
     </span>
   {% endif %}
+{% elif post.reshared_content_text and post.reshared_content_text != "(original post not available)" %}
+  {# No URL to embed; show captured text in a standalone blockquote.          #}
+  <blockquote class="gplus-reshare-embed"><div class="gplus-reshare-embed-inner">{{ post.reshared_content_text|linebreaksbr }}</div></blockquote>
 {% endif %}

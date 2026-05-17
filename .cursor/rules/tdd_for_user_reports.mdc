@@ -35,8 +35,24 @@ Recent precedents:
 
 The general pattern: every time we hit a "I can't test this without another crawl" wall, we should add a diagnostic emit so the next crawl pays for itself. Treat the export dir's `*_debug.json` files as first-class outputs, not optional clutter.
 
+## Prefer unit tests over slow verification (from homebound-platform's general_testing.mdc)
+
+Before falling back to a slow verification path — running through Chrome to test extension changes, sshing to homeserver, hitting a live FB session, rerunning the wayback fetch — STOP and ask: can this be verified with a fast local unit test instead?
+
+Slow paths bury bugs in noise (network flake, FB DOM mutation, build time) and tax the user's attention. Local unit tests give millisecond feedback and stay as guards against regression.
+
+**Process for any fix or feature:**
+
+1. **First**: write a unit test that reproduces the issue (red), then make it pass (green). Behavior verified, regression-guarded.
+2. **Only after** the unit test passes: do the device/remote/pipeline round-trip — and *only* to verify the integration layer the unit test can't reach (real Chrome rendering of a wizard step, real Django template render against a real DB row, real FB GraphQL response shape on today's traffic).
+3. **Never** skip step 1 because "this would be faster to just try in Chrome / deploy and check" — the device round-trip itself takes minutes per iteration and you'll do many iterations.
+
+**Pattern: capture once, test forever.** When a real-world failure appears (rendering bug in the embed block, FB response shape we hadn't seen, archived HTML structure that breaks the parser), the *next* step after diagnosing in the live environment should always be: copy the real input into `tests/fixtures/...` and write an assertion against it. That input now lives in the suite. Re-shipping the bug becomes impossible without breaking the test.
+
 ## Anti-patterns
 
 - Fixing without a test, then running the full suite to "make sure nothing broke" — the bug isn't covered, so the same regression will land again in three months.
 - Adding logs in production paths instead of fixture-based tests when fixtures are feasible. If you can construct the bad input as a string or JSON in the test, you don't need to wait for the next crawl.
 - Letting `graphql_debug.json` / `memory_debug.json` / `permalink_debug.json` quietly bit-rot. When you finish diagnosing, either commit a snapshot as a fixture (and a test that uses it) or document why the diagnostic stays live.
+- Iterating on a Django template by reloading the prod site each time. Render the template under test with the real DB row (or a snapshot of it) as the context — millisecond feedback vs minute-scale deploy + curl.
+- Touching the importer to fix a rendering symptom. The symptom and the cause are often in different layers; the test pins the layer where the bug lives.

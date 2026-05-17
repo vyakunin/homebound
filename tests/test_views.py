@@ -326,21 +326,31 @@ class TestWordCloudView:
 
 @pytest.mark.django_db
 class TestFacebookReshareRendering:
-    """Regression: FB reshares showed the reshared text twice — once in a blockquote,
-    once in the Facebook embed iframe (data-show-text=true). Fix: show blockquote
-    OR iframe, never both.
+    """FB reshares always render the official Facebook embed div when we have
+    a `reshared_from_url` — the captured `reshared_content_text` lives INSIDE
+    the embed as fallback content (mirrors the Twitter pattern in _tweet_embed.html).
+
+    On load, FB's JS SDK replaces the <div class="fb-post"> with a rich
+    iframe and the fallback blockquote disappears. If the SDK fails or is
+    blocked, the blockquote stays visible. Either way the captured text shows
+    exactly once and the user always sees the original post's content.
+
+    The earlier design (blockquote XOR iframe; iframe suppressed when we have
+    captured text) left users with a plain text-only block where the rich FB
+    embed should be — reported 2026-05-17 as "shared posts embedding broken".
     """
 
-    def test_reshare_with_text_shows_blockquote_not_iframe(self):
-        """When reshared_content_text is present, the blockquote is shown and
-        the Facebook embed iframe is NOT rendered (avoids text duplication)."""
+    def test_reshare_with_text_and_url_renders_embed_with_fallback(self):
+        """When BOTH reshared_content_text and reshared_from_url are present,
+        the FB embed div IS rendered, and the captured text appears once inside
+        it as the fallback that FB SDK replaces."""
         dt = datetime.datetime(2025, 4, 18, tzinfo=datetime.timezone.utc)
         reshared_text = "В русском плену\nИз рассказа защитника о. Змеиный"
         post = Post.objects.create(
             title="",
             content_text="",
             source=PostSource.FACEBOOK,
-            source_id="test-reshare-no-dup",
+            source_id="test-reshare-embed-with-fallback",
             source_url="https://www.facebook.com/vyakunin/posts/test123",
             reshared_from_author="Andrej Modenov",
             reshared_from_url="https://www.facebook.com/andrej.modenov/posts/orig123",
@@ -352,21 +362,24 @@ class TestFacebookReshareRendering:
         response = client.get(f"/post/{post.slug}/")
         html = response.content.decode()
 
-        # The reshared text must appear exactly once (in the blockquote)
-        assert html.count(reshared_text.split("\n")[0]) == 1, (
-            "Reshared text should appear exactly once (blockquote only, not in iframe)"
+        # The FB embed div MUST be present (was the regression).
+        assert 'class="fb-post"' in html, (
+            "Facebook embed div should render when reshared_from_url is present"
         )
-        # The blockquote must be present
-        assert "gplus-reshare-embed" in html
-        # The Facebook embed div (data-href=...) must NOT be present in the reshare body.
-        # Note: "fb-post" appears in the JS SDK loader script — check for the actual div.
-        assert 'class="fb-post"' not in html, (
-            "Facebook embed div should not render when blockquote has reshared text"
+        # The href on the embed must point at the original.
+        assert 'data-href="https://www.facebook.com/andrej.modenov/posts/orig123"' in html
+        # Captured text appears exactly once (as fallback inside the embed,
+        # not also as a sibling blockquote).
+        first_line = reshared_text.split("\n")[0]
+        assert html.count(first_line) == 1, (
+            "Captured text should appear once as embed fallback content"
         )
+        # The captured text is marked so FB SDK skips parsing it when replacing.
+        assert "fb-xfbml-parse-ignore" in html
 
     def test_reshare_without_text_shows_iframe(self):
         """When reshared_content_text is empty but reshared_from_url exists,
-        the Facebook embed iframe is shown instead."""
+        the FB embed div renders (no fallback needed)."""
         dt = datetime.datetime(2025, 4, 18, tzinfo=datetime.timezone.utc)
         post = Post.objects.create(
             title="",
@@ -384,10 +397,38 @@ class TestFacebookReshareRendering:
         response = client.get(f"/post/{post.slug}/")
         html = response.content.decode()
 
-        # No blockquote (no reshared text)
+        # No blockquote (no captured text to fall back on)
         assert "gplus-reshare-embed" not in html
-        # Facebook embed div IS present
+        # FB embed div IS present
         assert 'class="fb-post"' in html
+
+    def test_reshare_with_text_no_url_shows_only_blockquote(self):
+        """When we have captured text but no reshared_from_url (rare — e.g.
+        Graph-API-only imports without a usable permalink), fall back to the
+        standalone blockquote with no FB embed."""
+        dt = datetime.datetime(2025, 4, 18, tzinfo=datetime.timezone.utc)
+        reshared_text = "Original post body captured without URL."
+        post = Post.objects.create(
+            title="",
+            content_text="",
+            source=PostSource.FACEBOOK,
+            source_id="test-reshare-no-url",
+            source_url="https://www.facebook.com/vyakunin/posts/test789",
+            reshared_from_author="Anonymous",
+            reshared_from_url="",
+            reshared_content_text=reshared_text,
+            created_at=dt,
+            visibility=PostVisibility.PUBLIC,
+        )
+        client = Client()
+        response = client.get(f"/post/{post.slug}/")
+        html = response.content.decode()
+
+        # Captured text in the standalone blockquote
+        assert "gplus-reshare-embed" in html
+        assert reshared_text in html
+        # No FB embed div (no URL to embed)
+        assert 'class="fb-post"' not in html
 
 
 if __name__ == "__main__":
