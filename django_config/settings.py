@@ -146,13 +146,14 @@ BOT_PUBLIC = os.environ.get('BOT_PUBLIC', 'False') == 'True'
 # caps map cleanly to the "toy LLM budget" framing visitors see when
 # the cap is hit.
 #
-# Calibrated for ~$50/mo at Haiku 4.5 pricing measured against the
-# v2 sample dump ($0.006/Q without persona caching — our 6KB persona
-# is below Haiku's 4096-token minimum cacheable prefix). 270/day ×
-# 30 × $0.006 ≈ $48/mo. The response-cache layer should drop this
-# further when popular questions repeat.
+# Calibrated for ~$50/mo at Haiku 4.5 pricing, measured against the
+# v3 sample dump with the padded ~7200-token persona that lifts us
+# above Haiku's 4096-token prompt-cache threshold. Steady-state per-Q
+# cost is $0.0036 (vs $0.006 unpadded), so 480/day × 30 × $0.0036 ≈
+# $51/mo. The response cache compounds savings further when popular
+# questions repeat.
 BOT_PER_IP_RATE_LIMIT_PER_DAY = int(os.environ.get('BOT_PER_IP_RATE_LIMIT_PER_DAY', '30'))
-BOT_SITE_RATE_LIMIT_PER_DAY = int(os.environ.get('BOT_SITE_RATE_LIMIT_PER_DAY', '270'))
+BOT_SITE_RATE_LIMIT_PER_DAY = int(os.environ.get('BOT_SITE_RATE_LIMIT_PER_DAY', '480'))
 
 # Tiered model selection. Default = Haiku 4.5 for cost; allow one
 # Sonnet 4.6 call per IP per day, only if the question is non-trivial
