@@ -1673,12 +1673,22 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
   const memSamples = [];
   function captureMemSnapshot() {
     const pm = (typeof performance !== 'undefined' && performance.memory) ? performance.memory : null;
+    // Activity-log rows don't use role="article" reliably. Count the
+    // wrapper-like divs that hold a permalink anchor — closer to "rows in
+    // the harvested feed" than the literal article role.
+    let rowApprox = 0;
+    try {
+      rowApprox = document.querySelectorAll('a[href*="/posts/"], a[href*="story_fbid="], a[href*="comment_id="]').length;
+    } catch (_) {}
     return {
       round: rounds,
       tsMs: Date.now() - startTime,
       domAllNodes: document.querySelectorAll('*').length,
       domAnchors: document.querySelectorAll('a[href]').length,
-      domArticles: document.querySelectorAll('[role="article"]').length,
+      // Approximation of "harvestable rows currently in DOM" — anchors that
+      // look like permalinks. Better signal than [role="article"] (which
+      // was 0 throughout the 2026-05-17 run).
+      domRowAnchors: rowApprox,
       // V8 heap is per-isolate (shared with FB's main world), gives total JS
       // memory pressure not just our extension's.
       jsHeapUsedMB: pm ? Math.round(pm.usedJSHeapSize / (1024 * 1024)) : null,
@@ -1693,6 +1703,20 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
       // page_hook timestamp cache size
       tsCache: typeof _postTimestampCache !== 'undefined' ? _postTimestampCache.size : 0,
     };
+  }
+
+  // Heap-pressure auto-stop: when the renderer's JS heap crosses this
+  // threshold, exit the harvest cleanly. Saves what we have via checkpoint
+  // and avoids the eventual tab freeze. The 2026-05-17 memory_debug showed
+  // the comments phase climbed to 1.35 GB before the user manually stopped;
+  // 1500 MB is a safety margin below the level where the renderer becomes
+  // unresponsive in our scenarios (~1.7-2.5 GB).
+  const HEAP_PRESSURE_MB = 1500;
+  let heapPressureHit = false;
+  function heapUnderPressure() {
+    const pm = (typeof performance !== 'undefined' && performance.memory) ? performance.memory : null;
+    if (!pm) return false;
+    return (pm.usedJSHeapSize / (1024 * 1024)) > HEAP_PRESSURE_MB;
   }
   const storageKey = kind === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
   async function writeCheckpoint(stoppedBecauseLabel, stoppedEarlyFlag) {
@@ -1712,7 +1736,7 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
   let nextIdleAt = idleInterval;
   const startTime = Date.now();
 
-  while (rounds < CONFIG.maxRounds && stable < CONFIG.stableRoundsBeforeStop && stableItemCount < STABLE_ITEM_ROUNDS && !token.cancelled && !stalled) {
+  while (rounds < CONFIG.maxRounds && stable < CONFIG.stableRoundsBeforeStop && stableItemCount < STABLE_ITEM_ROUNDS && !token.cancelled && !stalled && !heapPressureHit) {
     if (kind === 'comments') {
       harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, commentsOwnPostsOnly, profileLinkMap, token);
     } else {
@@ -1741,13 +1765,24 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
       const snap = captureMemSnapshot();
       memSamples.push(snap);
       console.info('[fb-export][mem]', kind, `r${rounds}`,
-        `dom=${snap.domAllNodes}`, `articles=${snap.domArticles}`,
+        `dom=${snap.domAllNodes}`, `rows=${snap.domRowAnchors}`,
         `heap=${snap.jsHeapUsedMB}MB/${snap.jsHeapTotalMB}MB`,
         `our=${snap.urls}u/${snap.commentByKey}c/${snap.postByKey}p`);
       // Also persist so a tab kill doesn't lose the samples.
       chrome.storage.local.set({
         [`fbcExport_${kind}_mem_samples`]: memSamples,
       }).catch(() => {});
+    }
+
+    // Heap-pressure check: if the renderer is climbing toward freeze territory,
+    // stop cleanly with the checkpoint preserving everything harvested so far.
+    // Cheaper to bail and resume than to keep going and risk a tab kill that
+    // loses the post-checkpoint delta.
+    if (rounds > 0 && rounds % 3 === 0 && heapUnderPressure()) {
+      const pm = performance.memory;
+      const mb = Math.round(pm.usedJSHeapSize / (1024 * 1024));
+      console.warn('[fb-export]', kind, `heap pressure: ${mb}MB > threshold ${HEAP_PRESSURE_MB}MB, stopping harvest`);
+      heapPressureHit = true;
     }
 
     // Step 9: periodic progress reporting via chrome.storage (fire-and-forget)
@@ -1849,6 +1884,9 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
     stoppedBecause = 'capComments';
   } else if (kind === 'posts' && caps.maxPosts > 0 && postByKey.size >= caps.maxPosts) {
     stoppedBecause = 'capPosts';
+  } else if (heapPressureHit) {
+    stoppedBecause = 'heapPressure';
+    stoppedEarly = true;
   } else if (stalled) {
     stoppedBecause = 'stalled';
   } else if (stableItemCount >= STABLE_ITEM_ROUNDS) {
