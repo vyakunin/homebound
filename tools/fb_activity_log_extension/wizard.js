@@ -350,42 +350,22 @@ async function getDateRange() {
 // (one year of activity fits comfortably; the whole-history single-pass blew
 // the renderer's heap).
 //
-// Phase-aware dispatch (newest → oldest in every case):
+// Dispatch (newest → oldest), identical for both phases:
+//   - both fromMonth AND toMonth set → per-month iteration via
+//     generateMonthRange(fromY, fromM, toY, toM) (finest granularity)
+//   - otherwise → per-year iteration, empty sides clamped to 2004 / nowY
 //
-//   phase='posts': ALWAYS per-month. The MANAGEPOSTSPHOTOSANDVIDEOS source
-//     doesn't honor year-only URLs — empirically (2026-05-18 v2.8.12 run)
-//     a `?year=YYYY` URL with no month was silently ignored and FB served
-//     a fallback page whose links polluted the harvester. The only
-//     confirmed working dated form is `?year=YYYY&month=MM`, so we expand
-//     any empty input sides to year-bounds (Jan / Dec) and iterate every
-//     month. Costs ~12× more navigations than per-year, but it's the
-//     only reliable shape.
-//
-//   phase='comments' (default): per-month iteration only when BOTH sides
-//     fully specify month; otherwise per-year. The COMMENTSCLUSTER source
-//     accepts year-only URLs cleanly.
-//
-// Returns array of { year } or { year, month } objects. Half-specified
-// month on one side (year set without month, or vice versa) collapses
-// to per-year on both sides for comments.
+// The `phase` parameter is kept for future divergence (e.g. if FB tightens
+// year-only handling on one source again, we can switch that phase back to
+// per-month). At v2.8.14 both phases use the same dispatch — per-month for
+// posts (v2.8.13) was too slow on empty borders, so we trade some accuracy
+// risk on the posts side for tractable wall time.
 function generateIterationUnits(fromY, fromM, toY, toM, nowY, nowM, phase = 'comments') {
+  // phase is currently informational; both phases share the same dispatch.
+  void phase;
   const isEmpty = (v) => v === null || v === undefined || v === '';
 
-  if (phase === 'posts') {
-    // Always per-month. Clamp empty sides to year-bounds: empty fromMonth
-    // defaults to 1 (Jan), empty toMonth defaults to 12 when toYear is
-    // specified (scrape whole `to` year) or to nowM when both to-sides are
-    // empty (don't iterate beyond the current month).
-    const fY = isEmpty(fromY) ? 2004 : parseInt(String(fromY), 10);
-    const fM = isEmpty(fromM) ? 1 : parseInt(String(fromM), 10);
-    const tY = isEmpty(toY) ? nowY : parseInt(String(toY), 10);
-    const tM = isEmpty(toM)
-      ? (isEmpty(toY) ? nowM : 12)
-      : parseInt(String(toM), 10);
-    return generateMonthRange(fY, fM, tY, tM, nowY, nowM);
-  }
-
-  // Per-month path for comments: requires year AND month on BOTH sides.
+  // Per-month path: requires year AND month on BOTH sides.
   const monthPathOk =
     !isEmpty(fromY) && !isEmpty(fromM) && !isEmpty(toY) && !isEmpty(toM);
   if (monthPathOk) {
@@ -1137,9 +1117,13 @@ function bindUi() {
       setStatus('Date range is empty or inverted — clear or fix the inputs and retry.', true);
       return;
     }
+    const fmtCount = (n, u) => {
+      const noun = u[0] && u[0].month ? 'month' : 'year';
+      return `${n} ${noun}${n === 1 ? '' : 's'}`;
+    };
     const parts = [];
-    if (mode.comments) parts.push(`${cUnits.length} year${cUnits.length === 1 ? '' : 's'} (comments)`);
-    if (mode.posts) parts.push(`${pUnits.length} month${pUnits.length === 1 ? '' : 's'} (posts)`);
+    if (mode.comments) parts.push(`${fmtCount(cUnits.length, cUnits)} (comments)`);
+    if (mode.posts) parts.push(`${fmtCount(pUnits.length, pUnits)} (posts)`);
     setStatus(`Iterating ${parts.join(' + ')} newest→oldest…`);
     runMultiMonthSession().catch((e) => setStatus(String(e), true));
   });

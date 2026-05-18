@@ -104,13 +104,11 @@
       <details class="date-filter-details">
         <summary>Date range (always paginates — bounds memory on long archives)</summary>
         <p class="hint">The wizard always paginates so each tab page stays memory-bounded.
-          <strong>Comments</strong> iterate one year at a time (FB's
-          comments source honors year-only URLs). <strong>Posts</strong>
-          always iterate one month at a time (FB ignores year-only URLs
-          on the posts source — silent fallback to a useless page).
-          Leave everything empty to scrape the full history. Narrow the
-          range with from/to years; set explicit months on both sides to
-          further tighten comments to per-month too.</p>
+          Default: one year at a time for both comments and posts. Leave
+          everything empty to scrape the full history. Narrow with from/to
+          years; set explicit months on BOTH sides to drop to month-by-month
+          (lower per-page memory, ~12× more navigations — only worth it on
+          known-busy years).</p>
         <div class="caps-grid">
           <label>From year <input type="number" id="from-year" min="2004" max="2099" step="1" inputmode="numeric" placeholder="oldest YYYY" /></label>
           <label>From month (1-12) <input type="number" id="from-month" min="1" max="12" step="1" inputmode="numeric" placeholder="MM" /></label>
@@ -174,7 +172,7 @@
     <p id="status" class="status" aria-live="polite"></p>
 
     <!-- Query string busts extension disk cache after updates (bump when editing JS). -->
-    <script src="activity_log_urls.js?v=2.8.13"></script>
-    <script src="wizard.js?v=2.8.13"></script>
+    <script src="activity_log_urls.js?v=2.8.14"></script>
+    <script src="wizard.js?v=2.8.14"></script>
   </body>
 </html>
