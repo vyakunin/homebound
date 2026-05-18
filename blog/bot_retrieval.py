@@ -37,7 +37,7 @@ from django.db.models import F, FloatField, Q
 from django.db.models.functions import Cast
 
 from blog.embeddings import EmbeddingsUnavailableError, embed_query, is_available
-from blog.models import Post, PostVisibility
+from blog.models import Post, PostChunk, PostVisibility
 
 _log = logging.getLogger(__name__)
 
@@ -128,6 +128,20 @@ def _fts_hits(query: str) -> list[BotHit]:
 
 
 def _semantic_hits(query: str) -> list[BotHit]:
+    """Chunk-level semantic retrieval, max-pooled to post.
+
+    Each Post is split into ~800-char chunks at index time, each with
+    its own embedding. We cosine-match the query against every chunk's
+    embedding, take each post's BEST chunk score, and return the top
+    FANOUT_PER_HALF posts by that score. This avoids the single-vector
+    "long post averaged across many topics" bias: a 5K-char post no
+    longer beats a tightly focused 200-char post on accidental general
+    similarity.
+
+    If the PostChunk table is empty (pre-backfill) we fall back to the
+    legacy per-post Post.embedding path so a deploy that ships chunked
+    code before the backfill runs still has working semantic search.
+    """
     if not is_available():
         return []
     try:
@@ -135,6 +149,63 @@ def _semantic_hits(query: str) -> list[BotHit]:
     except EmbeddingsUnavailableError as e:
         _log.warning("bot semantic retrieval soft-fail: %s", e)
         return []
+    try:
+        from pgvector.django import CosineDistance
+    except ImportError:
+        return []
+
+    # Fan out wide on chunks (a single post can contribute multiple
+    # chunks here), then dedupe by post taking the lowest distance.
+    chunk_fanout = FANOUT_PER_HALF * 4
+    try:
+        chunk_rows = list(
+            PostChunk.objects
+            .filter(
+                post__visibility=PostVisibility.PUBLIC,
+                embedding__isnull=False,
+            )
+            .annotate(distance=CosineDistance("embedding", qvec))
+            .order_by("distance")
+            .values("post_id", "distance")[:chunk_fanout]
+        )
+    except Exception as e:  # noqa: BLE001 — table missing or pgvector type-cast issue
+        _log.warning("bot semantic chunk SQL failed: %s", e)
+        chunk_rows = []
+
+    if not chunk_rows:
+        # Fall back to legacy per-post embeddings (pre-chunked-backfill).
+        return _semantic_hits_legacy(qvec)
+
+    # Max-pool: best (= smallest distance) chunk per post.
+    best_by_post: dict[int, float] = {}
+    for row in chunk_rows:
+        pid = row["post_id"]
+        dist = float(row["distance"])
+        if pid not in best_by_post or dist < best_by_post[pid]:
+            best_by_post[pid] = dist
+    top_post_ids = sorted(best_by_post, key=lambda pid: best_by_post[pid])[:FANOUT_PER_HALF]
+    if not top_post_ids:
+        return []
+    posts = (
+        Post.objects.only(
+            "id", "slug", "title", "content_text", "created_at", "visibility",
+            "reshared_from_author", "reshared_content_text",
+        )
+        .filter(pk__in=top_post_ids)
+    )
+    posts_by_id = {p.pk: p for p in posts}
+    hits: list[BotHit] = []
+    for pid in top_post_ids:
+        p = posts_by_id.get(pid)
+        if p is None:
+            continue
+        hits.append(_post_to_hit(p, keyword_rank=None, semantic_distance=best_by_post[pid]))
+    return hits
+
+
+def _semantic_hits_legacy(qvec: list[float]) -> list[BotHit]:
+    """Legacy per-post embedding path. Used when PostChunk is empty
+    (pre-backfill safeguard). Same shape as the original _semantic_hits."""
     try:
         from pgvector.django import CosineDistance
     except ImportError:
@@ -154,8 +225,8 @@ def _semantic_hits(query: str) -> list[BotHit]:
             _post_to_hit(p, keyword_rank=None, semantic_distance=float(p.distance))
             for p in qs
         ]
-    except Exception as e:  # noqa: BLE001 — pgvector type-cast may fail if ext missing
-        _log.warning("bot semantic SQL failed (pgvector likely missing): %s", e)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("bot semantic legacy SQL failed: %s", e)
         return []
 
 

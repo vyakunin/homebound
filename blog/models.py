@@ -48,6 +48,46 @@ class Tag(models.Model):
         super().save(*args, **kwargs)
 
 
+class PostChunk(models.Model):
+    """Chunk-level embedding row for a Post.
+
+    Each Post is split into one or more chunks (~800 chars each); each
+    chunk gets its own Voyage embedding. Retrieval cosine-matches the
+    query vector against all chunks, then max-pools chunk scores to the
+    parent post — this avoids the single-vector "long post averaged
+    across many topics" bias where a 5K-char post out-ranks a tightly
+    focused short post because its blended vector accidentally has
+    decent similarity to a wide range of queries.
+
+    The per-Post ``Post.embedding`` field is left in place (unused by
+    retrieval after this lands) to keep the migration reversible and
+    avoid a destructive column drop until we've confirmed the chunked
+    path is healthier in production.
+    """
+
+    post = models.ForeignKey("Post", on_delete=models.CASCADE, related_name="chunks")
+    chunk_index = models.IntegerField()
+    text = models.TextField()
+    embedding = VectorField(dimensions=EMBEDDING_DIM, null=True, blank=True)
+    content_hash = models.CharField(max_length=64, blank=True)
+    embedding_model = models.CharField(max_length=64, blank=True)
+    embedded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["post", "chunk_index"]
+        indexes = [
+            models.Index(fields=["post"], name="chunk_post_lookup"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["post", "chunk_index"], name="unique_post_chunk",
+            ),
+        ]
+
+    def __str__(self):
+        return f"chunk {self.chunk_index} of post {self.post_id}"
+
+
 class Post(models.Model):
     # Content
     title = models.CharField(max_length=500, blank=True)

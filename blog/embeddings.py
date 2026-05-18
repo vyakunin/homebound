@@ -84,6 +84,86 @@ def embed_input_for(title: str, content_text: str) -> str:
     return " ".join(joined.split())
 
 
+# Chunking knobs for chunk-level embeddings (Phase 2 anti-long-doc-bias).
+# Target chunk size is ~800 chars (~150-250 tokens for mixed RU/EN), small
+# enough that one chunk maps to one "thought" yet big enough that a single
+# concept usually fits inside one chunk without fragmentation. Overlap
+# carries 100 chars into the next chunk so a phrase straddling a boundary
+# is still findable on both sides.
+CHUNK_TARGET_CHARS = 800
+CHUNK_OVERLAP_CHARS = 100
+
+
+def chunk_text(text: str, *, target: int = CHUNK_TARGET_CHARS, overlap: int = CHUNK_OVERLAP_CHARS) -> list[str]:
+    """Split a body of text into overlapping chunks.
+
+    Prefers semantic break points in order: paragraph (\\n\\n), sentence
+    boundary (.?!), then hard char split. Short inputs (≤ target) return
+    a single chunk. Empty input returns [].
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= target:
+        return [text]
+
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + target, n)
+        if end < n:
+            # Look for a clean break point in the back half of the window
+            # so chunks don't end mid-sentence when avoidable.
+            search_from = start + target // 2
+            para_break = text.rfind("\n\n", search_from, end)
+            if para_break != -1:
+                end = para_break
+            else:
+                sent_break = max(
+                    text.rfind(". ", search_from, end),
+                    text.rfind("! ", search_from, end),
+                    text.rfind("? ", search_from, end),
+                    text.rfind(".\n", search_from, end),
+                )
+                if sent_break != -1:
+                    end = sent_break + 1
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= n:
+            break
+        # Step forward with overlap; never step backwards.
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
+def chunk_input_for(title: str, content_text: str, reshared_text: str = "") -> list[str]:
+    """Chunk a Post into embed inputs.
+
+    Title is prepended to the FIRST chunk only — repeating the title in
+    every chunk would bias retrieval toward title-heavy posts and waste
+    embedding tokens. Body and reshared content are concatenated (with
+    a blank line between) because at retrieval time we want either to
+    surface the post for either side.
+    """
+    title = (title or "").strip()
+    body = (content_text or "").strip()
+    reshared = (reshared_text or "").strip()
+    parts: list[str] = []
+    if body:
+        parts.append(body)
+    if reshared:
+        parts.append(reshared)
+    full = "\n\n".join(parts)
+    chunks = chunk_text(full)
+    if title and chunks:
+        chunks[0] = f"{title}\n\n{chunks[0]}"
+    elif title and not chunks:
+        chunks = [title]
+    return chunks
+
+
 def _api_key() -> str | None:
     """Resolve the Voyage API key. Env var wins (lets tests + ad-hoc
     runs override without touching disk); file paths cover production
