@@ -1617,9 +1617,25 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
       }
       postByKey.set(postKey, entry);
     }
-    // Skip media collection for reshare rows — images belong to the original post, not the resharer.
+    // Row-level media collection used to run here:
+    //   collectMediaFromRow(row, postKey, 'post', mediaCandidates, caps);
+    // It's been removed (v2.8.15). The "row container" returned by
+    // findRowContainer is too wide on FB Activity Log (FB doesn't reliably
+    // expose role="article" at the per-row level — the heuristic falls
+    // through to "any ancestor with 40-20000 chars innerText", which on
+    // the activity log captures a wrapper around many posts). Result: the
+    // first anchor processed in document order gets every <img> in that
+    // wrapper attributed to it, while later posts get nothing. See the
+    // chess-pic-on-Apr7-post bug in fb-activity-export-v2.8.13-...
+    //
+    // Trusted post media now comes exclusively from tab-enrichment via
+    // buildPostManifestEntries (lib/build_manifest_entries.js), which
+    // filters to DOM-marked images (data-imgperflogname /
+    // data-visualcompletion) on the post's permalink page. Posts that
+    // don't get tab-enriched (e.g. no mediaHint/linkHint detected) end
+    // up with no media in the manifest — preferable to wrong media.
     if (reshareCommentary === undefined) {
-      collectMediaFromRow(row, postKey, 'post', mediaCandidates, caps);
+      // collection deliberately omitted; see comment above
     }
     collectProfileLinksFromRow(row, profileLinkMap);
   }
