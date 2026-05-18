@@ -69,6 +69,12 @@ class BotHit:
     score: float
     keyword_rank: float | None
     semantic_distance: float | None
+    # Repost attribution. Empty strings when the post is the user's own
+    # writing. When `repost_author` is non-empty the post is a reshare —
+    # prompt-builder surfaces this so the model attributes the quoted
+    # content to the original author instead of to Vladimir.
+    repost_author: str = ""
+    repost_excerpt: str = ""
 
 
 def retrieve(query: str, *, top_k: int = DEFAULT_TOP_K) -> list[BotHit]:
@@ -109,6 +115,7 @@ def _fts_hits(query: str) -> list[BotHit]:
     qs = (
         Post.objects.only(
             "id", "slug", "title", "content_text", "created_at", "visibility",
+            "reshared_from_author", "reshared_content_text",
         ).filter(visibility=PostVisibility.PUBLIC)
         .annotate(rank=SearchRank(ru_v, ru_q) + SearchRank(simple_v, simple_q))
         .filter(Q(rank__gt=0) | Q(content_text__icontains=query) | Q(title__icontains=query) | ilike_q)
@@ -135,6 +142,7 @@ def _semantic_hits(query: str) -> list[BotHit]:
     qs = (
         Post.objects.only(
             "id", "slug", "title", "content_text", "created_at", "visibility",
+            "reshared_from_author", "reshared_content_text",
             "embedding",
         )
         .filter(visibility=PostVisibility.PUBLIC, embedding__isnull=False)
@@ -252,6 +260,7 @@ def _date_hits(query: str) -> list[BotHit]:
     qs = (
         Post.objects.only(
             "id", "slug", "title", "content_text", "created_at", "visibility",
+            "reshared_from_author", "reshared_content_text",
         ).filter(visibility=PostVisibility.PUBLIC)
         .filter(_date_filter(dates))
         .exclude(content_text="")
@@ -288,6 +297,7 @@ def _sqlite_fallback(query: str, *, top_k: int) -> list[BotHit]:
     qs = (
         Post.objects.only(
             "id", "slug", "title", "content_text", "created_at", "visibility",
+            "reshared_from_author", "reshared_content_text",
         ).filter(visibility=PostVisibility.PUBLIC)
         .filter(q)
         .order_by("-created_at")[:top_k]
@@ -350,6 +360,8 @@ def _fuse(
                 score=existing.score + contrib,
                 keyword_rank=existing.keyword_rank,
                 semantic_distance=h.semantic_distance,
+                repost_author=existing.repost_author,
+                repost_excerpt=existing.repost_excerpt,
             )
     for h in date_hits:
         existing = merged.get(h.id)
@@ -362,6 +374,8 @@ def _fuse(
                 score=existing.score + 0.85,
                 keyword_rank=existing.keyword_rank,
                 semantic_distance=existing.semantic_distance,
+                repost_author=existing.repost_author,
+                repost_excerpt=existing.repost_excerpt,
             )
     return sorted(merged.values(), key=lambda h: h.score, reverse=True)[:top_k]
 
@@ -375,7 +389,15 @@ def _post_to_hit(
     keyword_rank: float | None,
     semantic_distance: float | None,
 ) -> BotHit:
-    snippet = (post.content_text or "")[:SNIPPET_MAX_CHARS]
+    own_text = post.content_text or ""
+    reshared_text = getattr(post, "reshared_content_text", "") or ""
+    reshared_author = getattr(post, "reshared_from_author", "") or ""
+    # Snippet is the user's own commentary when there is one; otherwise
+    # (pure repost — 440 posts on prod) fall back to the reshared text
+    # so the post isn't presented as empty.
+    snippet_source = own_text if own_text else reshared_text
+    snippet = snippet_source[:SNIPPET_MAX_CHARS]
+    repost_excerpt = reshared_text[:SNIPPET_MAX_CHARS] if reshared_author and own_text else ""
     created = post.created_at
     if isinstance(created, (datetime, date)):
         created_iso = created.isoformat()
@@ -390,6 +412,8 @@ def _post_to_hit(
         score=0.0,
         keyword_rank=keyword_rank,
         semantic_distance=semantic_distance,
+        repost_author=reshared_author,
+        repost_excerpt=repost_excerpt,
     )
 
 
@@ -398,4 +422,5 @@ def _with_score(h: BotHit, score: float) -> BotHit:
         id=h.id, slug=h.slug, title=h.title, snippet=h.snippet,
         created_at_iso=h.created_at_iso, score=score,
         keyword_rank=h.keyword_rank, semantic_distance=h.semantic_distance,
+        repost_author=h.repost_author, repost_excerpt=h.repost_excerpt,
     )

@@ -259,10 +259,20 @@ def _build_user_message(question: str, hits: Iterable[BotHit]) -> str:
         for i, h in enumerate(hits, 1):
             date_str = h.created_at_iso[:10] if h.created_at_iso else "unknown date"
             header = f"\n## Post {i} — /post/{h.slug}/ ({date_str})"
+            if h.repost_author:
+                # Structured repost marker — the persona's "Handling
+                # retrieved content" rule relies on this being explicit
+                # so the model attributes quoted words to the original
+                # author, not to Vladimir.
+                header += f" — REPOST from {h.repost_author}"
             if h.title:
                 header += f"\n**{h.title}**"
             parts.append(header)
             parts.append(h.snippet)
+            if h.repost_excerpt:
+                parts.append(
+                    f"\n*Reposted content (by {h.repost_author}):*\n{h.repost_excerpt}"
+                )
     parts.append("\n---\n\n# Visitor question\n")
     parts.append(question.strip())
     return "\n".join(parts)
