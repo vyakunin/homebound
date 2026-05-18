@@ -493,6 +493,39 @@ class TestFacebookReshareRendering:
             "facebook.com posts a resize event."
         )
 
+    def test_static_assets_use_static_template_tag(self):
+        """Static assets in base.html must go through {% static %} so the
+        ManifestStaticFilesStorage backend can attach content hashes to
+        their URLs at collectstatic time. Without hashed filenames a CSS
+        change can't reach users until their browser's max-age timer
+        expires — the May 18 2026 cache-stuck-style.css incident took
+        hours to recover because Cloudflare + browsers both held a stale
+        unhashed copy under `Cache-Control: immutable`.
+
+        Read base.html directly and assert no `/static/...` paths appear
+        as raw strings (every reference must use `{% static '...' %}`)."""
+        from pathlib import Path
+        import re
+
+        base_html_path = Path(__file__).resolve().parent.parent / "templates" / "base.html"
+        body = base_html_path.read_text(encoding="utf-8")
+        # Strip out Django comments so we don't match commentary describing the rule.
+        body_stripped = re.sub(r"\{#.*?#\}", "", body, flags=re.S)
+        raw_static_refs = re.findall(r"/static/[A-Za-z0-9_/.\-]+", body_stripped)
+        # Filter false positives that are part of {% static '...' %} expansions:
+        # the tag itself never renders the literal `/static/...` substring in the
+        # template source — only `{% static 'css/style.css' %}` etc.
+        bad = [r for r in raw_static_refs if "{% static" not in body_stripped[:body_stripped.find(r)+len(r)] or True]
+        # Simpler: assert no occurrences of `/static/` outside `{% static …%}` blocks.
+        # Remove all {% static … %} tags then re-search.
+        without_tags = re.sub(r"\{%\s*static\s+[^%]+%\}", "", body_stripped)
+        leftover = re.findall(r"/static/[A-Za-z0-9_/.\-]+", without_tags)
+        assert not leftover, (
+            "base.html contains hardcoded /static/ paths — switch them to "
+            "{% static '...' %} so ManifestStaticFilesStorage can hash the "
+            f"URLs at collectstatic time. Found: {leftover}"
+        )
+
     def test_reshare_card_has_compact_max_width(self):
         """The dark reshare card (containing the "Shared a post by..." strip
         AND the FB plugin iframe) must be width-constrained so the whole

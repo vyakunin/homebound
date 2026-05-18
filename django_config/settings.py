@@ -102,6 +102,22 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
+# Content-hashed static filenames so deploys auto-invalidate caches. Without
+# this, CSS/JS edits don't reach users until their browser's max-age expires
+# (May 18 2026 incident: nginx served stale style.css for hours after deploy
+# because Cloudflare + browsers cached the un-hashed URL with
+# `immutable, max-age=2592000`). Manifest storage renames files at
+# collectstatic time to e.g. ``style.abc123.css``; the {% static %} tag
+# resolves to the hashed URL. In tests/DEBUG the in-memory manifest may not
+# be ready, so fall back to non-hashed storage there.
+if not os.environ.get('RUNNING_TESTS') == '1':
+    STORAGES = {
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage',
+        },
+    }
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.environ.get('MEDIA_ROOT', str(BASE_DIR / 'media'))
 
