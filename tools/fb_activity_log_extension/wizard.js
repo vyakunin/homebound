@@ -211,6 +211,18 @@ function urlsMatchNavTarget(tabUrl, targetUrl) {
   }
 }
 
+// Pre-v2.8.11 the default comments URL used `category_key=commentscluster`
+// (lowercase) which is FB's unbounded comments source — ?year=YYYY&month=MM
+// is silently ignored there, so per-year iteration loads the whole feed and
+// overloads memory. Detect that pattern in saved URLs and rewrite to the
+// new canonical (uppercase + activity_history/manage_mode flags) source.
+function isBrokenCommentsUrl(url) {
+  if (!url) return false;
+  // Substring match — covers the lowercase category_key form regardless of
+  // surrounding params or the privacy_source-only flag set.
+  return /category_key=commentscluster\b/i.test(url) && !/category_key=COMMENTSCLUSTER\b/.test(url);
+}
+
 async function loadUrlFields() {
   const d = defaultActivityLogUrls();
   const defaults = {
@@ -218,7 +230,17 @@ async function loadUrlFields() {
     posts: d.posts,
   };
   const r = await chrome.storage.local.get(['fbCustomUrls', 'fbDateRange']);
-  document.getElementById('url-comments').value = r.fbCustomUrls?.comments || defaults.comments;
+  let savedComments = r.fbCustomUrls?.comments;
+  if (isBrokenCommentsUrl(savedComments)) {
+    // Migrate: overwrite the saved URL with the new canonical default.
+    savedComments = defaults.comments;
+    try {
+      await chrome.storage.local.set({
+        fbCustomUrls: { ...(r.fbCustomUrls || {}), comments: savedComments },
+      });
+    } catch (_) { /* best-effort */ }
+  }
+  document.getElementById('url-comments').value = savedComments || defaults.comments;
   document.getElementById('url-posts').value = r.fbCustomUrls?.posts || defaults.posts;
   // Restore the from/to date range so it survives across wizard reloads.
   // Empty values render as blank inputs (= no filter).
@@ -423,18 +445,21 @@ function mergeHarvestResults(prev, curr) {
   };
 }
 
-async function getNavUrls(monthOverride) {
+async function getNavUrls(unitOverride) {
   const d = defaultActivityLogUrls();
   const r = await chrome.storage.local.get(['fbCustomUrls']);
-  const baseComments = (r.fbCustomUrls?.comments || d.comments).trim();
+  // Migrate broken legacy comments URL on the fly so multi-unit iteration
+  // hits the dated source, not the unbounded one.
+  let baseComments = (r.fbCustomUrls?.comments || d.comments).trim();
+  if (isBrokenCommentsUrl(baseComments)) baseComments = d.comments;
   const basePosts = (r.fbCustomUrls?.posts || d.posts).trim();
-  // monthOverride is set during multi-month iteration so each tab navigation
-  // points at one specific month. When the wizard isn't iterating (no range
-  // set), the base URLs are used as-is.
-  if (monthOverride && monthOverride.year && monthOverride.month) {
+  // unitOverride is set during multi-unit iteration so each tab navigation
+  // points at one specific year (year-only URL) or month (year+month URL).
+  // When the wizard isn't iterating, the base URLs are used as-is.
+  if (unitOverride && unitOverride.year) {
     return {
-      comments: applyDateFilter(baseComments, monthOverride.year, monthOverride.month),
-      posts: applyDateFilter(basePosts, monthOverride.year, monthOverride.month),
+      comments: applyDateFilter(baseComments, unitOverride.year, unitOverride.month || null),
+      posts: applyDateFilter(basePosts, unitOverride.year, unitOverride.month || null),
     };
   }
   return { comments: baseComments, posts: basePosts };
@@ -1239,6 +1264,7 @@ if (typeof module !== 'undefined' && module.exports) {
     applyDateFilter,
     generateMonthRange,
     generateIterationUnits,
+    isBrokenCommentsUrl,
     mergeHarvestResults,
   };
 }

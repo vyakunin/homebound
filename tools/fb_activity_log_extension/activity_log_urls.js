@@ -4,9 +4,15 @@
  * copy the URL from your address bar with the correct filter active and paste into
  * the wizard URL fields (saved in chrome.storage.local).
  */
+// IMPORTANT — `category_key=COMMENTSCLUSTER` (uppercase) is what the year/month
+// filtered comments source responds to. The lowercase form
+// `category_key=commentscluster` is a different (unbounded) URL whose year/
+// month params are silently ignored — adding ?year=2022&month=9 to that one
+// still loads the whole feed. Match the canonical posts-URL flag set so the
+// dated source kicks in.
 var FB_ACTIVITY_LOG_URLS = {
   comments:
-    'https://www.facebook.com/me/allactivity?privacy_source=activity_log&category_key=commentscluster',
+    'https://www.facebook.com/me/allactivity?activity_history=false&category_key=COMMENTSCLUSTER&manage_mode=false&should_load_landing_page=false',
   posts:
     'https://www.facebook.com/me/allactivity?activity_history=false&category_key=MANAGEPOSTSPHOTOSANDVIDEOS&manage_mode=false&should_load_landing_page=false',
 };

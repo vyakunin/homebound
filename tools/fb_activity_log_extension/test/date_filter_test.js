@@ -58,6 +58,31 @@ test('applyDateFilter handles the canonical posts URL', () => {
   assert.equal(u.searchParams.get('activity_history'), 'false');
 });
 
+test('applyDateFilter handles the canonical dated COMMENTSCLUSTER URL', () => {
+  // Real working URL the user reported — case matters: lowercase
+  // commentscluster is the unbounded comments source where year/month are
+  // ignored. Uppercase + activity_history/manage_mode/should_load_landing_page
+  // flag set is what FB actually dates.
+  const base = 'https://www.facebook.com/100000162817800/allactivity?activity_history=false&category_key=COMMENTSCLUSTER&manage_mode=false&should_load_landing_page=false';
+  const out = applyDateFilter(base, 2022, 9);
+  const u = new URL(out);
+  assert.equal(u.searchParams.get('year'), '2022');
+  assert.equal(u.searchParams.get('month'), '9');
+  assert.equal(u.searchParams.get('category_key'), 'COMMENTSCLUSTER');
+  assert.equal(u.searchParams.get('activity_history'), 'false');
+  assert.equal(u.searchParams.get('manage_mode'), 'false');
+  assert.equal(u.searchParams.get('should_load_landing_page'), 'false');
+});
+
+test('applyDateFilter year-only on the dated COMMENTSCLUSTER URL', () => {
+  const base = 'https://www.facebook.com/me/allactivity?activity_history=false&category_key=COMMENTSCLUSTER&manage_mode=false&should_load_landing_page=false';
+  const out = applyDateFilter(base, 2022, null);
+  const u = new URL(out);
+  assert.equal(u.searchParams.get('year'), '2022');
+  assert.equal(u.searchParams.get('month'), null);
+  assert.equal(u.searchParams.get('category_key'), 'COMMENTSCLUSTER');
+});
+
 test('applyDateFilter returns URL unchanged when year is missing', () => {
   const base = 'https://www.facebook.com/me/allactivity';
   // Year is the load-bearing param; without it FB shows the whole feed,
