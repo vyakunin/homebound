@@ -425,6 +425,74 @@ class TestFacebookReshareRendering:
         # No stale SDK markup
         assert 'class="fb-post"' not in html
 
+    def test_reshare_iframe_has_no_fixed_500_height(self):
+        """Regression: FB plugin iframes used to be rendered with a fixed
+        ``height="500"`` HTML attribute. FB's /plugins/post.php iframe doesn't
+        post-render-resize on its own (XFBML is dead), so a fixed height left
+        a tall white block under every short text reshare and clipped tall
+        ones — both reported by the user on Apr 24 + May 6 2026 posts.
+
+        The page must EITHER omit a fixed height (so JS can size it from
+        postMessage events FB sends), or initialize to a compact value that
+        the JS will grow on resize messages. We assert the literal
+        ``height="500"`` is gone — a permissive check that survives either
+        approach without overspecifying CSS."""
+        dt = datetime.datetime(2026, 5, 6, tzinfo=datetime.timezone.utc)
+        post = Post.objects.create(
+            title="",
+            content_text="Сравнение, конечно, некорректное, но...",
+            source=PostSource.FACEBOOK,
+            source_id="test-reshare-no-fixed-height",
+            source_url="https://www.facebook.com/vyakunin/posts/iframe_height_test",
+            reshared_from_author="Slantchev",
+            reshared_from_url="https://www.facebook.com/slantchev/posts/orig_height_test",
+            reshared_content_text="",
+            created_at=dt,
+            visibility=PostVisibility.PUBLIC,
+        )
+        client = Client()
+        response = client.get(f"/post/{post.slug}/")
+        html = response.content.decode()
+        assert "facebook.com/plugins/post.php" in html, (
+            "Sanity check: the FB plugin iframe must still render"
+        )
+        assert 'height="500"' not in html, (
+            "FB embed iframe must not have a fixed height=500 attribute — it "
+            "leaves dead space under short reshares. Use a compact initial "
+            "height and let the resize listener grow it from FB's postMessage."
+        )
+
+    def test_reshare_page_includes_fb_iframe_resize_listener(self):
+        """Companion to the no-fixed-500-height test: a postMessage listener
+        for facebook.com origin messages must be present on the page so the
+        compact initial iframe height can grow to match the embed's real
+        rendered height. Without the listener, switching to a small initial
+        height would clip embeds with media instead of leaving dead space —
+        a different but equally broken outcome.
+
+        We check for a stable marker (``fb-iframe-resize``) rather than a
+        regex over the full script body so the implementation can evolve."""
+        dt = datetime.datetime(2026, 5, 6, tzinfo=datetime.timezone.utc)
+        post = Post.objects.create(
+            title="",
+            content_text="commentary",
+            source=PostSource.FACEBOOK,
+            source_id="test-reshare-resize-listener",
+            source_url="https://www.facebook.com/vyakunin/posts/iframe_resize_listener",
+            reshared_from_author="Author",
+            reshared_from_url="https://www.facebook.com/someone/posts/orig_resize",
+            reshared_content_text="",
+            created_at=dt,
+            visibility=PostVisibility.PUBLIC,
+        )
+        response = Client().get(f"/post/{post.slug}/")
+        html = response.content.decode()
+        assert "fb-iframe-resize" in html, (
+            "Page must include a postMessage listener (marker: 'fb-iframe-resize') "
+            "so FB plugin iframes can grow from their compact initial height when "
+            "facebook.com posts a resize event."
+        )
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

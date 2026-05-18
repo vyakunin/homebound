@@ -191,6 +191,50 @@ document.addEventListener('click', function(e) {
   js.src = 'https://connect.facebook.net/en_US/sdk.js#xfbml=1&version=v18.0';
   document.head.appendChild(js);
 }());
+
+/* ── fb-iframe-resize ── grow FB plugin iframes from postMessage events ──
+ * FB's /plugins/post.php iframe doesn't expose its rendered height via any
+ * HTML signal we can read cross-origin, so iframes get a compact 200px
+ * initial height (no dead space under short text reshares) and we grow
+ * them when the FB plugin posts back to our window.
+ *
+ * FB has shipped several message shapes for plugin iframes over the years;
+ * we accept any cross-origin message from a *.facebook.com origin that
+ * carries a numeric height-like field at the top level. Each iframe owns
+ * its own contentWindow, so we match the source to the right element.
+ *
+ * Capped at 2000px so a malformed message can't blow up the layout. */
+(function() {
+  function safeHeight(value) {
+    var n = parseInt(value, 10);
+    return (n >= 100 && n <= 2000) ? n : null;
+  }
+  function pickHeight(data) {
+    if (!data || typeof data !== 'object') return null;
+    return safeHeight(data.height)
+        || safeHeight(data.frameHeight)
+        || (data.params && safeHeight(data.params.height))
+        || null;
+  }
+  window.addEventListener('message', function(e) {
+    var host = '';
+    try { host = new URL(e.origin).hostname; } catch (_) { return; }
+    if (!/(^|\.)facebook\.com$/.test(host)) return;
+    var data = e.data;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch (_) { return; }
+    }
+    var h = pickHeight(data);
+    if (!h) return;
+    var iframes = document.querySelectorAll('iframe[data-fb-embed]');
+    for (var i = 0; i < iframes.length; i++) {
+      if (iframes[i].contentWindow === e.source) {
+        iframes[i].style.height = h + 'px';
+        return;
+      }
+    }
+  });
+}());
 </script>
 <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
 </body>
