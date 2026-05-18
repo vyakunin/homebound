@@ -57,20 +57,40 @@ test('suggested-feed images in tabUrls do not leak into manifest entries', () =>
   }
 });
 
-test('post videos from the network log (in tabUrls) are still included alongside trusted images', () => {
-  // Videos aren't surfaced via the trusted DOM markers (those only tag images);
-  // they come from background.js's network log path which already filters by
-  // expected video_id. Keep including them.
+test("videos in tabUrls (broad bag) are NOT included — only postContentUrls is trusted (v2.8.16)", () => {
+  // v2.8.16: videos used to be pulled from the broad tabUrls bag (network
+  // log + inline-script scan). On a permalink page that bag contains
+  // unrelated CDN video URLs (comments' embedded videos, related-post
+  // videos preloaded by FB) and there's no per-post identifier to filter
+  // them by — the Apr 7 G+/Facebook goodbye post (no videos in UI) got 3
+  // spurious videos this way. extract_media.js now puts article-scoped
+  // <video> sources into postContentUrls; the broad bag is no longer
+  // trusted for videos.
   const entries = buildPostManifestEntries({
     permalinkKey: PERMALINK,
     tabUrls: [POST_OWN_IMG, POST_VIDEO, SUGGESTED_FEED_IMG],
-    postContentUrls: [POST_OWN_IMG],
+    postContentUrls: [POST_OWN_IMG],   // trusted set: only the image, no video
+    isAcceptableCdnUrl,
+    isVideoMediaUrl,
+  });
+  const urls = entries.map((e) => e.url);
+  assert.deepEqual(urls, [POST_OWN_IMG], `broad-bag video must be excluded; got ${JSON.stringify(urls)}`);
+});
+
+test('post videos included when extract_media.js puts them in postContentUrls', () => {
+  // The legitimate path for post videos: extract_media.js finds the post's
+  // own <video> elements (outside noise containers) and writes their srcs
+  // into postContentUrls. buildPostManifestEntries should ship those.
+  const entries = buildPostManifestEntries({
+    permalinkKey: PERMALINK,
+    tabUrls: [POST_OWN_IMG, POST_VIDEO, SUGGESTED_FEED_IMG],
+    postContentUrls: [POST_OWN_IMG, POST_VIDEO],   // trusted set carries both
     isAcceptableCdnUrl,
     isVideoMediaUrl,
   });
   const urls = entries.map((e) => e.url);
   assert.ok(urls.includes(POST_OWN_IMG), 'trusted image present');
-  assert.ok(urls.includes(POST_VIDEO), 'matched video present');
+  assert.ok(urls.includes(POST_VIDEO), 'trusted video present');
   assert.ok(!urls.includes(SUGGESTED_FEED_IMG), 'suggested-feed image excluded');
 });
 
@@ -88,17 +108,20 @@ test('fallback: when postContentUrls is empty, all acceptable tabUrls go through
   assert.deepEqual(urls.sort(), [POST_OWN_IMG, SUGGESTED_FEED_IMG].sort());
 });
 
-test('dedupes repeated URLs', () => {
+test('dedupes repeated URLs (within postContentUrls)', () => {
+  // v2.8.16: tabUrls is no longer trusted for any media; only postContentUrls
+  // contributes. Duplicates within postContentUrls must still collapse.
   const entries = buildPostManifestEntries({
     permalinkKey: PERMALINK,
     tabUrls: [POST_OWN_IMG, POST_OWN_IMG, POST_VIDEO, POST_VIDEO],
-    postContentUrls: [POST_OWN_IMG, POST_OWN_IMG],
+    postContentUrls: [POST_OWN_IMG, POST_OWN_IMG, POST_VIDEO],
     isAcceptableCdnUrl,
     isVideoMediaUrl,
   });
   const urls = entries.map((e) => e.url);
-  assert.equal(urls.length, 2);
+  assert.equal(urls.length, 2, `expected 2 unique urls; got ${urls.length}`);
   assert.equal(new Set(urls).size, 2);
+  assert.deepEqual(urls.sort(), [POST_OWN_IMG, POST_VIDEO].sort());
 });
 
 test('rejects non-CDN URLs (emojis, rsrc.php, static)', () => {

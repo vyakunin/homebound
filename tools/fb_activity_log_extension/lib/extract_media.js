@@ -63,22 +63,33 @@ function extractMediaFromHydratedTab(attachHtmlDump) {
 
   const mainEl = document.querySelector('[role="main"]') || document.documentElement;
 
-  // Build exclusion set for noise containers inside [role="main"].
-  // NOTE: we keep this for the broad `urls` bag but the trusted postContentUrls
-  // set is derived from data-imgperflogname / data-visualcompletion alone, so
-  // these exclusions are only a defence-in-depth.
-  const excludedImgs = new Set();
-  [
+  // Build exclusion sets for noise containers inside [role="main"]. Anything
+  // inside one of these wrappers is treated as comment / story / related-post
+  // content and NOT considered part of the post itself.
+  //
+  // v2.8.16: [role="article"] added to the list. On FB permalink pages the
+  // post's own content is rendered OUTSIDE any [role="article"]; the only
+  // [role="article"] elements are comment wrappers and (on some layouts)
+  // related-post cards. Filter v3 previously applied excludedImgs only to
+  // the broad `urls` bag — we now apply it to the trusted set too, otherwise
+  // related-post feedImage markers leak into postContentUrls (Apr 7 G+/FB
+  // goodbye post got 4 trusted images on a 2-photo post).
+  const NOISE_CONTAINER_SELECTORS = [
     '[data-pagelet*="Stories"]',
     '[aria-label*="Stories"]',
     '[aria-label="Comments"]',
     '[aria-label*="Comment "]',
     '[data-pagelet*="Comment"]',
-  ].forEach((sel) => {
+    '[role="article"]',
+  ];
+  const excludedImgs = new Set();
+  const excludedVideos = new Set();
+  NOISE_CONTAINER_SELECTORS.forEach((sel) => {
     try {
-      mainEl.querySelectorAll(sel).forEach((c) =>
-        c.querySelectorAll('img').forEach((img) => excludedImgs.add(img))
-      );
+      mainEl.querySelectorAll(sel).forEach((c) => {
+        c.querySelectorAll('img').forEach((img) => excludedImgs.add(img));
+        c.querySelectorAll('video').forEach((vid) => excludedVideos.add(vid));
+      });
     } catch (_) {}
   });
 
@@ -87,17 +98,25 @@ function extractMediaFromHydratedTab(attachHtmlDump) {
   //   - permalink / posts pages → <img data-imgperflogname="feedImage">
   //   - /photo/ viewer pages    → <img data-visualcompletion="media-vc-image">
   // Suggested-feed images, comment-author thumbnails, and recommendation
-  // carousels do NOT carry these attributes. Verified across 4 dumps:
-  //   - pfbid0223VNa permalink: 1 feedImage hit (the German-lyrics post image)
-  //   - 3 /photo/ dumps:        1 media-vc-image hit each (the actual photo)
+  // carousels do NOT carry these attributes. Verified across 4 dumps in 2.7.7.
+  //
+  // v2.8.16 tightening: the marker query is mainEl-wide (same as before),
+  // but matches inside any NOISE_CONTAINER_SELECTORS wrapper — notably
+  // [role="article"], which on permalink pages contains comments and/or
+  // related-post cards — are filtered out via the excludedImgs set built
+  // above. Symptom this fixes: Apr 7 G+/Facebook goodbye post got 4
+  // trusted-image hits when only 2 belonged to the post (the other 2 came
+  // from a related-post card with its own feedImage markers).
   const TRUSTED_POST_IMG_SELECTOR =
     '[data-imgperflogname="feedImage"], [data-visualcompletion="media-vc-image"]';
-  const trustedImgEls = Array.from(document.querySelectorAll(TRUSTED_POST_IMG_SELECTOR));
+  const allTrustedImgEls = Array.from(mainEl.querySelectorAll(TRUSTED_POST_IMG_SELECTOR));
+  const trustedImgEls = allTrustedImgEls.filter((img) => !excludedImgs.has(img));
 
   const postContentSeen = new Set();
   const postContentUrls = [];
   const postContentDebug = {
     trustedImgCount: trustedImgEls.length,
+    trustedImgCountBeforeExclusion: allTrustedImgEls.length,
     ogImageContent: (og && og.content) ? og.content.slice(0, 200) : null,
     ogImageCdnOk: !!(og && og.content && cdnOk(og.content)),
     addedFromOg: 0,
@@ -149,8 +168,17 @@ function extractMediaFromHydratedTab(attachHtmlDump) {
   });
 
   // ── Videos ────────────────────────────────────────────────────────────────
+  // Trusted scope: <video> elements that are NOT inside a noise container
+  // (comments / stories / related-post role="article" wrappers). v2.8.15's
+  // Apr 7 G+/Facebook goodbye post (0 videos in UI) had 3 spurious videos
+  // attributed via the broad-bag + network-log paths — those came from
+  // related-post or comment videos rendered on the permalink page. Sources
+  // inside any noise container are still added to the broad `urls` bag
+  // (for the best-effort downloader / fallback path) but excluded from
+  // postContentUrls.
   const videoDebug = [];
   mainEl.querySelectorAll('video').forEach((v) => {
+    const isPostVideo = !excludedVideos.has(v);
     videoDebug.push({
       src: (v.src || '').slice(0, 120),
       currentSrc: (v.currentSrc || '').slice(0, 120),
@@ -158,23 +186,27 @@ function extractMediaFromHydratedTab(attachHtmlDump) {
       poster: (v.getAttribute('poster') || '').slice(0, 120),
       readyState: v.readyState,
       paused: v.paused,
+      trusted: isPostVideo,
     });
     try { v.play().catch(() => {}); } catch (_) {}
     if (v.src && !v.src.startsWith('blob:') && cdnOk(v.src)) {
       add(v.src);
-      addPostContent(v.src, 'addedFromVideoPoster');
+      if (isPostVideo) addPostContent(v.src, 'addedFromVideoPoster');
     }
     if (v.currentSrc && !v.currentSrc.startsWith('blob:') && cdnOk(v.currentSrc)) {
       add(v.currentSrc);
-      addPostContent(v.currentSrc, 'addedFromVideoPoster');
+      if (isPostVideo) addPostContent(v.currentSrc, 'addedFromVideoPoster');
     }
     const poster = v.getAttribute('poster');
     if (poster && cdnOk(poster)) {
       add(poster);
-      addPostContent(poster, 'addedFromVideoPoster');
+      if (isPostVideo) addPostContent(poster, 'addedFromVideoPoster');
     }
     v.querySelectorAll('source').forEach((s) => {
-      if (s.src && !s.src.startsWith('blob:') && cdnOk(s.src)) add(s.src);
+      if (s.src && !s.src.startsWith('blob:') && cdnOk(s.src)) {
+        add(s.src);
+        if (isPostVideo) addPostContent(s.src, 'addedFromVideoPoster');
+      }
     });
   });
 
