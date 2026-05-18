@@ -1027,8 +1027,19 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
       rejectedUrlSamples: rejectedUrls.slice(0, 5).map((u) => u.slice(0, 120)),
       tabDebug,
     });
-    for (const u of cdnUrls) {
-      out.push({ url: u, sourcePermalink: permalinkKey, context: 'post' });
+    // Use the trusted post-content image set (DOM-marked feedImage /
+    // media-vc-image) + matched videos. The broad cdnUrls bag still leaks
+    // images from FB's "Suggested for you" rail rendered on the post
+    // permalink page (chess-pic-on-G+-goodbye bug, Apr 7 2026).
+    const manifestEntries = buildPostManifestEntries({
+      permalinkKey,
+      tabUrls,
+      postContentUrls: tabPostContentUrls,
+      isAcceptableCdnUrl,
+      isVideoMediaUrl,
+    });
+    for (const entry of manifestEntries) {
+      out.push(entry);
     }
     const imageUrl = cdnImages[0] || cdnUrls[0] || null;
     return imageUrl;

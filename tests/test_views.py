@@ -493,6 +493,39 @@ class TestFacebookReshareRendering:
             "facebook.com posts a resize event."
         )
 
+    def test_reshare_embed_container_centers_iframe(self):
+        """The FB embed iframe is fixed at width=500 (FB renders content for
+        that exact pixel width — no responsive scaling), but the surrounding
+        post card is up to ~640px wide. Without centering, the iframe
+        left-aligns and shows asymmetric dead space on the right (user
+        report Apr 24 2026 — "container for the post is too wide, has empty
+        space on the right").
+
+        Assert the embed container applies a centering layout via a stable
+        class marker so future CSS edits don't silently regress this.
+        """
+        dt = datetime.datetime(2026, 4, 24, tzinfo=datetime.timezone.utc)
+        post = Post.objects.create(
+            title="",
+            content_text="commentary",
+            source=PostSource.FACEBOOK,
+            source_id="test-reshare-centering",
+            source_url="https://www.facebook.com/vyakunin/posts/iframe_centering",
+            reshared_from_author="Alexandra Polyushkova",
+            reshared_from_url="https://www.facebook.com/alexandra.polyushkova/posts/orig",
+            reshared_content_text="",
+            created_at=dt,
+            visibility=PostVisibility.PUBLIC,
+        )
+        response = Client().get(f"/post/{post.slug}/")
+        html = response.content.decode()
+        # The embed container must have the centering marker class.
+        assert "gplus-fb-post-embed--centered" in html, (
+            "FB embed container must include the 'gplus-fb-post-embed--centered' "
+            "modifier class so the 500px iframe sits centered within the wider "
+            "post card (avoids asymmetric dead space on the right)."
+        )
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

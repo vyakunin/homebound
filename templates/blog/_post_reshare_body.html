@@ -26,7 +26,7 @@
   {# content height when facebook.com posts a resize message to this window.  #}
   {# Fixed height=500 caused both clipping (image embeds) and dead white      #}
   {# space (text-only embeds) — see test_reshare_iframe_has_no_fixed_500_height.#}
-  <div class="gplus-fb-post-embed">
+  <div class="gplus-fb-post-embed gplus-fb-post-embed--centered">
     <iframe
       src="https://www.facebook.com/plugins/post.php?href={{ post.reshared_from_url|urlencode:"" }}&show_text=true&width=500"
       width="500"

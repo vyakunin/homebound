@@ -4,7 +4,7 @@
   "private": true,
   "description": "Node-side tests for the Chrome extension's media extractor (lib/extract_media.js).",
   "scripts": {
-    "test": "node --test test/extract_media_test.js test/extract_timestamp_test.js test/page_hook_test.js test/date_filter_test.js test/month_range_test.js test/iteration_units_test.js test/merge_harvest_test.js test/activity_log_urls_test.js test/broken_comments_url_test.js"
+    "test": "node --test test/extract_media_test.js test/extract_timestamp_test.js test/page_hook_test.js test/date_filter_test.js test/month_range_test.js test/iteration_units_test.js test/merge_harvest_test.js test/activity_log_urls_test.js test/broken_comments_url_test.js test/build_manifest_entries_test.js"
   },
   "devDependencies": {
     "jsdom": "^25.0.1"

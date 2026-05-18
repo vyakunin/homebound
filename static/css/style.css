@@ -392,6 +392,19 @@ img { max-width: 100%; height: auto; display: block; }
   overflow: hidden;
 }
 
+/* Center the fixed-500px FB plugin iframe within wider post cards (FB
+ * renders content at the URL-passed pixel width, so we can't size the
+ * iframe responsively; the next best thing is symmetric dead-space).
+ * Apr 24 2026 user report: "container for the post is too wide, has
+ * empty space on the right" — left-aligned 500px iframe in a ~640px card. */
+.gplus-fb-post-embed--centered {
+  text-align: center;
+}
+.gplus-fb-post-embed--centered > iframe {
+  display: inline-block;
+  margin: 0 auto;
+}
+
 /* Make the FB Social Plugin iframe fill the container width */
 .gplus-fb-post-embed .fb_iframe_widget,
 .gplus-fb-post-embed .fb_iframe_widget > span,
