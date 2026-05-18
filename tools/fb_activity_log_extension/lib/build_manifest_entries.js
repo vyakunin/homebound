@@ -2,51 +2,33 @@
 // the values returned by the in-tab extractor (extract_media.js → urls +
 // postContentUrls).
 //
-// Until 2026-05-18 content.js pushed *every* CDN URL from the tab into the
-// manifest, which polluted posts with images from FB's "Suggested for you"
-// sidebar (cf. the Apr 7 vyakunin G+/Facebook post that ended up with a
-// chess-club image attached — debug trace in media_manifest of
-// fb-activity-export-v2.8.5-2026-05-17T14-34-28). The fix: prefer the
-// trusted post-content image set (DOM-marked with data-imgperflogname or
-// data-visualcompletion, extracted by extract_media.js).
+// Trust model: ONLY postContentUrls is considered post media.
 //
-// v2.8.16 tightening: videos used to be pulled from the broad `tabUrls`
-// bag (inline scripts + performance API). On a permalink page that bag
-// includes unrelated CDN video URLs (comments' embedded videos, related-
-// post videos preloaded by FB), and there's no per-post identifier to
-// filter them by. The Apr 7 G+/Facebook goodbye post (no videos in UI)
-// got 3 spurious videos attributed via this path in v2.8.15. extract_media.js
-// now scopes the trusted-video query to the post's [role="article"], so
-// postContentUrls carries the article-scoped images AND videos. We take
-// videos exclusively from there.
-//
-// Fallback: when the trusted set is empty (older permalink DOM that
-// doesn't carry the marker attributes) we fall back to the broad CDN bag
-// so older posts don't silently lose all their media.
+// History:
+// - Pre-2026-05-18: content.js shipped every CDN URL from the tab. Suggested-
+//   for-you images leaked into the wrong posts.
+// - v2.8.15 (2026-05-18): row-level media collection in harvestPostsPhase
+//   removed — tab-enrichment becomes the only path. buildPostManifestEntries
+//   prefers postContentUrls but falls back to broad tabUrls when empty.
+// - v2.8.16: extract_media.js excludes [role="article"]-wrapped content from
+//   postContentUrls (comments + related-post cards). Videos taken from
+//   postContentUrls only (article-scoped <video> sources).
+// - v2.8.17: broad-bag fallback REMOVED. When the trusted set is empty, the
+//   permalink page either didn't load (privacy-restricted "Shared with X's
+//   friends" placeholders) or lacks the expected markers entirely. Falling
+//   back to the broad bag in either case dumps FB UI chrome and unrelated
+//   media into the manifest (a privacy-walled "Shared with Margo's friends"
+//   page produced 24 manifest entries of UI sprite icons in the v2.8.16
+//   export). Posts with empty postContentUrls now ship metadata-only — far
+//   preferable to shipping wrong media.
 
 function buildPostManifestEntries({ permalinkKey, tabUrls, postContentUrls, isAcceptableCdnUrl, isVideoMediaUrl }) {
   const safeIsCdn = isAcceptableCdnUrl || (() => true);
-  const safeIsVideo = isVideoMediaUrl || (() => false);
-  const trustedAll = (postContentUrls || []).filter(safeIsCdn);
-  const acceptableTabUrls = (tabUrls || []).filter(safeIsCdn);
-
-  let chosen;
-  if (trustedAll.length > 0) {
-    // Trusted set already includes both images and (article-scoped) videos.
-    // No need to pull videos from the broad bag — that's the path that was
-    // leaking unrelated CDN video URLs into the wrong posts.
-    chosen = trustedAll;
-  } else {
-    // Defence-in-depth fallback for permalink DOM that doesn't expose the
-    // trusted markers. Better to keep the old behaviour than to silently
-    // drop a post's media; this fires on a small minority of older posts.
-    chosen = acceptableTabUrls;
-  }
-
-  // Suppress isVideoMediaUrl-unused lint by tying it into a sanity assert.
-  // (We accept the predicate for compat with callers that may want to
-  // re-add video filtering later without changing the signature.)
-  void safeIsVideo;
+  void isVideoMediaUrl;  // kept in signature for callers; no broad-bag video pickup since v2.8.16
+  // Suppress unused-tabUrls lint without dropping it from the signature: the
+  // permalinkDebug ZIP step still wants tabUrls counts written out separately.
+  void tabUrls;
+  const chosen = (postContentUrls || []).filter(safeIsCdn);
 
   const seen = new Set();
   const entries = [];

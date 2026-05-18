@@ -94,18 +94,22 @@ test('post videos included when extract_media.js puts them in postContentUrls', 
   assert.ok(!urls.includes(SUGGESTED_FEED_IMG), 'suggested-feed image excluded');
 });
 
-test('fallback: when postContentUrls is empty, all acceptable tabUrls go through', () => {
-  // Some older permalink DOM doesn't carry the trusted markers; we'd rather
-  // ship those posts with possibly-broader media than silently lose them.
+test('v2.8.17: empty postContentUrls produces zero manifest entries (no broad-bag fallback)', () => {
+  // Pre-v2.8.17 we fell back to acceptableTabUrls when the trusted set was
+  // empty. The 2026-05-18 v2.8.16 export proved that strategy harmful: a
+  // privacy-walled permalink page ("Shared with Margo's friends") had no
+  // feedImage / no og:image / no media-vc-image at all, and the fallback
+  // dumped 24 pieces of FB UI chrome into the manifest as if they were
+  // the post's media. Better to ship the post text-only than to ship 24
+  // wrong items.
   const entries = buildPostManifestEntries({
     permalinkKey: PERMALINK,
-    tabUrls: [POST_OWN_IMG, SUGGESTED_FEED_IMG],
+    tabUrls: [POST_OWN_IMG, SUGGESTED_FEED_IMG, POST_VIDEO],
     postContentUrls: [],
     isAcceptableCdnUrl,
     isVideoMediaUrl,
   });
-  const urls = entries.map((e) => e.url);
-  assert.deepEqual(urls.sort(), [POST_OWN_IMG, SUGGESTED_FEED_IMG].sort());
+  assert.deepEqual(entries, [], `expected no entries when trusted set is empty; got ${JSON.stringify(entries)}`);
 });
 
 test('dedupes repeated URLs (within postContentUrls)', () => {
