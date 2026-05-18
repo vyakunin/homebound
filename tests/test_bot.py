@@ -169,6 +169,78 @@ def test_bot_retrieval_never_sees_private_posts(monkeypatch):
     assert "private-1" not in slugs, "PRIVATE post leaked into bot retrieval"
 
 
+def _hit(slug, *, kw_rank=None, sem_dist=None, post_id=None):
+    from blog.bot_retrieval import BotHit
+    return BotHit(
+        id=post_id if post_id is not None else hash(slug) & 0xFFFFFFFF,
+        slug=slug, title=slug, snippet="", created_at_iso="",
+        score=0.0, keyword_rank=kw_rank, semantic_distance=sem_dist,
+    )
+
+
+def test_fuse_semantic_top_outranks_weak_keyword():
+    """A post that's the top semantic hit + a weak keyword hit should
+    rank above posts that are top keyword hits but absent from
+    semantic. This is the prod bug the rank-based fusion fixes:
+    «ты болел недавно?» semantically matched 2025-11-24-3 strongly
+    but the post was a weak keyword hit, and the old absolute-score
+    fusion ranked it 10/10 behind unrelated keyword-heavy posts."""
+    from blog.bot_retrieval import _fuse
+
+    # Keyword list: A is strongest, B (the target) is the weakest.
+    kw = [
+        _hit("a", kw_rank=0.9, post_id=1),
+        _hit("c", kw_rank=0.6, post_id=3),
+        _hit("d", kw_rank=0.4, post_id=4),
+        _hit("e", kw_rank=0.3, post_id=5),
+        _hit("b", kw_rank=0.1, post_id=2),  # weak keyword
+    ]
+    # Semantic list: B is the top hit.
+    sem = [_hit("b", sem_dist=0.3, post_id=2)]
+
+    out = _fuse(kw, sem, top_k=5)
+    slugs = [h.slug for h in out]
+    assert slugs[0] == "b", (
+        f"Expected dual hit 'b' first (top semantic + weak keyword); "
+        f"got {slugs}"
+    )
+
+
+def test_fuse_date_hit_dominates_single_half():
+    """Date hits remain dominant over single-half top hits when a
+    question explicitly references a date — preserves the
+    explicit-intent behavior."""
+    from blog.bot_retrieval import _fuse
+
+    kw = [_hit("a", kw_rank=0.9, post_id=1)]   # contrib 0.5
+    sem = [_hit("c", sem_dist=0.2, post_id=3)] # contrib 0.5
+    date_hits = [_hit("b", post_id=2)]         # contrib 0.85
+
+    out = _fuse(kw, sem, date_hits, top_k=3)
+    slugs = [h.slug for h in out]
+    assert slugs[0] == "b", (
+        f"Expected date hit 'b' first (date bonus 0.85 beats single 0.5); "
+        f"got {slugs}"
+    )
+
+
+def test_fuse_dual_hit_beats_date_only():
+    """A post that's top in BOTH keyword and semantic outranks a
+    date-only hit. This preserves the 'date hit ≈ strong dual' design
+    intent — comparable but dual still wins."""
+    from blog.bot_retrieval import _fuse
+
+    kw = [_hit("dual", kw_rank=0.9, post_id=1)]  # 0.5
+    sem = [_hit("dual", sem_dist=0.2, post_id=1)]  # 0.5; total 1.0
+    date_hits = [_hit("date_only", post_id=2)]  # 0.85
+
+    out = _fuse(kw, sem, date_hits, top_k=3)
+    slugs = [h.slug for h in out]
+    assert slugs[0] == "dual" and slugs[1] == "date_only", (
+        f"Expected dual (1.0) > date_only (0.85); got {slugs}"
+    )
+
+
 # ── Happy path with mocked Anthropic ──────────────────────────────────
 
 

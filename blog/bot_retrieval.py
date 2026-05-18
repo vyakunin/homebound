@@ -308,33 +308,46 @@ def _fuse(
     *,
     top_k: int,
 ) -> list[BotHit]:
-    """Combine all three halves. Date hits get a flat high score
-    (0.85) so they always surface near the top when the question
-    references a specific date — they're an explicit-intent signal,
-    not a fuzzy similarity. Keyword and semantic are blended 50/50 as
-    before."""
+    """Rank-based fusion of keyword + semantic + date halves.
+
+    Each of the keyword and semantic lists contributes up to 0.5 based
+    on rank within that list (rank-1 → 0.5, rank-N → ~0). A dual hit
+    that ranks high in both lists comfortably outranks a single-half
+    top hit. Date hits get a flat +0.85 bonus, comparable to a strong
+    dual hit, ensuring date-anchored queries surface day-specific
+    posts even when keyword + semantic miss them.
+
+    **Rank-based, not score-based:** cosine distance ∈ [0, 2] and FTS
+    rank live on very different scales. The old absolute-score blend
+    capped a strong semantic hit at 0.5·(1 - 0.3/2) ≈ 0.43 while the
+    top keyword hit always got 0.5 — so semantic-only top results
+    never won the #1 slot (e.g. «ты болел недавно?» semantically
+    matched a 2025 Ramsay Hunt post but ranked it 10/10 because
+    keyword-rank dominance pushed unrelated posts above it). Rank
+    normalization gives each half's top hit the same max contribution
+    of 0.5, restoring symmetry between the two retrievers."""
     date_hits = date_hits or []
     if not kw and not sem and not date_hits:
         return []
-    max_rank = max((h.keyword_rank or 0.0) for h in kw) if kw else 1.0
-    if max_rank <= 0:
-        max_rank = 1.0
+
+    def _rank_contrib(rank: int, n: int) -> float:
+        if n <= 0:
+            return 0.0
+        return 0.5 * (n - rank + 1) / n
+
     merged: dict[int, BotHit] = {}
-    for h in kw:
-        norm_kw = (h.keyword_rank or 0.0) / max_rank
-        merged[h.id] = _with_score(h, 0.5 * norm_kw)
-    for h in sem:
-        dist = h.semantic_distance if h.semantic_distance is not None else 2.0
-        norm_sem = max(0.0, 1.0 - dist / 2.0)
-        contribution = 0.5 * norm_sem
+    for rank, h in enumerate(kw, start=1):
+        merged[h.id] = _with_score(h, _rank_contrib(rank, len(kw)))
+    for rank, h in enumerate(sem, start=1):
+        contrib = _rank_contrib(rank, len(sem))
         existing = merged.get(h.id)
         if existing is None:
-            merged[h.id] = _with_score(h, contribution)
+            merged[h.id] = _with_score(h, contrib)
         else:
             merged[h.id] = BotHit(
                 id=existing.id, slug=existing.slug, title=existing.title,
                 snippet=existing.snippet, created_at_iso=existing.created_at_iso,
-                score=existing.score + contribution,
+                score=existing.score + contrib,
                 keyword_rank=existing.keyword_rank,
                 semantic_distance=h.semantic_distance,
             )
@@ -343,8 +356,6 @@ def _fuse(
         if existing is None:
             merged[h.id] = _with_score(h, 0.85)
         else:
-            # Date+semantic match → score 0.85 + whatever the other
-            # signals contributed, comfortably above bare semantic.
             merged[h.id] = BotHit(
                 id=existing.id, slug=existing.slug, title=existing.title,
                 snippet=existing.snippet, created_at_iso=existing.created_at_iso,
