@@ -493,6 +493,50 @@ class TestFacebookReshareRendering:
             "facebook.com posts a resize event."
         )
 
+    def test_reshare_card_has_compact_max_width(self):
+        """The dark reshare card (containing the "Shared a post by..." strip
+        AND the FB plugin iframe) must be width-constrained so the whole
+        composite reads as a tight FB-style nested card. Otherwise the dark
+        backdrop runs the full ~640px post-card width while the white FB
+        embed sits at 500px centered inside — wasted dark margins on each side
+        (May 18 2026 user report: "still too wide container", DOM inspection
+        showed width=646px while the iframe inside is 500px).
+
+        The rule must constrain ``.gplus-fb-reshare-card`` to ≤560px and
+        center it. Read from static/css/style.css directly since Django
+        serves the file as-is at request time.
+        """
+        from pathlib import Path
+        import re
+
+        css_path = Path(__file__).resolve().parent.parent / "static" / "css" / "style.css"
+        css = css_path.read_text(encoding="utf-8")
+
+        # Find the .gplus-fb-reshare-card { … } block (first one).
+        m = re.search(r"\.gplus-fb-reshare-card\s*\{([^}]*)\}", css)
+        assert m, ".gplus-fb-reshare-card rule must exist in style.css"
+        body = m.group(1)
+        # Must declare a numeric max-width (not 100%) — otherwise the card
+        # stretches to fill the post card.
+        mw = re.search(r"max-width:\s*(\d+)\s*px", body)
+        assert mw, (
+            "Add `max-width: <pixels>` to .gplus-fb-reshare-card so the "
+            "dark backdrop matches the 500px FB embed width. Current rule "
+            f"body: {body.strip()!r}"
+        )
+        width = int(mw.group(1))
+        assert width <= 560, (
+            f"max-width ({width}px) on .gplus-fb-reshare-card is too generous — "
+            "leaves dead dark backdrop space around the 500px FB embed. "
+            "Aim for ≤560px (iframe + ~30px padding/borders)."
+        )
+        # And center it within the wider post card.
+        assert "margin:" in body and "auto" in body, (
+            "Add a horizontal `auto` margin (e.g. `margin: 0 auto`) to "
+            ".gplus-fb-reshare-card so the now-narrow card centers inside "
+            "the wider post card."
+        )
+
     def test_reshare_embed_container_centers_iframe(self):
         """The FB embed iframe is fixed at width=500 (FB renders content for
         that exact pixel width — no responsive scaling), but the surrounding

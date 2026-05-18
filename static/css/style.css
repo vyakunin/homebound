@@ -351,10 +351,16 @@ img { max-width: 100%; height: auto; display: block; }
   padding-bottom: 0.25rem;
 }
 
-/* Facebook-style nested card: commentary above, shared story in a bordered block */
+/* Facebook-style nested card: commentary above, shared story in a bordered block.
+ * Width-constrain to roughly match the 500px FB plugin iframe so the dark
+ * backdrop reads as one tight composite with the embed inside, instead of
+ * a wide dark band wrapping a narrower white card (May 18 2026 user report,
+ * DOM inspection showed container=646px vs iframe=500px). The 540px target
+ * = iframe (500) + 1rem horizontal padding inside the strip + 1px borders;
+ * `margin: 0 auto` centers it in the wider post card. */
 .gplus-fb-reshare-card {
-  margin: 0 1rem 1rem;
-  max-width: 100%;
+  margin: 0 auto 1rem;
+  max-width: 540px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-2);
