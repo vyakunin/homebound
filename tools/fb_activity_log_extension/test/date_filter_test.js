@@ -58,12 +58,32 @@ test('applyDateFilter handles the canonical posts URL', () => {
   assert.equal(u.searchParams.get('activity_history'), 'false');
 });
 
-test('applyDateFilter returns URL unchanged when year or month is missing', () => {
+test('applyDateFilter returns URL unchanged when year is missing', () => {
   const base = 'https://www.facebook.com/me/allactivity';
+  // Year is the load-bearing param; without it FB shows the whole feed,
+  // which is exactly what we'd return un-filtered.
   assert.equal(applyDateFilter(base, null, 10), base);
-  assert.equal(applyDateFilter(base, 2019, null), base);
   assert.equal(applyDateFilter(base, '', ''), base);
   assert.equal(applyDateFilter(base, undefined, undefined), base);
+});
+
+test('applyDateFilter accepts year-only (month null/empty/undefined)', () => {
+  const base = 'https://www.facebook.com/me/allactivity';
+  for (const m of [null, undefined, '']) {
+    const out = applyDateFilter(base, 2019, m);
+    const u = new URL(out);
+    assert.equal(u.searchParams.get('year'), '2019');
+    assert.equal(u.searchParams.get('month'), null, `month should be absent for m=${m}`);
+  }
+});
+
+test('applyDateFilter year-only strips a pre-existing month param', () => {
+  // If the user's saved URL has month=10 baked in, switching to year-only
+  // must drop the stale month so we don't accidentally narrow.
+  const out = applyDateFilter('https://www.facebook.com/me/allactivity?year=2019&month=10', 2020, null);
+  const u = new URL(out);
+  assert.equal(u.searchParams.get('year'), '2020');
+  assert.equal(u.searchParams.get('month'), null);
 });
 
 test('applyDateFilter rejects out-of-range year and month', () => {
@@ -71,7 +91,9 @@ test('applyDateFilter rejects out-of-range year and month', () => {
   // Year out of plausible range
   assert.equal(applyDateFilter(base, 1999, 10), base);
   assert.equal(applyDateFilter(base, 2100, 10), base);
-  // Month out of 1-12
+  // Month out of 1-12 — note: month=0 used to read as "missing", but now we
+  // distinguish that from null/'' so we can support year-only. 0 is invalid;
+  // for safety we return the URL unchanged rather than silently year-only.
   assert.equal(applyDateFilter(base, 2019, 0), base);
   assert.equal(applyDateFilter(base, 2019, 13), base);
 });

@@ -237,23 +237,38 @@ async function loadUrlFields() {
 
 // Append year/month query params to an Activity Log URL when the user has
 // set the date filter. Keeps the existing params intact (uses URLSearchParams).
-// Returns the URL unchanged when year+month aren't both set — a partial date
-// filter is meaningless to FB so we treat it as "no filter".
+//
+// FB Activity Log accepts:
+//   - `?year=YYYY&month=MM` — single-month view
+//   - `?year=YYYY`          — whole-year view (used by default per-year
+//                             pagination when the user hasn't narrowed to a
+//                             specific month)
+// `month` may be null/undefined/'' to produce a year-only URL; in that case
+// any existing `month=` param is stripped so we don't accidentally inherit
+// it from the user's saved URL.
 function applyDateFilter(url, year, month) {
-  if (!year || !month) return url;
+  if (!year) return url;
   const y = parseInt(String(year), 10);
-  const m = parseInt(String(month), 10);
   if (!Number.isFinite(y) || y < 2004 || y > 2099) return url;
-  if (!Number.isFinite(m) || m < 1 || m > 12) return url;
+
+  const monthGiven = month !== null && month !== undefined && month !== '';
+  let m = null;
+  if (monthGiven) {
+    m = parseInt(String(month), 10);
+    if (!Number.isFinite(m) || m < 1 || m > 12) return url;
+  }
+
   try {
     const u = new URL(url, 'https://www.facebook.com/');
     u.searchParams.set('year', String(y));
-    u.searchParams.set('month', String(m));
+    if (m !== null) u.searchParams.set('month', String(m));
+    else u.searchParams.delete('month');
     return u.toString();
   } catch (_) {
-    // Fall back to naive concat if URL parsing fails for any reason.
     const sep = url.includes('?') ? '&' : '?';
-    return `${url}${sep}year=${y}&month=${m}`;
+    return m !== null
+      ? `${url}${sep}year=${y}&month=${m}`
+      : `${url}${sep}year=${y}`;
   }
 }
 
@@ -305,6 +320,46 @@ function generateMonthRange(fromY, fromM, toY, toM, nowY, nowM) {
 async function getDateRange() {
   const r = await chrome.storage.local.get(['fbDateRange']);
   return r.fbDateRange || {};
+}
+
+// Pick the iteration unit (year or month) and emit the list of pages the
+// wizard will navigate. Always paginates — the un-bounded "scrape everything"
+// case becomes per-year iteration so each page is naturally memory-bounded
+// (one year of activity fits comfortably; the whole-history single-pass blew
+// the renderer's heap).
+//
+// Dispatch rules (newest → oldest in every case):
+//   - both fromMonth AND toMonth set → per-month iteration via
+//     generateMonthRange(fromY, fromM, toY, toM) (finest granularity)
+//   - otherwise → per-year iteration, with empty year-sides clamped to
+//     2004 (from) and the current year (to). Months are ignored at this
+//     granularity.
+// Returns array of { year } or { year, month } objects. Half-specified
+// month (year set without month on the same side, or vice versa) collapses
+// to per-year on both sides.
+function generateIterationUnits(fromY, fromM, toY, toM, nowY, nowM) {
+  const isEmpty = (v) => v === null || v === undefined || v === '';
+
+  // Per-month path: requires year AND month on BOTH sides.
+  const monthPathOk =
+    !isEmpty(fromY) && !isEmpty(fromM) && !isEmpty(toY) && !isEmpty(toM);
+  if (monthPathOk) {
+    return generateMonthRange(fromY, fromM, toY, toM, nowY, nowM);
+  }
+
+  // Per-year path: clamp empty year-sides to defaults. (Months are
+  // ignored — if only one side specified a month we collapse to year-only
+  // on both sides, since mixing year-only and month-specific URLs in one
+  // iteration is more confusing than useful.)
+  const fY = isEmpty(fromY) ? 2004 : parseInt(String(fromY), 10);
+  const tY = isEmpty(toY) ? nowY : parseInt(String(toY), 10);
+  if (!Number.isFinite(fY) || !Number.isFinite(tY)) return [];
+  if (fY < 2004 || fY > 2099 || tY < 2004 || tY > 2099) return [];
+  if (fY > tY) return [];
+
+  const out = [];
+  for (let y = tY; y >= fY; y--) out.push({ year: y });
+  return out;
 }
 
 // Merge two harvest results into one (same shape as buildScrollHarvestReturn
@@ -632,41 +687,51 @@ function nowYearMonth() {
   return { year: d.getFullYear(), month: d.getMonth() + 1 };
 }
 
-// Compute the month list to iterate over from persisted fbDateRange. Returns
-// [] if no range is set (signals: single-pass legacy mode).
-async function computeMonthsToIterate() {
+// Compute the iteration units (year-only or year+month) to walk through
+// from persisted fbDateRange. Always paginates — even when the user set no
+// range, this returns one entry per year from 2004 to the current year so
+// each tab page is naturally memory-bounded.
+async function computeIterationUnits() {
   const r = await getDateRange();
   const { year: nowY, month: nowM } = nowYearMonth();
-  return generateMonthRange(r.fromYear, r.fromMonth, r.toYear, r.toMonth, nowY, nowM);
+  return generateIterationUnits(r.fromYear, r.fromMonth, r.toYear, r.toMonth, nowY, nowM);
 }
 
-// Run one phase (comments OR posts) across a list of months. Navigates the
-// active tab to each month's filtered URL, calls sendPhase, merges per-month
-// results into a wizard-side accumulator. After the last month, writes the
-// combined result to chrome.storage.local under `fbcExport_<phase>` so the
+// Run one phase (comments OR posts) across a list of iteration units. Each
+// unit is either `{year}` (whole-year page) or `{year, month}` (single-month
+// page); the orchestrator handles both via `applyDateFilter` inside getNavUrls.
+// Navigates the active tab to each unit's filtered URL, calls sendPhase, merges
+// per-unit results into a wizard-side accumulator. After the last unit, writes
+// the combined result to chrome.storage.local under `fbcExport_<phase>` so the
 // existing ZIP step picks it up unchanged.
-async function runPhaseAcrossMonths(phase, months, phaseOpts = {}) {
-  const monthLabel = (m) => `${m.year}-${String(m.month).padStart(2, '0')}`;
+function unitLabel(u) {
+  return u.month
+    ? `${u.year}-${String(u.month).padStart(2, '0')}`
+    : `${u.year}`;
+}
+
+async function runPhaseAcrossUnits(phase, units, phaseOpts = {}) {
   const progressBarId = phase === 'comments' ? 'harvest-comments-progress' : 'harvest-posts-progress';
   const stopBtnId = phase === 'comments' ? 'btn-stop' : 'btn-stop-posts';
   const stepId = phase === 'comments' ? 'step-harvest-comments' : 'step-harvest-posts';
   const harvestBtnId = phase === 'comments' ? 'btn-harvest-comments' : 'btn-harvest-posts';
   const storageKey = phase === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
+  const unitNoun = units.length && units[0].month ? 'month' : 'year';
 
   showStep(stepId);
   document.getElementById(harvestBtnId)?.classList.add('hidden');
   document.getElementById(stopBtnId).disabled = false;
 
   let merged = null;
-  for (let i = 0; i < months.length; i++) {
+  for (let i = 0; i < units.length; i++) {
     if (_multiMonthStopRequested) break;
-    const m = months[i];
-    const label = monthLabel(m);
-    setStatus(`${phase}: month ${i + 1}/${months.length} — ${label} — navigating…`);
+    const u = units[i];
+    const label = unitLabel(u);
+    setStatus(`${phase}: ${unitNoun} ${i + 1}/${units.length} — ${label} — navigating…`);
 
-    // Navigate to the month-filtered URL. On failure, skip month but continue.
+    // Navigate to the filtered URL. On failure, skip unit but continue.
     try {
-      const urls = await getNavUrls(m);
+      const urls = await getNavUrls(u);
       await navigateTab(phase === 'comments' ? urls.comments : urls.posts);
     } catch (e) {
       setStatus(`${label}: navigation failed (${String(e)}) — skipping`, true);
@@ -674,7 +739,7 @@ async function runPhaseAcrossMonths(phase, months, phaseOpts = {}) {
     }
     if (_multiMonthStopRequested) break;
 
-    setStatus(`${phase}: month ${i + 1}/${months.length} — ${label} — harvesting…`);
+    setStatus(`${phase}: ${unitNoun} ${i + 1}/${units.length} — ${label} — harvesting…`);
     const stopPolling = startProgressPolling(progressBarId, (msg) =>
       setStatus(`${label}: ${msg}`),
     );
@@ -686,7 +751,7 @@ async function runPhaseAcrossMonths(phase, months, phaseOpts = {}) {
         continue;
       }
       merged = mergeHarvestResults(merged, res.data);
-      // Persist after every month so a tab kill doesn't lose everything.
+      // Persist after every unit so a tab kill doesn't lose everything.
       await chrome.storage.local.set({ [storageKey]: merged });
     } catch (e) {
       stopPolling();
@@ -697,18 +762,18 @@ async function runPhaseAcrossMonths(phase, months, phaseOpts = {}) {
 
   document.getElementById(stopBtnId).disabled = true;
   if (merged) {
-    setStatus(harvestSummaryText(merged) + ` (across ${months.length} month${months.length === 1 ? '' : 's'})`);
+    setStatus(harvestSummaryText(merged) + ` (across ${units.length} ${unitNoun}${units.length === 1 ? '' : 's'})`);
   } else {
-    setStatus(`${phase}: no data collected across ${months.length} months`, true);
+    setStatus(`${phase}: no data collected across ${units.length} ${unitNoun}s`, true);
   }
   return merged;
 }
 
-// Multi-month orchestrator. Runs the user-selected phases (comments / posts)
-// across the months in `months`, then triggers the existing ZIP/download
-// step (which reads from fbcExport_comments / fbcExport_posts — both written
-// by runPhaseAcrossMonths).
-async function runMultiMonthSession(months) {
+// Multi-unit orchestrator. Runs the user-selected phases (comments / posts)
+// across the iteration `units` (year-only or year+month), then triggers the
+// existing ZIP/download step (which reads from fbcExport_comments /
+// fbcExport_posts — both written by runPhaseAcrossUnits).
+async function runMultiMonthSession(units) {
   _multiMonthStopRequested = false;
   const mode = getHarvestMode();
 
@@ -718,13 +783,13 @@ async function runMultiMonthSession(months) {
 
   if (mode.comments) {
     const opts = { commentsOwnPostsOnly: getWizardPrefsPayload().commentsOwnPostsOnly };
-    await runPhaseAcrossMonths('comments', months, opts);
+    await runPhaseAcrossUnits('comments', units, opts);
     if (_multiMonthStopRequested) {
       setStatus('Stopped — exporting what was collected so far…');
     }
   }
   if (mode.posts && !_multiMonthStopRequested) {
-    await runPhaseAcrossMonths('posts', months);
+    await runPhaseAcrossUnits('posts', units);
   }
   await autoZipAndDownload();
 }
@@ -993,28 +1058,30 @@ function bindUi() {
     }
     markSkippedSteps(mode);
 
-    // Multi-month auto-iteration: kicks in when the user set a date range.
-    // The orchestrator navigates between months itself and merges per-month
-    // results, so it bypasses the per-step nav UI entirely.
-    let months = [];
+    // Always paginate: even with no user-set range, computeIterationUnits
+    // returns one year-only entry per year from 2004 to the current year so
+    // each tab page stays memory-bounded (single-pass unfiltered overloads
+    // the renderer on long histories).
+    let units = [];
     try {
-      months = await computeMonthsToIterate();
+      units = await computeIterationUnits();
     } catch (e) {
       setStatus(`Failed to read date range: ${e}`, true);
       return;
     }
-    if (months.length > 0) {
-      setStatus(`Date range active — iterating ${months.length} month${months.length === 1 ? '' : 's'} newest→oldest.`);
-      runMultiMonthSession(months).catch((e) => setStatus(String(e), true));
+    if (units.length === 0) {
+      // Only happens when the user typed an inverted or out-of-range value;
+      // fall back to the legacy single-pass flow so they aren't stuck.
+      if (mode.comments) {
+        proceedIntroToCommentsFlow().catch((e) => setStatus(String(e), true));
+      } else {
+        proceedToPostsFlow(true).catch((e) => setStatus(String(e), true));
+      }
       return;
     }
-
-    // Legacy single-pass flow (no date range).
-    if (mode.comments) {
-      proceedIntroToCommentsFlow().catch((e) => setStatus(String(e), true));
-    } else {
-      proceedToPostsFlow(true).catch((e) => setStatus(String(e), true));
-    }
+    const unitNoun = units[0].month ? 'month' : 'year';
+    setStatus(`Iterating ${units.length} ${unitNoun}${units.length === 1 ? '' : 's'} newest→oldest…`);
+    runMultiMonthSession(units).catch((e) => setStatus(String(e), true));
   });
 
   document.getElementById('btn-back-intro').addEventListener('click', () => {
@@ -1168,5 +1235,10 @@ document.addEventListener('DOMContentLoaded', () => {
 // Pure-function exports for Node-side unit tests. Side-effect-free; safe to
 // import in jsdom-less environments.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { applyDateFilter, generateMonthRange, mergeHarvestResults };
+  module.exports = {
+    applyDateFilter,
+    generateMonthRange,
+    generateIterationUnits,
+    mergeHarvestResults,
+  };
 }

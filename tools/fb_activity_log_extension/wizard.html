@@ -102,8 +102,11 @@
         <button type="button" id="save-urls">Save URLs</button>
       </details>
       <details class="date-filter-details">
-        <summary>Date range (auto-iterates month-by-month — bounds memory on long archives)</summary>
-        <p class="hint">The wizard scrapes each month newest→oldest and merges results into one ZIP. Leave both empty for the unfiltered feed. Leave one side empty for "everything before X" (set <em>to</em>) or "everything after X" (set <em>from</em>).</p>
+        <summary>Date range (always paginates — bounds memory on long archives)</summary>
+        <p class="hint">The wizard always paginates so each tab page stays memory-bounded.
+          Leave everything empty to scrape the full history one year at a time.
+          Set <em>from</em>/<em>to</em> years to scrape a slice of years.
+          Set <em>from</em> AND <em>to</em> <strong>month</strong> on both sides to drop to month-by-month iteration (slower but lower per-page memory).</p>
         <div class="caps-grid">
           <label>From year <input type="number" id="from-year" min="2004" max="2099" step="1" inputmode="numeric" placeholder="oldest YYYY" /></label>
           <label>From month (1-12) <input type="number" id="from-month" min="1" max="12" step="1" inputmode="numeric" placeholder="MM" /></label>
@@ -167,7 +170,7 @@
     <p id="status" class="status" aria-live="polite"></p>
 
     <!-- Query string busts extension disk cache after updates (bump when editing JS). -->
-    <script src="activity_log_urls.js?v=2.8.10"></script>
-    <script src="wizard.js?v=2.8.10"></script>
+    <script src="activity_log_urls.js?v=2.8.11"></script>
+    <script src="wizard.js?v=2.8.11"></script>
   </body>
 </html>
