@@ -350,19 +350,42 @@ async function getDateRange() {
 // (one year of activity fits comfortably; the whole-history single-pass blew
 // the renderer's heap).
 //
-// Dispatch rules (newest → oldest in every case):
-//   - both fromMonth AND toMonth set → per-month iteration via
-//     generateMonthRange(fromY, fromM, toY, toM) (finest granularity)
-//   - otherwise → per-year iteration, with empty year-sides clamped to
-//     2004 (from) and the current year (to). Months are ignored at this
-//     granularity.
+// Phase-aware dispatch (newest → oldest in every case):
+//
+//   phase='posts': ALWAYS per-month. The MANAGEPOSTSPHOTOSANDVIDEOS source
+//     doesn't honor year-only URLs — empirically (2026-05-18 v2.8.12 run)
+//     a `?year=YYYY` URL with no month was silently ignored and FB served
+//     a fallback page whose links polluted the harvester. The only
+//     confirmed working dated form is `?year=YYYY&month=MM`, so we expand
+//     any empty input sides to year-bounds (Jan / Dec) and iterate every
+//     month. Costs ~12× more navigations than per-year, but it's the
+//     only reliable shape.
+//
+//   phase='comments' (default): per-month iteration only when BOTH sides
+//     fully specify month; otherwise per-year. The COMMENTSCLUSTER source
+//     accepts year-only URLs cleanly.
+//
 // Returns array of { year } or { year, month } objects. Half-specified
-// month (year set without month on the same side, or vice versa) collapses
-// to per-year on both sides.
-function generateIterationUnits(fromY, fromM, toY, toM, nowY, nowM) {
+// month on one side (year set without month, or vice versa) collapses
+// to per-year on both sides for comments.
+function generateIterationUnits(fromY, fromM, toY, toM, nowY, nowM, phase = 'comments') {
   const isEmpty = (v) => v === null || v === undefined || v === '';
 
-  // Per-month path: requires year AND month on BOTH sides.
+  if (phase === 'posts') {
+    // Always per-month. Clamp empty sides to year-bounds: empty fromMonth
+    // defaults to 1 (Jan), empty toMonth defaults to 12 when toYear is
+    // specified (scrape whole `to` year) or to nowM when both to-sides are
+    // empty (don't iterate beyond the current month).
+    const fY = isEmpty(fromY) ? 2004 : parseInt(String(fromY), 10);
+    const fM = isEmpty(fromM) ? 1 : parseInt(String(fromM), 10);
+    const tY = isEmpty(toY) ? nowY : parseInt(String(toY), 10);
+    const tM = isEmpty(toM)
+      ? (isEmpty(toY) ? nowM : 12)
+      : parseInt(String(toM), 10);
+    return generateMonthRange(fY, fM, tY, tM, nowY, nowM);
+  }
+
+  // Per-month path for comments: requires year AND month on BOTH sides.
   const monthPathOk =
     !isEmpty(fromY) && !isEmpty(fromM) && !isEmpty(toY) && !isEmpty(toM);
   if (monthPathOk) {
@@ -713,13 +736,14 @@ function nowYearMonth() {
 }
 
 // Compute the iteration units (year-only or year+month) to walk through
-// from persisted fbDateRange. Always paginates — even when the user set no
-// range, this returns one entry per year from 2004 to the current year so
-// each tab page is naturally memory-bounded.
-async function computeIterationUnits() {
+// from persisted fbDateRange, for a specific phase. The two phases use
+// different defaults because the underlying FB sources behave differently:
+// the comments cluster honors year-only filtering; the posts cluster only
+// honors year+month combined. See generateIterationUnits for details.
+async function computeIterationUnitsForPhase(phase) {
   const r = await getDateRange();
   const { year: nowY, month: nowM } = nowYearMonth();
-  return generateIterationUnits(r.fromYear, r.fromMonth, r.toYear, r.toMonth, nowY, nowM);
+  return generateIterationUnits(r.fromYear, r.fromMonth, r.toYear, r.toMonth, nowY, nowM, phase);
 }
 
 // Run one phase (comments OR posts) across a list of iteration units. Each
@@ -794,27 +818,38 @@ async function runPhaseAcrossUnits(phase, units, phaseOpts = {}) {
   return merged;
 }
 
-// Multi-unit orchestrator. Runs the user-selected phases (comments / posts)
-// across the iteration `units` (year-only or year+month), then triggers the
-// existing ZIP/download step (which reads from fbcExport_comments /
-// fbcExport_posts — both written by runPhaseAcrossUnits).
-async function runMultiMonthSession(units) {
+// Multi-unit orchestrator. Computes one iteration-unit list PER phase
+// (comments runs at year granularity by default; posts must run per-month
+// because FB ignores year-only URLs on MANAGEPOSTSPHOTOSANDVIDEOS), runs
+// each selected phase across its own list, then triggers the existing
+// ZIP/download step.
+async function runMultiMonthSession() {
   _multiMonthStopRequested = false;
   const mode = getHarvestMode();
 
-  // Clear any stale single-month checkpoints from a previous run so the ZIP
-  // step doesn't pick up leftover data from a different session.
+  // Clear any stale checkpoints from a previous run so the ZIP step
+  // doesn't pick up leftover data from a different session.
   await chrome.storage.local.remove(['fbcExport_comments', 'fbcExport_posts']);
 
   if (mode.comments) {
     const opts = { commentsOwnPostsOnly: getWizardPrefsPayload().commentsOwnPostsOnly };
-    await runPhaseAcrossUnits('comments', units, opts);
+    const units = await computeIterationUnitsForPhase('comments');
+    if (units.length === 0) {
+      setStatus('comments: empty iteration list (check date range inputs)', true);
+    } else {
+      await runPhaseAcrossUnits('comments', units, opts);
+    }
     if (_multiMonthStopRequested) {
       setStatus('Stopped — exporting what was collected so far…');
     }
   }
   if (mode.posts && !_multiMonthStopRequested) {
-    await runPhaseAcrossUnits('posts', units);
+    const units = await computeIterationUnitsForPhase('posts');
+    if (units.length === 0) {
+      setStatus('posts: empty iteration list (check date range inputs)', true);
+    } else {
+      await runPhaseAcrossUnits('posts', units);
+    }
   }
   await autoZipAndDownload();
 }
@@ -1083,30 +1118,30 @@ function bindUi() {
     }
     markSkippedSteps(mode);
 
-    // Always paginate: even with no user-set range, computeIterationUnits
-    // returns one year-only entry per year from 2004 to the current year so
-    // each tab page stays memory-bounded (single-pass unfiltered overloads
-    // the renderer on long histories).
-    let units = [];
+    // Always paginate: even with no user-set range, the orchestrator emits
+    // one year per year (for comments) and one month per month (for posts,
+    // since FB ignores year-only URLs on that source). The exact unit count
+    // depends on the phase, so we preview both before kicking off.
+    let cUnits = [];
+    let pUnits = [];
     try {
-      units = await computeIterationUnits();
+      if (mode.comments) cUnits = await computeIterationUnitsForPhase('comments');
+      if (mode.posts) pUnits = await computeIterationUnitsForPhase('posts');
     } catch (e) {
       setStatus(`Failed to read date range: ${e}`, true);
       return;
     }
-    if (units.length === 0) {
-      // Only happens when the user typed an inverted or out-of-range value;
-      // fall back to the legacy single-pass flow so they aren't stuck.
-      if (mode.comments) {
-        proceedIntroToCommentsFlow().catch((e) => setStatus(String(e), true));
-      } else {
-        proceedToPostsFlow(true).catch((e) => setStatus(String(e), true));
-      }
+    if ((mode.comments && cUnits.length === 0) || (mode.posts && pUnits.length === 0)) {
+      // Out-of-range / inverted input — let the user re-enter rather than
+      // silently falling through to a single-pass that overloads memory.
+      setStatus('Date range is empty or inverted — clear or fix the inputs and retry.', true);
       return;
     }
-    const unitNoun = units[0].month ? 'month' : 'year';
-    setStatus(`Iterating ${units.length} ${unitNoun}${units.length === 1 ? '' : 's'} newest→oldest…`);
-    runMultiMonthSession(units).catch((e) => setStatus(String(e), true));
+    const parts = [];
+    if (mode.comments) parts.push(`${cUnits.length} year${cUnits.length === 1 ? '' : 's'} (comments)`);
+    if (mode.posts) parts.push(`${pUnits.length} month${pUnits.length === 1 ? '' : 's'} (posts)`);
+    setStatus(`Iterating ${parts.join(' + ')} newest→oldest…`);
+    runMultiMonthSession().catch((e) => setStatus(String(e), true));
   });
 
   document.getElementById('btn-back-intro').addEventListener('click', () => {
