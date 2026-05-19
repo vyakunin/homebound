@@ -442,27 +442,8 @@ const PERMALINK_ENRICH_STOP_AFTER_CONSECUTIVE_MISS_TAB = 15;
 const PERMALINK_TAB_EXTRACT_MAX_POSTS_DEFAULT = 300;
 
 /** True if URL looks like a user-content CDN image (not UI sprites). */
-function isAcceptableCdnUrl(s) {
-  if (!s || typeof s !== 'string' || s.includes('emoji')) return false;
-  const lower = s.toLowerCase();
-  if (lower.includes('/rsrc.php/') || lower.includes('static.xx.fbcdn.net')) return false;
-  // t51 = profile picture CDN path (row header avatar — never post content)
-  if (lower.includes('/v/t51.')) return false;
-  // t15.5256 = video thumbnail frames (extracted video preview stills — not standalone images)
-  if (lower.includes('/v/t15.5256')) return false;
-  // t39.30808-1 = reaction/comment profile thumbnails (small avatar squares, not post content)
-  if (lower.includes('/v/t39.30808-1/')) return false;
-  // t1.6435-* = profile photo CDN (all size variants: -1 small avatar, -9 medium profile pic)
-  if (/\/v\/t1\.6435-/.test(lower)) return false;
-  if (lower.includes('scontent') && lower.includes('fbcdn.net')) return true;
-  // Link-preview / embed proxy: external.xx.fbcdn.net or external-cph2-1.xx.fbcdn.net (hyphen, not dot)
-  if (lower.includes('fbcdn.net') && (lower.includes('external.') || lower.includes('external-'))) return true;
-  // video.fbcdn.net (older) or video-ber1-1.xx.fbcdn.net (current reel CDN, hyphen not dot)
-  if (lower.includes('fbcdn.net') && (lower.includes('video.') || lower.includes('video-'))) return true;
-  // Cross-posted / Instagram-origin media in post HTML
-  if (lower.includes('scontent') && lower.includes('cdninstagram.com')) return true;
-  return false;
-}
+// isAcceptableCdnUrl is defined in lib/cdn_filter.js and loaded as a
+// content script before content.js (see manifest.json).
 
 function canonicalPermalinkKey(u) {
   if (!u || typeof u !== 'string') return '';
@@ -890,64 +871,62 @@ async function pickCdnUrlFromPermalinkWithFallbacks(fetchUrl) {
   return imageUrl;
 }
 
+// User-Agent for the public-bot view: FB recognises Googlebot and serves a
+// stripped-down crawler-friendly response with og:image + post body, instead
+// of the SPA shell. credentials:'omit' so we behave like a bot (no cookies).
+//
+// Why: mbasic.facebook.com and m.facebook.com both 302 to www.facebook.com,
+// which returns an empty SPA shell when fetched normally — every selector
+// matches nothing because the content hydrates client-side. The Googlebot
+// view does NOT require a logged-in session and exposes og:image directly.
+const GOOGLEBOT_UA = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+// parseMediaFromPublicBotHtml is defined in lib/parse_public_bot.js and
+// loaded as a content script before content.js (see manifest.json).
+
 /**
- * Fetch the mbasic.facebook.com version of a post URL and extract CDN
- * <img> URLs. mbasic serves a minimal static-HTML view that doesn't
- * depend on FB's React/SPA — fetching its body returns the actual rendered
- * post content synchronously, with media URLs as plain `<img src>` tags.
- * Cookies from the user's facebook.com session authenticate the request.
- *
- * Returns array of acceptable CDN URLs, possibly empty.
+ * Fetch the public-bot view of a Facebook post (Googlebot UA, no cookies)
+ * and extract CDN media URLs. Returns [] on any error.
  */
-async function fetchMediaViaMbasic(postUrl, timeoutMs = 15000) {
-  let mUrl;
+async function fetchMediaViaPublicBotView(postUrl, timeoutMs = 15000) {
+  let url;
   try {
     const u = new URL(postUrl);
     if (!/(\.|^)facebook\.com$/.test(u.host)) return [];
-    u.host = 'mbasic.facebook.com';
+    u.host = 'www.facebook.com';
     u.protocol = 'https:';
-    mUrl = u.toString();
+    url = u.toString();
   } catch (_) {
     return [];
   }
   let res;
   try {
-    res = await fetchWithTimeout(mUrl, timeoutMs, { credentials: 'include' });
+    res = await fetchWithTimeout(url, timeoutMs, {
+      credentials: 'omit',
+      redirect: 'follow',
+      headers: { 'User-Agent': GOOGLEBOT_UA },
+    });
   } catch (_) {
     return [];
   }
   if (!res.ok) return [];
   const html = await res.text();
-  if (!html || html.length < 200) return [];
-  // mbasic is small, simple HTML — DOMParser is fast and safe (sandboxed).
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  const urls = [];
-  const seen = new Set();
-  // Every <img> in mbasic with a scontent CDN src is post content. Profile
-  // pic placeholders use `static.xx.fbcdn.net` (already excluded by
-  // isAcceptableCdnUrl).
-  doc.querySelectorAll('img').forEach((img) => {
-    const src = (img.getAttribute('src') || '').trim();
-    if (!src || seen.has(src)) return;
-    if (!isAcceptableCdnUrl(src)) return;
-    seen.add(src);
-    urls.push(src);
-  });
-  return urls;
+  return parseMediaFromPublicBotHtml(html, isAcceptableCdnUrl);
 }
 
 /**
- * v2.8.23+: enrich post media via page_hook GraphQL cache (Layer A) +
- * mbasic.facebook.com fetch fallback (Layer B). Replaces the previous
- * tab-extraction path which hit FB-SPA cache pollution.
+ * Enrich post media via page_hook GraphQL cache (Layer A) + public-bot
+ * fetch fallback (Layer B). Replaces tab-extraction (broken by FB-SPA
+ * cache pollution).
  *
  * Layer A: while the user scrolled the Activity Log, page_hook intercepted
  * GraphQL responses and built _postMediaCache: postId → CDN URLs (full-res).
  * Lookup is O(1) and free.
  *
- * Layer B: for posts whose media wasn't observed in any GraphQL response
- * (rare — usually older / less-viewed posts), fetch mbasic.facebook.com's
- * static-HTML view of the post and extract <img> tags.
+ * Layer B: for posts whose media wasn't observed in any GraphQL response,
+ * fetch www.facebook.com with a Googlebot User-Agent. FB recognises the
+ * UA and returns a crawler-friendly SSR response containing og:image and
+ * inline <img src=scontent...> for the post; no logged-in session needed.
  *
  * Returns the same shape as the legacy enrichMediaFromPermalinkFetches so
  * runMediaAndZip's call site doesn't change:
@@ -964,8 +943,8 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
   const allLinkAttachments = {};  // unused in v2.8.23+
   const htmlDumps = {};           // unused in v2.8.23+
   const permalinkDebug = {
-    note: 'v2.8.23 cache+mbasic: Layer A (page_hook GraphQL cache, captured during Activity Log scroll) + Layer B (mbasic.facebook.com static-HTML fetch fallback). Replaces tab-extraction.',
-    method: 'cache+mbasic',
+    note: 'cache+bot: Layer A (page_hook GraphQL cache, captured during Activity Log scroll) + Layer B (www.facebook.com Googlebot-UA fetch fallback, parses og:image). Replaces tab-extraction.',
+    method: 'cache+bot',
     posts: [],
     enrichStop: null,
     mediaAllowlistCanonicalKeys: null,
@@ -997,9 +976,9 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     //   - reshareCommentary defined: any reshare ("shared a post.") — the
     //     reshared content may be a photo/video/link, and we want to embed
     //     the original's media. Enrichment now reads from per-post
-    //     GraphQL cache (page_hook intercept) and falls back to
-    //     mbasic.facebook.com static-HTML fetch — both are post-scoped
-    //     by construction so reshares no longer leak unrelated images.
+    //     GraphQL cache (page_hook intercept) and falls back to a
+    //     public-bot www.facebook.com fetch (og:image parse) — both are
+    //     post-scoped by construction so reshares no longer leak images.
     if (!p.mediaHint && !p.linkHint && !('reshareCommentary' in p)) continue;
     const pk = canonicalPermalinkKey(postKey);
     if (!pk || seenKeys.has(pk)) continue;
@@ -1026,14 +1005,14 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     });
   }
 
-  // v2.8.23 enrichment loop: cache (page_hook GraphQL) → mbasic fallback.
-  // No tab navigation, no consecutive-miss watchdog (mbasic is fast +
+  // Enrichment loop: cache (page_hook GraphQL) → public-bot fetch fallback.
+  // No tab navigation, no consecutive-miss watchdog (bot fetch is fast +
   // deterministic), no time-budget cliff (each post is bounded by the
-  // fetchWithTimeout inside fetchMediaViaMbasic).
+  // fetchWithTimeout inside fetchMediaViaPublicBotView).
   const enrichT0 = Date.now();
   let cacheHits = 0;
-  let mbasicFetches = 0;
-  let mbasicHits = 0;
+  let botFetches = 0;
+  let botHits = 0;
   let imagesFound = 0;
   const maxAttempts = candidates.length;
   if (maxAttempts > 0) {
@@ -1042,7 +1021,7 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
       enrichMax: maxAttempts,
       enrichAttempt: 0,
       imagesFound: 0,
-      enrichLabel: 'looking up media (GraphQL cache → mbasic fallback)',
+      enrichLabel: 'looking up media (GraphQL cache → public-bot fallback)',
     });
   }
   for (let i = 0; i < candidates.length; i++) {
@@ -1054,14 +1033,15 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     let method = 'graphql_cache';
     let methodNote = null;
     if (urls.length === 0) {
-      // LAYER B: mbasic fetch — ~300ms-1s per post, but deterministic
-      method = 'mbasic';
-      methodNote = `fetch mbasic.facebook.com for ${cand.fetchUrl}`;
+      // LAYER B: public-bot fetch — Googlebot UA hits FB's crawler-friendly
+      // SSR view that exposes og:image. ~300ms-1s per post, deterministic.
+      method = 'public_bot';
+      methodNote = `Googlebot-UA fetch of www.facebook.com for ${cand.fetchUrl}`;
       try {
         await delayMs(300 + Math.floor(Math.random() * 400));
-        urls = await fetchMediaViaMbasic(cand.fetchUrl);
-        mbasicFetches += 1;
-        if (urls.length > 0) mbasicHits += 1;
+        urls = await fetchMediaViaPublicBotView(cand.fetchUrl);
+        botFetches += 1;
+        if (urls.length > 0) botHits += 1;
       } catch (e) {
         permalinkDebug.posts.push({
           enrichIndex: i, permalinkKey: cand.permalinkKey, fetchUrl: cand.fetchUrl,
@@ -1093,18 +1073,18 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     if (i % 10 === 0 || i === 0) {
       await writeZipProgress({
         stage: 'enrich', enrichMax: maxAttempts, enrichAttempt: i + 1,
-        imagesFound, enrichLabel: `cache_hits=${cacheHits} mbasic_fetches=${mbasicFetches}`,
+        imagesFound, enrichLabel: `cache_hits=${cacheHits} bot_fetches=${botFetches}`,
       });
     }
   }
   permalinkDebug.enrichStop = {
     reason: token?.cancelled ? 'cancelled' : 'complete',
     wallMsElapsed: Date.now() - enrichT0,
-    cacheHits, mbasicFetches, mbasicHits,
+    cacheHits, botFetches, botHits,
     candidates: candidates.length,
   };
   if (candidates.length > 0) {
-    console.info(`[fb-export] enrich done: ${cacheHits} cache hits, ${mbasicFetches} mbasic fetches (${mbasicHits} non-empty), ${imagesFound} media items, ${Math.round((Date.now() - enrichT0) / 1000)}s wall`);
+    console.info(`[fb-export] enrich done: ${cacheHits} cache hits, ${botFetches} bot fetches (${botHits} non-empty), ${imagesFound} media items, ${Math.round((Date.now() - enrichT0) / 1000)}s wall`);
   }
   return { out, reactionCounts, allLinkAttachments, htmlDumps, permalinkDebug };
 }
@@ -1651,10 +1631,10 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
     //
     // Trusted post media now comes from per-post GraphQL cache
     // (page_hook intercept while user scrolled the Activity Log) with
-    // an mbasic.facebook.com static-HTML fallback. Both are scoped to
-    // the post by construction (cache key is the post id; mbasic URL
-    // is the post's permalink). Posts that don't get enriched end up
-    // with no media in the manifest — preferable to wrong media.
+    // a public-bot (Googlebot-UA) www.facebook.com fetch as fallback.
+    // Both are scoped to the post by construction (cache key is the
+    // post id; bot URL is the post's permalink). Posts that don't get
+    // enriched end up with no media in the manifest — preferable to wrong.
     if (reshareCommentary === undefined) {
       // collection deliberately omitted; see comment above
     }

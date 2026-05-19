@@ -2,9 +2,9 @@
   "name": "fb-activity-log-extension-tests",
   "version": "0.0.0",
   "private": true,
-  "description": "Node-side tests for the Chrome extension's media extractor (lib/extract_media.js).",
+  "description": "Node-side tests for the FB Activity Log Chrome extension.",
   "scripts": {
-    "test": "node --test test/extract_media_test.js test/extract_timestamp_test.js test/page_hook_test.js test/date_filter_test.js test/month_range_test.js test/iteration_units_test.js test/merge_harvest_test.js test/activity_log_urls_test.js test/broken_comments_url_test.js test/build_manifest_entries_test.js test/no_row_media_for_posts_test.js"
+    "test": "node --test test/extract_timestamp_test.js test/page_hook_test.js test/date_filter_test.js test/month_range_test.js test/iteration_units_test.js test/merge_harvest_test.js test/activity_log_urls_test.js test/broken_comments_url_test.js test/no_row_media_for_posts_test.js test/parse_public_bot_test.js test/cdn_filter_test.js"
   },
   "devDependencies": {
     "jsdom": "^25.0.1"

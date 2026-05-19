@@ -23,7 +23,11 @@ posts:
   # presentation in Prague. Commentary: "Nuff said". Embedded content: reel.
   - id: nuff_said_reel_reshare
     scope: {year: 2026, month: 5}
-    post_key_suffix: pfbid02shvXTUQxHzricvFtQKKJeQiigVe8A5iHLFXTxTwPVJh
+    # Full pfbid for Vladimir's reshare of the reel (from 2026-05 harvest).
+    # The harvester also emits a row for the original reel URL — the test
+    # only suffix-matches, so anchoring on Vladimir's pfbid is the precise
+    # form (and avoids false-matching FB's own canonical reel post).
+    post_key_suffix: pfbid0pAHLYJnbSkivNmN8HTNiqHJg8MjcBJiZm3eX2Y4nupzhPKJZ74vYfyVLpzowbzosl
     expect:
       is_reshare: true
       # Exact commentary — no "Public6:23 AM" / "View" Activity Log row
@@ -33,9 +37,11 @@ posts:
       # `reshared_from_url` with the original reel URL.
       reshared_from_url_contains: "/reel/954305617193406"
       timestamp_rawText: "May 6, 2026"
-      # Reel = single video. Hash filled after first successful --with-media run.
+      # Reel cover image (the only media we can extract through the public-bot
+      # view of FB; the underlying video bytes are gated). Captured 2026-05-20.
       media_count_exact: 1
-      media_sha256: [TBD]
+      media_sha256:
+        - 4a2d0e1a77be8a4a9dc21a0240c490289ba8431a5f91b6c77e6177c7335051eb
 
   # ─── 2: Reshare with multiline commentary, single image (May 6 2026) ────
   # Vladimir's reshare of Slantchev's "Americans are coming" chart post.
@@ -49,9 +55,11 @@ posts:
       reshare_commentary_exact: "Сравнение, конечно, некорректное, но...\nА что же случилось?"
       reshared_from_url_contains: "/slantchev/posts/"
       timestamp_rawText: "May 6, 2026"
-      # The chart image. Hash filled after first successful run.
+      # The chart image (slantchev's primary image, served via og:image to
+      # the public-bot fetch of Vladimir's reshare). Captured 2026-05-20.
       media_count_exact: 1
-      media_sha256: [TBD]
+      media_sha256:
+        - 1733c789d6814fec1f90b3c86614d5333a82f91d5edc5a53124673e28973ad41
 
   # ─── 3: G+/Trump memorial reshare (Apr 7 2026) ─────────────────────────
   # The canonical chess-pic-on-Apr7 case that drove v2.8.13–.17 fixes.
@@ -89,7 +97,10 @@ posts:
   # surfaces the pfbid.
   - id: february_self_reshare_no_commentary
     scope: {year: 2026, month: 2}
-    post_key_suffix: TBD_FILL_IN_AFTER_FIRST_HARVEST
+    # Vladimir's reshare permalink for the Feb 24 2026 self-reshare of his
+    # own March 2 2022 long-text post about "Что такое Россия". Captured
+    # in the 2026-02 harvest 2026-05-20.
+    post_key_suffix: pfbid02oick7TXPr6mNKXfigEjfu3HKprGdaf7Z2UCgwEa6hKudDY1fmpBN7PUCkZiF3wGml
     expect:
       is_reshare: true
       reshare_commentary_exact: ""
@@ -123,12 +134,23 @@ posts:
       reshare_commentary_must_not_contain: ["Public", "View", "AM", "PM"]
       reshared_from_url_contains: "/mike.tamm.9/posts/"
       timestamp_rawText: "November 5, 2024"
-      # Mike's original post has one image. v2.8.20 unblocked reshare
-      # enrichment + v2.8.21 routes enrichment to the original-post URL
-      # where DOM markers live.
-      media_count_exact: 1
-      media_sha256:
-        - 438363c4437d84763eaeff03e474754517f9c2f76f362251dcf51380a387109f
+      # Mike's original post has one image but we currently cannot reach
+      # it. KNOWN LIMITATION as of v2.8.25:
+      #   - Activity Log GraphQL responses carry no post media (Layer A
+      #     cache is structurally empty for this surface).
+      #   - Public-bot fetch (Layer B, Googlebot UA) of Mike's permalink
+      #     returns the SPA shell with no og:image — Mike's privacy
+      #     scope is presumably narrower than Public, so FB serves
+      #     Googlebot a stripped page (title only, no media).
+      #   - Logged-in fetch returns the SPA shell which only ships
+      #     hydration scaffolding; media URLs arrive via async GraphQL
+      #     after page load.
+      # The eventual fix is foreground-tab navigation (load URL in the
+      # user's main tab, intercept GraphQL via page_hook). Until then,
+      # pin media_count_exact: 0 + a non-empty hash sentinel that
+      # forces a re-pin once the fix lands.
+      media_count_exact: 0
+      media_sha256: []
 
 # Comments goldens. comments-own-posts-only is OFF by default in the
 # wizard (training-data mode → harvest comments on others' posts too).
