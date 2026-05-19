@@ -926,12 +926,17 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     const fetchUrl = (p.url || postKey || '').trim();
     if (!fetchUrl.startsWith('http') || !fetchUrl.includes('facebook.com')) continue;
     if (hasStrongMediaForPermalink(merged, postKey)) continue;
-    // Only enrich posts we know have media or a link card.
-    // linkHint = "shared a link" posts whose external URL card should be extracted.
-    if (!p.mediaHint && !p.linkHint) continue;
-    // Reshare posts ("shared a post.") contain the original post's media, not the resharer's.
-    // Skip enrichment to avoid downloading images that don't belong to this post.
-    if ('reshareCommentary' in p) continue;
+    // Only enrich posts we know likely have media:
+    //   - mediaHint: action label says "added N photo(s)/video(s)" etc.
+    //   - linkHint: "shared a link" with external URL card
+    //   - reshareCommentary defined: any reshare ("shared a post.") — the
+    //     reshared content may be a photo/video/link, and we want to embed
+    //     the original's media. v2.8.20 unblocked reshare enrichment:
+    //     previously skipped because the broad CDN bag leaked unrelated
+    //     images, but v2.8.16's trusted-image marker filter
+    //     (lib/build_manifest_entries.js) now scopes captured media to
+    //     the post's own [role="article"] / feedImage tags.
+    if (!p.mediaHint && !p.linkHint && !('reshareCommentary' in p)) continue;
     const pk = canonicalPermalinkKey(postKey);
     if (!pk || seenKeys.has(pk)) continue;
     seenKeys.add(pk);
