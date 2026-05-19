@@ -601,12 +601,34 @@ def _call_openrouter(
     text = (choice.get("message") or {}).get("content") or ""
     usage = data.get("usage") or {}
     return (
-        text.strip(),
+        _strip_model_artifacts(text.strip()),
         int(usage.get("prompt_tokens", 0) or 0),
         int(usage.get("completion_tokens", 0) or 0),
         0,
         data.get("model") or model,
     )
+
+
+# Common trailing tokens that open-source models occasionally leak into
+# their text output (instruction-tuning artifacts). Strip from the end of
+# the response, case-insensitively, with surrounding whitespace.
+_MODEL_ARTIFACT_TAILS = re.compile(
+    r"[\s\.]*\b(?:MODE\s*END|END\s*OF\s*RESPONSE|END_OF_TURN|"
+    r"<\|end\|>|<\|im_end\|>|<\|endoftext\|>)\b[\s\.]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_model_artifacts(text: str) -> str:
+    """Remove common open-model end-of-output token leaks from the tail.
+    Qwen and several Llama-derivatives sometimes emit ``.MODE END.``,
+    ``<|im_end|>``, etc. as visible text. This is purely cosmetic — the
+    model's actual answer is the prefix."""
+    cleaned = _MODEL_ARTIFACT_TAILS.sub("", text).rstrip()
+    # Also collapse a trailing ".." that the artifact strip can leave.
+    if cleaned.endswith(".."):
+        cleaned = cleaned.rstrip(".") + "."
+    return cleaned
 
 
 def _extract_anthropic_text(resp) -> str:
