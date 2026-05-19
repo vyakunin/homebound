@@ -425,13 +425,16 @@ def bot_ask_api(request):
 
     # Sonnet-tier eligibility: one premium call per IP per day, only
     # for non-trivial questions. Trivial / repeated questions stay on
-    # Haiku — Sonnet doesn't add much for one-liners and Haiku handles
-    # the frank Vladimir voice fine.
+    # the per-language default — Sonnet doesn't add much for one-liners.
+    #
+    # When upgrading to Sonnet we override the per-language default;
+    # otherwise pass model=None so the bot's language router picks
+    # BOT_MODEL_RU vs BOT_MODEL_EN based on the question's language.
     from blog.bot_throttle import sonnet_eligible
     if sonnet_eligible(ip_hash, question):
-        chosen_model = getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
+        chosen_model: str | None = getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
     else:
-        chosen_model = getattr(settings, "BOT_DEFAULT_MODEL", "claude-haiku-4-5")
+        chosen_model = None
 
     session_token = str(payload.get("session_token", ""))[:64]
     try:

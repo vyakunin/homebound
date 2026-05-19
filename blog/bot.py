@@ -282,15 +282,13 @@ def _cache_lookup(
     *,
     requested_model: str,
 ) -> BotAnswer | None:
-    """Return the best cached answer for this prompt+context, or None.
+    """Return the cached answer for (prompt, context, model), or None.
 
-    Rules:
-    - If a row for the *premium* model exists → return it (Sonnet wins).
-    - Else if requested_model is the premium model and only a cheaper
-      row exists → return None so the caller fetches the upgrade.
-    - Else (cheap requested, cheap cached) → return the cached cheap.
-
-    Soft-fails if the cache table doesn't exist."""
+    Dual-model setup: cross-provider model substitution doesn't make
+    sense (Qwen and Haiku give different voices). Match on exact model
+    name, with one exception — if the caller wants the Anthropic
+    premium model (Sonnet) and a Sonnet row exists for this prompt+
+    context, return it. Soft-fails if the cache table doesn't exist."""
     try:
         from blog.models import BotResponseCache
 
@@ -301,16 +299,30 @@ def _cache_lookup(
         )
         if not rows:
             return None
-        # Prefer premium if cached. Otherwise, if caller wants premium
-        # and we only have cheap, miss the cache so caller calls premium
-        # (which will evict the cheap row on write).
-        premium_rows = [r for r in rows if r.model == premium]
-        if premium_rows:
-            row = premium_rows[0]
-        elif requested_model == premium:
-            return None
+        # Exact-model match first.
+        exact = [r for r in rows if r.model == requested_model]
+        if exact:
+            row = exact[0]
         else:
-            row = rows[0]
+            # The caller's requested model isn't cached. Two cases worth
+            # falling back to a different cached row:
+            #   1. Anthropic published models may resolve with a date
+            #      suffix on the response (claude-haiku-4-5 vs
+            #      claude-haiku-4-5-20251001). Treat those as the same
+            #      model family.
+            #   2. If the caller requested anything OTHER than premium
+            #      and a premium row exists for this exact prompt, that
+            #      row is strictly better — return it.
+            same_family = [
+                r for r in rows
+                if r.model.startswith(requested_model) or requested_model.startswith(r.model)
+            ]
+            if same_family:
+                row = same_family[0]
+            elif requested_model != premium and any(r.model == premium for r in rows):
+                row = next(r for r in rows if r.model == premium)
+            else:
+                return None
         BotResponseCache.objects.filter(pk=row.pk).update(
             hit_count=row.hit_count + 1,
         )
