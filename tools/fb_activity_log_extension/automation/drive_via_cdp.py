@@ -50,9 +50,15 @@ import websockets
 CDP_HTTP = "http://localhost:9222"
 FB_EXT_ID = "hlnkajaedobaajimkaeoagiljpailioh"
 
-# Iteration mode caps: small enough to keep per-year wall time under ~2 min
-# but large enough that the harvest goes past the first scroll round.
-ITER_MAX_ITEMS = 50
+# Iteration mode cap. The content script's scroll-stable detection waits
+# 25 consecutive rounds (~150s) for new items before stopping; that's the
+# bulk of every harvest's wall time. A small cap triggers `capPosts` /
+# `capComments` stop almost immediately, skipping the stable-wait —
+# benchmarked 2026-05-19: cap=50 → 169s (scroll-stable), cap=5 → 15s
+# (cap-stop). 10 is the sweet spot for "enough rows to validate the
+# fix, fast enough to iterate". Bump it explicitly via --max-items when
+# the bug-of-interest requires more.
+ITER_MAX_ITEMS = 10
 
 # Iteration mode target wall time. Anything past this should make us
 # question whether the scope is still "iteration" or has drifted into

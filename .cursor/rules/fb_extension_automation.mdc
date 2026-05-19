@@ -60,8 +60,8 @@ minutes.
 The driver logs `elapsed=<seconds>` and emits a `WARNING` when an iter
 run exceeds `ITER_TARGET_SECONDS` (currently 5 min). When that fires:
 
-1. **Narrow the scope further** — drop to `--max-items 10`, or pick a
-   year known to be empty for the user (e.g. `--year 2004`).
+1. **Narrow the scope further** — drop to `--max-items 5`, or pick a
+   year known to be sparse for the user (e.g. `--year 2014`).
 2. **Profile the slow path** — look at the per-year `yearMs` numbers in
    the JSON output; one slow year usually means a per-post tab
    enrichment loop, not a 23-year iteration.
@@ -72,6 +72,25 @@ run exceeds `ITER_TARGET_SECONDS` (currently 5 min). When that fires:
 The 5-min ceiling is a budget, not a hard limit. Adjust
 `ITER_TARGET_SECONDS` in `drive_via_cdp.py` if a project change
 genuinely raises the floor (and update this rule with the reason).
+
+## Benchmark reference (2026-05-19, current-year posts harvest)
+
+| Scope | Wall time | Stopped because | Why |
+|---|---|---|---|
+| `--mode iter` (cap=10, current default) | ~15–30s | `capPosts` | Cap-stop short-circuits |
+| `--max-items 5` | 15.5s | `capPosts` | Single CDP round-trip enough |
+| `--max-items 50` | 169.5s | `scrollStable` | Stable-loop dominates (25 rounds × ~6s) |
+| `--mode full --phase posts` (23 years, with media) | ~58 min | per-year `scrollStable` | All 23 years + tab enrichment for media |
+
+**Key insight:** the content script's scroll-stable detection waits 25
+consecutive rounds (~150s) for new items before stopping. That's the
+bulk of every harvest's wall time. A cap of 5–10 fires `capPosts` /
+`capComments` first and skips the stable-wait entirely.
+
+If iter regularly exceeds 30s on `cap=10`, something else is slow
+(tab navigation timeout, FB throttling, media enrichment). Profile
+the `yearMs` field in the JSON output before assuming it's just "the
+harvest being slow".
 
 ## Architecture (so future-you doesn't relearn it)
 
