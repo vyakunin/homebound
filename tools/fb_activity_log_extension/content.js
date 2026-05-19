@@ -1279,63 +1279,15 @@ function extractRowTextForAnchor(anchor, targetHref) {
   return t.slice(0, 8000);
 }
 
-/**
- * For "shared a post." rows, attempt to extract only the user's own commentary
- * by stripping all anchor links (the shared-post preview card is typically rendered
- * as or wrapped inside an anchor element) and the action-label prefix.
- *
- * Returns '' when no user commentary is detected (bare reshare).
- * Returns the commentary text when the user added their own text.
- *
- * Strategy: after removing all anchors, the remaining non-noise text is either
- * empty (anchors contained all the preview content) or the user's commentary
- * (which is not wrapped in an anchor).
- */
+// extractReshareCommentary + rowHasReshareThumbnail live in
+// lib/reshare_commentary.js (Node-testable via captured DOM fixtures).
+// content.js calls the lib through a thin adapter that wires in this
+// file's stripActivityNoise + isAcceptableCdnUrl.
 function extractReshareCommentary(row) {
   if (!row) return '';
-  const clone = row.cloneNode(true);
-  clone.querySelectorAll('script,style').forEach((n) => n.remove());
-  // Strip ALL anchor links — the shared-post preview card is typically within
-  // an anchor, so removing anchors removes the preview content but preserves
-  // any plain text commentary the user typed.
-  clone.querySelectorAll('a[href]').forEach((link) => link.replaceWith(document.createTextNode(' ')));
-
-  let t = (clone.innerText || '').trim();
-  t = stripActivityNoise(t);
-
-  // Remove the action label and everything before it.
-  // Handles "shared a post.", "shared a .", "shared a photo.", etc.
-  t = t.replace(/^[\s\S]*?\bshared\s+a\b[^.]*\.\s*/i, '').trim();
-
-  // Strip residual Facebook metadata lines that survive stripActivityNoise:
-  // visibility labels, absolute dates ("Apr 6, 2024"), times ("3:21 PM"), "View".
-  t = t.split('\n').filter((line) => {
-    const l = line.trim();
-    if (!l) return false;
-    if (/^(Public|Friends|Custom|Only me|Close Friends)$/i.test(l)) return false;
-    if (/^\d{1,2}:\d{2}/.test(l)) return false;
-    if (/^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b/i.test(l)) return false;
-    if (/^\d{1,2}\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)/i.test(l)) return false;
-    if (/^View$/i.test(l)) return false;
-    return true;
-  }).join('\n').trim();
-
-  // Strip trailing Activity-Log row trailer that FB concatenates onto the
-  // LAST line WITHOUT a newline, so the per-line filter above misses it.
-  // Example shapes observed in the wild (2026-05-19 golden-set test run):
-  //   "Nuff saidPublic6:23 AM"
-  //   "Сравнение, конечно...случилось?Public9:16 AM"
-  //   "...текст...Public10:19 PMView"
-  // Pattern: optional visibility tag (Public/Friends/Custom/Only me/Close
-  // Friends) immediately followed by a time + AM/PM and optionally "View",
-  // all at end of string. \s matches the U+202F narrow no-break space FB
-  // uses between digits and AM/PM in some locales.
-  t = t.replace(
-    /(?:Public|Friends|Custom|Only me|Close Friends)?\s*\d{1,2}:\d{2}\s*[AP]M\s*(?:View)?\s*$/i,
-    '',
-  ).trim();
-
-  return t;
+  const fn = (typeof globalThis !== 'undefined') ? globalThis.extractReshareCommentary_lib : null;
+  if (!fn) return '';
+  return fn(row, { stripActivityNoise, isAcceptableCdnUrl });
 }
 
 /**
