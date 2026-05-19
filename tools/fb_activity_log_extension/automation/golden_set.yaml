@@ -128,7 +128,10 @@ posts:
   # separate identity bug; anchored here by Mike's pfbid until fixed.
   - id: mike_tamm_other_reshare_with_long_commentary
     scope: {year: 2024, month: 11}
-    post_key_suffix: pfbid02irxsrn4dagXMBuJxj2cbBqntAugxMwTBs8KGTsPb
+    # Vladimir's reshare pfbid (Mike's pfbid gets dropped by v2.8.27
+    # dedupReshareOriginalSide, since Vladimir's own-namespace entry
+    # carries the reshared_from_url pointing at Mike's post).
+    post_key_suffix: pfbid02qgddm3U74eHjDaq6d9iUTwR5Mx6PBxcTyr2w2zikLGY7ikEGwhjfxFsmNXrgf9C9l
     expect:
       is_reshare: true
       reshare_commentary_starts_with: "это один из десятка достаточных аргументов не голосовать за Трампа"
