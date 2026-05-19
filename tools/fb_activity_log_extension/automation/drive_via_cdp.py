@@ -129,8 +129,9 @@ class DriverArgs:
     phase: Phase
     from_year: int
     to_year: int
-    with_media: bool   # False => skip-media (default in iter)
-    max_items: int     # 0 => uncapped
+    month: int | None     # 1..12 when set: scope to a single month within `from_year`
+    with_media: bool      # False => skip-media (default in iter)
+    max_items: int        # 0 => uncapped
 
 
 @dataclass
@@ -223,11 +224,18 @@ def resolve_args(raw: argparse.Namespace) -> DriverArgs:
 
     if to_y < from_y:
         sys.exit(f"--to-year {to_y} < --from-year {from_y}")
+    month = raw.month
+    if month is not None:
+        if not (1 <= month <= 12):
+            sys.exit(f"--month {month} out of range 1..12")
+        if from_y != to_y:
+            sys.exit("--month requires a single year (use --year YYYY or --mode iter)")
     return DriverArgs(
         mode=mode,
         phase=phase,
         from_year=from_y,
         to_year=to_y,
+        month=month,
         with_media=with_media,
         max_items=max_items,
     )
@@ -248,10 +256,13 @@ def build_driver_js(args: DriverArgs) -> str:
     Caps come through chrome.tabs.sendMessage via the `caps` field; the
     content script's runScrollHarvest respects maxPosts / maxComments.
     """
-    years = list(range(args.to_year, args.from_year - 1, -1))
+    if args.month is not None:
+        units = [{"year": args.from_year, "month": args.month}]
+    else:
+        units = [{"year": y} for y in range(args.to_year, args.from_year - 1, -1)]
     return _JS_TEMPLATE.format(
         phase=json.dumps(args.phase.slug),
-        years=json.dumps(years),
+        units=json.dumps(units),
         skip_media=str(not args.with_media).lower(),
         max_items=int(args.max_items),
     )
@@ -263,7 +274,7 @@ def build_driver_js(args: DriverArgs) -> str:
 _JS_TEMPLATE = r"""
 (async () => {{
   const PHASE = {phase};
-  const YEARS = {years};
+  const UNITS = {units};
   const SKIP_MEDIA = {skip_media};
   const MAX_ITEMS = {max_items};
   const STORAGE_KEY = PHASE === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
@@ -276,16 +287,18 @@ _JS_TEMPLATE = r"""
 
   await chrome.storage.local.remove([STORAGE_KEY]);
 
-  function urlForYear(y) {{
+  function urlForUnit(unit) {{
     const cat = PHASE === 'comments' ? 'COMMENTSCLUSTER' : 'MANAGEPOSTSPHOTOSANDVIDEOS';
     const u = new URL('https://www.facebook.com/me/allactivity');
     u.searchParams.set('activity_history', 'false');
     u.searchParams.set('category_key', cat);
     u.searchParams.set('manage_mode', 'false');
     u.searchParams.set('should_load_landing_page', 'false');
-    u.searchParams.set('year', String(y));
+    u.searchParams.set('year', String(unit.year));
+    if (unit.month) u.searchParams.set('month', String(unit.month));
     return u.toString();
   }}
+  function unitLabel(u) {{ return u.month ? (u.year + '-' + String(u.month).padStart(2, '0')) : String(u.year); }}
 
   function waitForTabComplete(tabId, timeoutMs) {{
     return new Promise((resolve) => {{
@@ -348,34 +361,35 @@ _JS_TEMPLATE = r"""
 
   const progress = [];
   let merged = null;
-  for (const year of YEARS) {{
-    const tYearStart = Date.now();
+  for (const unit of UNITS) {{
+    const tUnitStart = Date.now();
+    const label = unitLabel(unit);
     try {{
-      await chrome.tabs.update(fbTab.id, {{ url: urlForYear(year) }});
+      await chrome.tabs.update(fbTab.id, {{ url: urlForUnit(unit) }});
       const ok = await waitForTabComplete(fbTab.id, 30000);
-      if (!ok) {{ progress.push({{ year, error: 'tab load timeout' }}); continue; }}
+      if (!ok) {{ progress.push({{ unit: label, error: 'tab load timeout' }}); continue; }}
       await new Promise((r) => setTimeout(r, 4000));
       const opts = {{ phase: PHASE, mode: 'full', caps, diagnosticEnabled: false }};
       if (PHASE === 'comments') opts.commentsOwnPostsOnly = false;
       const res = await chrome.tabs.sendMessage(fbTab.id, {{ type: 'RUN_PHASE', ...opts }});
       if (!res || !res.ok) {{
-        progress.push({{ year, error: (res && res.error) || 'no response' }});
+        progress.push({{ unit: label, error: (res && res.error) || 'no response' }});
         continue;
       }}
       merged = merge(merged, res.data);
       await chrome.storage.local.set({{ [STORAGE_KEY]: merged }});
       progress.push({{
-        year,
+        unit: label,
         items: (res.data[itemsKey] || []).length,
         rounds: res.data.rounds || 0,
         stoppedBecause: res.data.stoppedBecause,
-        yearMs: Date.now() - tYearStart,
+        unitMs: Date.now() - tUnitStart,
       }});
-      // Early-stop in iter mode: once aggregate merged hits the cap there's
-      // no value in chewing through more years.
+      // Early-stop: once aggregate merged hits the cap there's no value in
+      // chewing through more units.
       if (MAX_ITEMS > 0 && merged && (merged[itemsKey] || []).length >= MAX_ITEMS) break;
     }} catch (e) {{
-      progress.push({{ year, error: String(e), yearMs: Date.now() - tYearStart }});
+      progress.push({{ unit: label, error: String(e), unitMs: Date.now() - tUnitStart }});
     }}
   }}
 
@@ -430,8 +444,9 @@ async def run(args: DriverArgs) -> RunResult:
     if not sw or not fb_tab:
         log.info("waking FB extension service worker…")
         sw, fb_tab = await wake_sw()
-    log.info("mode=%s phase=%s years=%d..%d media=%s cap=%d",
-             args.mode.slug, args.phase.slug, args.to_year, args.from_year,
+    scope = f"{args.from_year}-{args.month:02d}" if args.month else f"{args.to_year}..{args.from_year}"
+    log.info("mode=%s phase=%s scope=%s media=%s cap=%d",
+             args.mode.slug, args.phase.slug, scope,
              "on" if args.with_media else "off", args.max_items)
     log.info("SW=%s FB tab=%s url=%s", sw.id[:8], fb_tab.id[:8], fb_tab.url[:80])
     js = build_driver_js(args)
@@ -440,12 +455,14 @@ async def run(args: DriverArgs) -> RunResult:
 
 def log_summary(args: DriverArgs, result: RunResult, elapsed_s: float) -> None:
     for p in result.progress:
+        label = p.get("unit") or p.get("year")
         if p.get("error"):
-            log.warning("  %s: ERROR %s", p.get("year"), p.get("error"))
+            log.warning("  %s: ERROR %s", label, p.get("error"))
         else:
             log.info("  %s: %d items, %d rounds, stopped=%s (%.1fs)",
-                     p.get("year"), p.get("items", 0), p.get("rounds", 0),
-                     p.get("stoppedBecause"), (p.get("yearMs", 0) or 0) / 1000.0)
+                     label, p.get("items", 0), p.get("rounds", 0),
+                     p.get("stoppedBecause"),
+                     ((p.get("unitMs") or p.get("yearMs") or 0)) / 1000.0)
     log.info("merged=%d items, elapsed=%.1fs zip=%s",
              result.merged_count, elapsed_s,
              "ok" if (result.zip or {}).get("ok") else "FAIL")
@@ -464,6 +481,8 @@ def main() -> None:
     ap.add_argument("--phase", default="posts", choices=["posts", "comments"])
     ap.add_argument("--year", type=int, default=None,
                     help="iter mode: single year (default: current year)")
+    ap.add_argument("--month", type=int, default=None,
+                    help="iter mode: narrow further to a single month within --year (1..12)")
     ap.add_argument("--from-year", type=int, default=None, help="full mode: oldest year")
     ap.add_argument("--to-year", type=int, default=None, help="full mode: newest year")
     ap.add_argument("--with-media", action="store_true",

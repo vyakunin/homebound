@@ -1,0 +1,129 @@
+# Golden set for the FB Activity Log extension.
+#
+# Each entry describes a real post / comment the user has on Facebook,
+# anchored by a stable identifier (pfbid permalink), with the EXACT
+# field values + media we expect the extension to produce. The
+# integration test (test_extraction.py) drives a month-scoped harvest
+# for the entry's scope and asserts the extracted record matches.
+#
+# Source of truth for expectations: user screenshots of the actual rendered
+# post on facebook.com. When the extraction disagrees with the screenshot,
+# fix the extension — not the golden file.
+#
+# Media verification: each entry pins exact sha256 hashes of expected
+# media files. When `media_sha256` is empty/contains "TBD", the test
+# runs in `--with-media` mode, computes hashes from the downloaded
+# files, prints them, and reports the entry as PENDING — paste the
+# hashes back in after visually verifying the correct image was saved.
+
+posts:
+
+  # ─── 1: Simple reshare with brief commentary, video media (May 6 2026) ──
+  # Vladimir's reshare of a Maksim Kournikov video about Zakharov's book
+  # presentation in Prague. Commentary: "Nuff said". Embedded content: reel.
+  - id: nuff_said_reel_reshare
+    scope: {year: 2026, month: 5}
+    post_key_suffix: pfbid02shvXTUQxHzricvFtQKKJeQiigVe8A5iHLFXTxTwPVJh
+    expect:
+      is_reshare: true
+      # Exact commentary — no "Public6:23 AM" / "View" Activity Log row
+      # artifacts allowed in the captured value.
+      reshare_commentary_exact: "Nuff said"
+      # The reshared content is a reel. The extension must populate
+      # `reshared_from_url` with the original reel URL.
+      reshared_from_url_contains: "/reel/954305617193406"
+      timestamp_rawText: "May 6, 2026"
+      # Reel = single video. Hash filled after first successful --with-media run.
+      media_count_exact: 1
+      media_sha256: [TBD]
+
+  # ─── 2: Reshare with multiline commentary, single image (May 6 2026) ────
+  # Vladimir's reshare of Slantchev's "Americans are coming" chart post.
+  - id: sravnenie_chart_reshare
+    scope: {year: 2026, month: 5}
+    post_key_suffix: pfbid02QSLqgSLoeLVXzG9UFdr4Tth3KpGFrzpWAE2vmiBprjs
+    expect:
+      is_reshare: true
+      # Multiline commentary; second line "А что же случилось?" must be
+      # preserved. No Public / View / time artifacts.
+      reshare_commentary_exact: "Сравнение, конечно, некорректное, но...\nА что же случилось?"
+      reshared_from_url_contains: "/slantchev/posts/"
+      timestamp_rawText: "May 6, 2026"
+      # The chart image. Hash filled after first successful run.
+      media_count_exact: 1
+      media_sha256: [TBD]
+
+  # ─── 3: G+/Trump memorial reshare (Apr 7 2026) ─────────────────────────
+  # The canonical chess-pic-on-Apr7 case that drove v2.8.13–.17 fixes.
+  # Vladimir's commentary: "Лучше соцсети, чем гугл+ уже не будет. Хотя...
+  # Stay tuned!". Embedded "G+ Jun 2, 2017" share contains a Trump nuclear-
+  # weapons tweet screenshot + Russian commentary "Когда он сам так
+  # ставит вопрос, меня это начинает беспокоить".
+  #
+  # Known previous failure mode: 20+ unrelated images attributed to this
+  # post including a chess-club photo. Goal: 1 correct image, no others.
+  - id: april7_gplus_memorial
+    scope: {year: 2026, month: 4}
+    post_key_suffix: pfbid0BnzpBWZFEhyh8F1dVCTNMWnFq4EAZFFbwEnaMgmRw3QQGRfpBsqoe5fd2pmRAWS5l
+    expect:
+      is_reshare: true
+      # This is a Google+ memorial-style reshare. The "reshared_from_url"
+      # likely points at the G+ archive URL or a special FB representation.
+      # We accept either reshare_commentary or text containing the user's
+      # quote (different harvest paths may put it in different fields
+      # historically).
+      commentary_or_reshare_commentary_starts_with: "Лучше соцсети, чем гугл+"
+      commentary_or_reshare_commentary_contains: ["Stay tuned"]
+      timestamp_rawText: "April 7, 2026"
+      # Exactly ONE image (the Trump tweet screenshot). Hash filled after
+      # first successful run + visual verification.
+      media_count_exact: 1
+      media_sha256: [TBD]
+
+  # ─── 4: Self-reshare without commentary (Feb 24 2026) ───────────────────
+  # Vladimir reshares his OWN March 2, 2022 long-text post about "Что
+  # такое Россия". No commentary at the top — bare reshare. Extension
+  # MUST NOT invent commentary from the embedded reshared post's text.
+  #
+  # post_key_suffix to be filled after the first 2026-02 harvest run
+  # surfaces the pfbid.
+  - id: february_self_reshare_no_commentary
+    scope: {year: 2026, month: 2}
+    post_key_suffix: TBD_FILL_IN_AFTER_FIRST_HARVEST
+    expect:
+      is_reshare: true
+      reshare_commentary_exact: ""
+      # Reshared content is text-only (the original March 2022 post). NO
+      # media should be attributed.
+      media_count_exact: 0
+      media_sha256: []
+
+  # ─── 5: OTHER's-content reshare without commentary (Nov 2024) ──────────
+  # Vladimir reshares Mike Tamm's Nov 5 2024 post about the US election.
+  # The captured row currently shows reshareCommentary = Mike's full
+  # body text — that's a known bug: the embedded reshared-post text is
+  # being mis-captured as Vladimir's commentary. The expected behaviour
+  # for a "bare" reshare is empty commentary, same as the self-reshare
+  # case (#4). This entry exists specifically to verify that the
+  # self-vs-other reshare paths behave the same.
+  #
+  # Caveat: the captured postKey currently is Mike's pfbid (the link
+  # the activity-log row anchors to), NOT Vladimir's reshare pfbid.
+  # That's a separate bug; for now we anchor the golden by Mike's
+  # pfbid since that's what posts.json has. Once postKey identity is
+  # fixed, the suffix will need to change to Vladimir's pfbid.
+  - id: mike_tamm_other_reshare_no_commentary
+    scope: {year: 2024, month: 11}
+    post_key_suffix: pfbid02irxsrn4dagXMBuJxj2cbBqntAugxMwTBs8KGTsPb
+    expect:
+      is_reshare: true
+      reshare_commentary_exact: ""
+      # Mike's post is text-only; the reshare should attribute zero media
+      # to Vladimir (any image in the embedded post belongs to Mike).
+      media_count_exact: 0
+      media_sha256: []
+
+# Comments goldens. comments-own-posts-only is OFF by default in the
+# wizard (training-data mode → harvest comments on others' posts too).
+# Add entries once a stable comment exists with known wording.
+comments: []
