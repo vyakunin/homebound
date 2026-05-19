@@ -455,6 +455,40 @@ function canonicalPermalinkKey(u) {
 }
 
 /**
+ * Drop "original-side" duplicates from a list of post records.
+ *
+ * Each reshare row in the Activity Log produces TWO postByKey entries:
+ *   - one keyed by the ORIGINAL post URL (action-label anchor — "shared a post.")
+ *   - one keyed by the user's own reshare permalink (View footer anchor)
+ *
+ * findRowContainer can return different ancestors for the two anchors, so
+ * per-anchor dedup in harvestPostsPhase doesn't always catch this. This
+ * pass resolves the pair: when entry B's reshared_from_url canonicalizes
+ * to entry A's postKey AND entry B's postKey is in the own-profile
+ * namespace, drop entry A. Vladimir's reshare is the canonical record
+ * (carries his commentary, his pfbid, his timestamp); the original-side
+ * record is redundant.
+ *
+ * Input order preserved (modulo dropped entries).
+ */
+function dedupReshareOriginalSide(entries) {
+  if (!_ownProfileName || !entries || entries.length < 2) return entries;
+  const ownPostsPrefix = `https://www.facebook.com/${_ownProfileName}/posts/`;
+  const canonicalReshareFrom = new Set();
+  for (const e of entries) {
+    if (!e?.reshared_from_url) continue;
+    if (!e?.postKey || !e.postKey.startsWith(ownPostsPrefix)) continue;
+    canonicalReshareFrom.add(canonicalPermalinkKey(e.reshared_from_url));
+  }
+  if (canonicalReshareFrom.size === 0) return entries;
+  return entries.filter((e) => {
+    if (!e?.postKey) return true;
+    if (e.postKey.startsWith(ownPostsPrefix)) return true;  // always keep own
+    return !canonicalReshareFrom.has(canonicalPermalinkKey(e.postKey));
+  });
+}
+
+/**
  * True if we already have a "strong" media URL for this post (skip permalink HTML fetch).
  * Link-preview thumbs (external-*.fbcdn /emg1/) count as weak — FB often loads real scontent in Shadow DOM
  * or only exposes full og:image on the post page.
@@ -1998,7 +2032,9 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
     };
   }
 
-  let postsWithText = [...postByKey.values()].sort((a, b) => String(a.postKey).localeCompare(String(b.postKey)));
+  let postsWithText = dedupReshareOriginalSide(
+    [...postByKey.values()].sort((a, b) => String(a.postKey).localeCompare(String(b.postKey))),
+  );
   if (caps.maxPosts > 0 && postsWithText.length > caps.maxPosts) {
     postsWithText = postsWithText.slice(0, caps.maxPosts);
   }
@@ -2073,8 +2109,10 @@ function buildScrollHarvestReturn(
       profileLinks: Object.fromEntries(profileLinkMap),
     };
   }
-  const postsWithText = [...postByKey.values()].sort((a, b) =>
-    String(a.postKey).localeCompare(String(b.postKey)),
+  const postsWithText = dedupReshareOriginalSide(
+    [...postByKey.values()].sort((a, b) =>
+      String(a.postKey).localeCompare(String(b.postKey)),
+    ),
   );
   upgradeTimeOnlyTimestamps(postsWithText, collectedAt);
   return {
