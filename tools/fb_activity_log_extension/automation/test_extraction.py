@@ -95,6 +95,7 @@ class PostRecord:
     post_key: str
     text: str
     reshare_commentary: str | None   # None => not a reshare
+    reshared_from_url: str           # '' when extension didn't populate it
     timestamp_raw_text: str
 
     @classmethod
@@ -104,6 +105,7 @@ class PostRecord:
             post_key=r.get("postKey") or r.get("url") or "",
             text=r.get("text") or "",
             reshare_commentary=r.get("reshareCommentary"),
+            reshared_from_url=r.get("reshared_from_url") or r.get("reshareUrl") or "",
             timestamp_raw_text=ts.get("rawText") or "",
         )
 
@@ -281,12 +283,11 @@ def _check_reshare(e: dict, p: PostRecord) -> list[str]:
         if needle in commentary:
             diffs.append(f"reshare_commentary must NOT contain {needle!r}, got {commentary!r}")
     if "reshared_from_url_contains" in e:
-        # The extension doesn't currently expose reshared_from_url; once it
-        # does, this assertion will find it on the PostRecord (extended).
-        diffs.append(
-            f"reshared_from_url should contain {e['reshared_from_url_contains']!r} "
-            f"— extension does not yet populate this field"
-        )
+        if e["reshared_from_url_contains"] not in p.reshared_from_url:
+            diffs.append(
+                f"reshared_from_url should contain {e['reshared_from_url_contains']!r}, "
+                f"got {p.reshared_from_url!r}"
+            )
     if "commentary_or_reshare_commentary_starts_with" in e:
         s = e["commentary_or_reshare_commentary_starts_with"]
         if not (commentary.startswith(s) or p.text.startswith(s)):

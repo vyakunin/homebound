@@ -1416,7 +1416,45 @@ function extractReshareCommentary(row) {
     return true;
   }).join('\n').trim();
 
+  // Strip trailing Activity-Log row trailer that FB concatenates onto the
+  // LAST line WITHOUT a newline, so the per-line filter above misses it.
+  // Example shapes observed in the wild (2026-05-19 golden-set test run):
+  //   "Nuff saidPublic6:23 AM"
+  //   "Сравнение, конечно...случилось?Public9:16 AM"
+  //   "...текст...Public10:19 PMView"
+  // Pattern: optional visibility tag (Public/Friends/Custom/Only me/Close
+  // Friends) immediately followed by a time + AM/PM and optionally "View",
+  // all at end of string. \s matches the U+202F narrow no-break space FB
+  // uses between digits and AM/PM in some locales.
+  t = t.replace(
+    /(?:Public|Friends|Custom|Only me|Close Friends)?\s*\d{1,2}:\d{2}\s*[AP]M\s*(?:View)?\s*$/i,
+    '',
+  ).trim();
+
   return t;
+}
+
+/**
+ * For a reshare row, find the URL of the original (reshared-from) post.
+ * Heuristic: anchors inside the row pointing to a post-like URL (/posts/,
+ * /reel/, /videos/, /photo, /groups/<g>/permalink/, etc.) — excluding the
+ * user's own captured permalink and excluding profile-only URLs.
+ *
+ * Returns the first matching anchor's href, or '' if none found.
+ */
+function extractReshareSourceUrl(row, ownPostKey) {
+  if (!row) return '';
+  const own = (ownPostKey || '').split('?')[0];
+  const anchors = row.querySelectorAll('a[href]');
+  for (const a of anchors) {
+    const href = a.href || '';
+    if (!href) continue;
+    if (own && href.split('?')[0] === own) continue;     // own permalink, skip
+    if (!/\/(?:posts|reel|videos?|photo|permalink)\b/.test(href)) continue;
+    if (/\/allactivity/.test(href)) continue;
+    return href;
+  }
+  return '';
 }
 
 function commentKey(commentId, replyCommentId) {
@@ -1599,6 +1637,12 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
       const entry = { postKey, fbId, url: norm, timestamp, text };
       if (reshareCommentary !== undefined) {
         entry.reshareCommentary = reshareCommentary;
+        // For detected reshare rows, also capture the URL of the original
+        // (reshared-from) post. The Python importer's blog/_post_reshare_body
+        // template uses this to embed the source post correctly instead of
+        // serving Vladimir's pfbid as the source.
+        const sourceUrl = extractReshareSourceUrl(row, postKey);
+        if (sourceUrl) entry.reshared_from_url = sourceUrl;
       }
       // Posts whose action label says "added N photo(s)/video(s)" are known to have
       // media; mark them so enrichment prioritizes them.
