@@ -72,21 +72,25 @@ posts:
   # post including a chess-club photo. Goal: 1 correct image, no others.
   - id: april7_gplus_memorial
     scope: {year: 2026, month: 4}
-    post_key_suffix: pfbid0BnzpBWZFEhyh8F1dVCTNMWnFq4EAZFFbwEnaMgmRw3QQGRfpBsqoe5fd2pmRAWS5l
+    # Captured 2026-05-20 from a fresh 2026-04 scope harvest. Note: this
+    # turned out NOT to be a "shared a post" reshare row in FB's current
+    # rendering — the action label is "added a new photo", with Vladimir's
+    # caption "Лучше соцсети, чем гугл+ уже не будет. Хотя... Stay tuned!"
+    # The Trump-tweet-screenshot photo is the post's primary image.
+    # Originally suspected of being the chess-pic-on-Apr7 victim of the
+    # SPA-pollution bug (v2.8.13–.17 era). v2.8.25 Layer B (public-bot
+    # og:image fetch) correctly fetches the actual post photo.
+    post_key_suffix: pfbid02FeSXNBV55zGmMhrYpnVoWbmPDXH46EGU7e4pwcC3Kq8yqTmpFxL1Q2cu7heNkwN5l
     expect:
-      is_reshare: true
-      # This is a Google+ memorial-style reshare. The "reshared_from_url"
-      # likely points at the G+ archive URL or a special FB representation.
-      # We accept either reshare_commentary or text containing the user's
-      # quote (different harvest paths may put it in different fields
-      # historically).
-      commentary_or_reshare_commentary_starts_with: "Лучше соцсети, чем гугл+"
-      commentary_or_reshare_commentary_contains: ["Stay tuned"]
+      is_reshare: false
+      # Caption appears in `text` after the action-label prefix ("added a
+      # new photo.") — use contains to handle either prefix.
+      commentary_or_reshare_commentary_contains: ["Лучше соцсети, чем гугл+", "Stay tuned"]
       timestamp_rawText: "April 7, 2026"
-      # Exactly ONE image (the Trump tweet screenshot). Hash filled after
-      # first successful run + visual verification.
+      # Exactly ONE image (the Trump tweet screenshot). Captured 2026-05-20.
       media_count_exact: 1
-      media_sha256: [TBD]
+      media_sha256:
+        - cc488c03543c3aa7dc685b1fa9b1a6f952215f45aa98d52cdd25d7a141fce93a
 
   # ─── 4: Self-reshare without commentary (Feb 24 2026) ───────────────────
   # Vladimir reshares his OWN March 2, 2022 long-text post about "Что
