@@ -1452,22 +1452,44 @@ function extractReshareCommentary(row) {
 
 /**
  * For a reshare row, find the URL of the original (reshared-from) post.
- * Heuristic: anchors inside the row pointing to a post-like URL (/posts/,
- * /reel/, /videos/, /photo, /groups/<g>/permalink/, etc.) — excluding the
- * user's own captured permalink and excluding profile-only URLs.
  *
- * Returns the first matching anchor's href, or '' if none found.
+ * Preference order:
+ *   1. The "shared a <noun>." action-label anchor — its visible text is
+ *      one of {post, reel, photo, video, memory, link, story}. This is
+ *      the canonical "original" link FB renders directly after the
+ *      action verb.
+ *   2. Any other post-like anchor in the row that ISN'T the user's own
+ *      reshare URL (postKey) and ISN'T the user's profile-prefixed
+ *      pfbid (which would be the "View" footer link).
+ *
+ * Returns '' when no suitable anchor exists.
  */
 function extractReshareSourceUrl(row, ownPostKey) {
   if (!row) return '';
   const own = (ownPostKey || '').split('?')[0];
-  const anchors = row.querySelectorAll('a[href]');
+  const ownProfile = _ownProfileName
+    ? new RegExp(`^https?://(?:www\\.)?facebook\\.com/${_ownProfileName}/(?:posts|videos?|photo|reel)/`)
+    : null;
+  const anchors = Array.from(row.querySelectorAll('a[href]'));
+
+  const ACTION_NOUNS = /^(?:post|reel|photo|video|memory|link|story)$/i;
   for (const a of anchors) {
     const href = a.href || '';
     if (!href) continue;
-    if (own && href.split('?')[0] === own) continue;     // own permalink, skip
     if (!/\/(?:posts|reel|videos?|photo|permalink)\b/.test(href)) continue;
     if (/\/allactivity/.test(href)) continue;
+    const text = (a.textContent || '').trim();
+    if (ACTION_NOUNS.test(text)) return href;
+  }
+  for (const a of anchors) {
+    const href = a.href || '';
+    if (!href) continue;
+    if (own && href.split('?')[0] === own) continue;
+    if (!/\/(?:posts|reel|videos?|photo|permalink)\b/.test(href)) continue;
+    if (/\/allactivity/.test(href)) continue;
+    // Exclude the user's own reshare-permalink (e.g. /vyakunin/posts/B in
+    // a reshare row): that's the "View" footer link, not the source.
+    if (ownProfile && ownProfile.test(href)) continue;
     return href;
   }
   return '';
@@ -1600,6 +1622,30 @@ function harvestCommentsPhase(urls, commentByKey, mediaCandidates, caps, ownPost
 
 function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMap = null, token = null) {
   const anchors = document.querySelectorAll('a[href]');
+  // Per-row dedup: each activity-log reshare row contains anchors to BOTH the
+  // original post (e.g. alexandra/posts/A) AND the user's own reshare
+  // (e.g. vyakunin/posts/B). Without dedup we capture the same row twice
+  // and attribute the same media to two different sourcePermalinks (this
+  // produced the "all media files have identical hash" symptom on the
+  // 2026-05-19 v2.8.21 golden-set test).
+  //
+  // Pre-pass: for each row that contains a /{ownProfileName}/posts/ anchor,
+  // remember it as the row's "preferred" entry. In the main pass, skip any
+  // anchor whose row has a different preferred entry.
+  const preferredPerRow = new WeakMap();
+  const ownPostPattern = _ownProfileName
+    ? new RegExp(`^https?://(?:www\\.)?facebook\\.com/${_ownProfileName}/(?:posts|videos?|photo|reel)/`)
+    : null;
+  if (ownPostPattern) {
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      const href = a.href || '';
+      if (!ownPostPattern.test(href)) continue;
+      const row = findRowContainer(a);
+      if (!row || preferredPerRow.has(row)) continue;
+      preferredPerRow.set(row, href);
+    }
+  }
   for (let i = 0; i < anchors.length; i++) {
     if (token && token.cancelled) break;
     const a = anchors[i];
@@ -1614,6 +1660,13 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
     }
 
     const row = findRowContainer(a);
+    // Per-row dedup (v2.8.22): if this row has a preferred (own-profile)
+    // anchor and the current anchor isn't it, skip this anchor. The URL is
+    // still in `urls` (already added above) — we just don't create a
+    // separate postByKey entry that would compete with the own-profile
+    // entry for the same row.
+    const preferredHref = row && preferredPerRow.get(row);
+    if (preferredHref && preferredHref !== href) continue;
     const timestamp = extractTimestamp(row, a, { diagnosticEnabled: _diagnosticEnabled });
     const fbId = extractFbId(postKey);
     // Upgrade timestamp with precise epoch from GraphQL response cache (page_hook.js)
