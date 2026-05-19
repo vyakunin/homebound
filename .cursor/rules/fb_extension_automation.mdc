@@ -1,0 +1,153 @@
+---
+description: Default automation flow for the FB Activity Log Chrome extension — CDP-driven harvest, fast iteration discipline, when to escalate to full unbounded runs.
+alwaysApply: true
+---
+
+# FB Activity Log Extension — Automation Flow
+
+The extension at `tools/fb_activity_log_extension/` is driven by the
+**Chrome DevTools Protocol** from `automation/drive_via_cdp.py`. This is
+the **default flow** — do not ask the user to click through the wizard
+side panel by hand unless the automation is genuinely broken and a fix
+would take longer than the manual run.
+
+## End-to-end commands
+
+```bash
+# 1) Bring Chrome up with the debug port (idempotent — safe to run before every iteration).
+#    First run rebuilds a slim profile copy under
+#    ~/Library/Application Support/Google/Chrome-debug-9222 (~800MB);
+#    later runs are no-ops if the port is already serving.
+bash tools/fb_activity_log_extension/automation/start_chrome.sh
+
+# 2) Fast feedback iteration (default mode). Single year (current year),
+#    skip media, capped at 50 items. Target wall time: <5 min.
+uv run --with websockets --no-project python3 \
+  tools/fb_activity_log_extension/automation/drive_via_cdp.py
+
+# 3) Variants for iteration
+... drive_via_cdp.py --phase comments         # iterate on comments side
+... drive_via_cdp.py --year 2019              # target a specific historical year
+... drive_via_cdp.py --with-media             # opt media tab-enrichment back in
+... drive_via_cdp.py --max-items 10           # tighter cap for faster smoke tests
+
+# 4) FULL unbounded scrape — only when no known issues, no expected
+#    iteration. Takes 30 min - several hours. Posts + comments are
+#    separate invocations.
+... drive_via_cdp.py --mode full --phase posts
+... drive_via_cdp.py --mode full --phase comments
+```
+
+## Rule: Default iteration mode is ITER. Full runs only when nothing's expected to change.
+
+While iterating on an issue or a novel behaviour, **always start with
+`--mode iter`** (the default). A single year with `MAX_ITEMS=50` should
+finish in <5 min and surface the bug-of-interest just as well as a
+23-year run.
+
+Reach for `--mode full` only when:
+1. No code change is pending (the unbounded run is the final import,
+   not a debugging step).
+2. Iter mode has already confirmed the fix on the smallest scope.
+3. You've explicitly told the user "this is going to take 30+ min".
+
+A full run as the first attempt at a fix is wasted — you'll spend an
+hour waiting for evidence that an iter run could have produced in three
+minutes.
+
+## Rule: Time every run. Don't accept >5 min iter without a reason.
+
+The driver logs `elapsed=<seconds>` and emits a `WARNING` when an iter
+run exceeds `ITER_TARGET_SECONDS` (currently 5 min). When that fires:
+
+1. **Narrow the scope further** — drop to `--max-items 10`, or pick a
+   year known to be empty for the user (e.g. `--year 2004`).
+2. **Profile the slow path** — look at the per-year `yearMs` numbers in
+   the JSON output; one slow year usually means a per-post tab
+   enrichment loop, not a 23-year iteration.
+3. **Document the cost** — if a slow iter is unavoidable (e.g. the
+   bug only manifests with media on), add a note in your PR / commit
+   message rather than silently accepting drift.
+
+The 5-min ceiling is a budget, not a hard limit. Adjust
+`ITER_TARGET_SECONDS` in `drive_via_cdp.py` if a project change
+genuinely raises the floor (and update this rule with the reason).
+
+## Architecture (so future-you doesn't relearn it)
+
+- **Why we don't drive the side panel directly:** Playwright MCP launches
+  its own Chromium with a separate profile — no extension, no FB
+  session. The side panel is browser UI, not a navigable page, so we
+  can't reach it through normal page-evaluation APIs.
+- **What we drive instead:** the extension's MV3 **service worker**.
+  Chrome exposes the SW as a CDP target. `Runtime.evaluate` against
+  that target runs JS with full `chrome.*` access — same context the
+  side panel UI uses to call `chrome.tabs.sendMessage(RUN_PHASE,…)`.
+  The wizard's per-month/year iteration + merge logic lives in
+  `build_driver_js()` as a port of `runMultiMonthSession`.
+- **Why we kill the user's main Chrome:** Chrome 136+ blocks
+  `--remote-debugging-port` on the default user-data-dir for security.
+  We copy the user's `Default` profile to a separate dir (excluding
+  ~1.4GB of caches → 800MB), then launch Chrome against that copy.
+  The user's real Chrome session is preserved — relaunch normally
+  ("Restore previous windows") to recover tabs.
+- **Why we wake the service worker:** MV3 SWs sleep aggressively. The
+  driver navigates the FB tab to an activity-log URL, which re-injects
+  the content script, which sends an init message to the SW — waking
+  it. The driver auto-detects a dormant SW and runs the wake step.
+
+## Rule: Use `--refresh` after long gaps
+
+The slim profile copy doesn't auto-sync. If FB invalidates cookies
+(typical: 30+ days idle) or the user updates the extension code:
+
+```bash
+bash tools/fb_activity_log_extension/automation/start_chrome.sh --refresh
+```
+
+This kills any debug-Chrome, rebuilds the slim copy from the user's
+current `Default` (picks up fresh cookies + the latest extension
+source), and relaunches. Adds ~30s to the run; only needed
+occasionally.
+
+## Rule: Trust the export-directory contract
+
+`drive_via_cdp.py` triggers the extension's `media_zip` phase, which
+writes a directory at `~/Downloads/fb-activity-export-v<ver>-<ts>/`
+in the exact shape `extractors/activity_log.py` and `blog/management/
+commands/import_posts.py` expect. **Do not** invent a custom output
+format in the driver — let the extension own that contract. If the
+extension's output schema needs to change, change it there and update
+the importer in the same commit.
+
+## Rule: Profile copy is a session resource, clean up when done
+
+The `~/Library/Application Support/Google/Chrome-debug-9222` directory
+is ~800MB and grows over time. Per the `large_file_hygiene.mdc` shared
+rule:
+
+- Keep one copy (refreshed in-place via `--refresh`).
+- When the user is done with the automation flow for a while
+  (>1 week), offer to remove it: `rm -rf ~/Library/Application\ Support/Google/Chrome-debug-9222`.
+- macOS disk gets tight — see `mac_resource_hygiene.mdc` for cleanup
+  candidates.
+
+## Known gotchas
+
+- **Service worker dormancy:** if the driver fails fast with "FB
+  extension service worker not found", the SW went to sleep between
+  runs. The driver should auto-wake; if it doesn't, run
+  `start_chrome.sh --refresh` to force a fresh launch.
+- **Tab navigation timeouts:** `waitForTabComplete` is capped at 30s per
+  year. On slow networks this can fire. Check the per-year `yearMs`
+  in the JSON output — anything near 30000 means we timed out the
+  navigation and skipped that year.
+- **FB session lapse:** if the activity log URL redirects to
+  `/login`, the slim profile's cookies expired. Run
+  `start_chrome.sh --refresh` so the user's freshly-logged-in
+  cookies sync over.
+- **Privacy-walled posts (`<title>Shared with X's friends</title>`):**
+  the tab-enrichment step returns zero trusted markers and zero
+  og:image. v2.8.17+ correctly ships those posts with empty media
+  manifest entries; expect a chunk of `mergedCount` to have no
+  associated media files.
