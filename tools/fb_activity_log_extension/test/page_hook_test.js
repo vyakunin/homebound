@@ -18,6 +18,8 @@ const {
   collectPostTimestamps,
   parseTextForTimestamps,
   textLooksRelevant,
+  collectPostMedia,
+  parseTextForMedia,
 } = require('../page_hook.js');
 
 test('looksLikeGraphQL matches /api/graphql endpoints', () => {
@@ -257,4 +259,208 @@ test('parseTextForTimestamps strips for(;;); prefix lines', () => {
 test('parseTextForTimestamps returns [] for irrelevant text without parsing', () => {
   assert.deepEqual(parseTextForTimestamps(''), []);
   assert.deepEqual(parseTextForTimestamps('<html><body>not json</body></html>'), []);
+});
+
+// ── collectPostMedia ─────────────────────────────────────────────────────────
+
+test('collectPostMedia attributes image.uri to the enclosing post', () => {
+  const obj = {
+    data: {
+      node: {
+        __typename: 'Story',
+        post_id: 'p1',
+        creation_time: 1,
+        url: 'https://www.facebook.com/u/posts/pfbidA',
+        image: { uri: 'https://scontent.fbcdn.net/v/t1/p1-image.jpg' },
+      },
+    },
+  };
+  const entries = collectPostMedia(obj);
+  const byId = Object.fromEntries(entries.map((e) => [e.postId, e.urls]));
+  // collectPostIds emits each identifier as its own key — post_id 'p1' and the
+  // full url 'https://...pfbidA'. lookupCachedPostMedia walks both forms.
+  assert.ok(byId['p1']?.includes('https://scontent.fbcdn.net/v/t1/p1-image.jpg'));
+  assert.ok(byId['https://www.facebook.com/u/posts/pfbidA']
+    ?.includes('https://scontent.fbcdn.net/v/t1/p1-image.jpg'));
+});
+
+test('collectPostMedia picks up large_image / viewer_image / preferred_image too', () => {
+  const obj = {
+    node: {
+      __typename: 'Story',
+      post_id: 'p2',
+      url: 'https://www.facebook.com/u/posts/pfbidB',
+      attachments: [{
+        media: {
+          large_image: { uri: 'https://scontent.fbcdn.net/large.jpg' },
+          viewer_image: { uri: 'https://scontent.fbcdn.net/viewer.jpg' },
+          preferred_image: { uri: 'https://scontent.fbcdn.net/preferred.jpg' },
+        },
+      }],
+    },
+  };
+  const entries = collectPostMedia(obj);
+  const urls = new Set(entries.find((e) => e.postId === 'p2').urls);
+  assert.ok(urls.has('https://scontent.fbcdn.net/large.jpg'));
+  assert.ok(urls.has('https://scontent.fbcdn.net/viewer.jpg'));
+  assert.ok(urls.has('https://scontent.fbcdn.net/preferred.jpg'));
+});
+
+test('collectPostMedia captures video sources (playable_url, hd/sd_src)', () => {
+  const obj = {
+    node: {
+      __typename: 'Story',
+      post_id: 'pv',
+      url: 'https://www.facebook.com/u/posts/pfbidV',
+      attachments: [{
+        media: {
+          playable_url: 'https://video.fbcdn.net/v.mp4',
+          playable_url_quality_hd: 'https://video.fbcdn.net/v_hd.mp4',
+          browser_native_hd_url: 'https://video.fbcdn.net/v_native_hd.mp4',
+          browser_native_sd_url: 'https://video.fbcdn.net/v_native_sd.mp4',
+          hd_src: 'https://video.fbcdn.net/hd_src.mp4',
+          sd_src: 'https://video.fbcdn.net/sd_src.mp4',
+        },
+      }],
+    },
+  };
+  const urls = new Set(
+    collectPostMedia(obj).find((e) => e.postId === 'pv').urls,
+  );
+  assert.equal(urls.size, 6);
+  assert.ok(urls.has('https://video.fbcdn.net/v_hd.mp4'));
+  assert.ok(urls.has('https://video.fbcdn.net/sd_src.mp4'));
+});
+
+test('collectPostMedia keeps two posts in the same response separate (SPA-pollution guard)', () => {
+  // Regression for the bug that drove Option 2: when FB returned multiple
+  // posts in one GraphQL response, every tab-extraction returned the SAME
+  // image regardless of which post we asked for. The cache-based path must
+  // keep each post's media scoped to its own subtree.
+  const obj = {
+    data: {
+      edges: [
+        {
+          node: {
+            __typename: 'Story',
+            post_id: 'pA',
+            url: 'https://www.facebook.com/u/posts/pfbidPA',
+            attachments: [{ media: { image: { uri: 'https://scontent.fbcdn.net/a.jpg' } } }],
+          },
+        },
+        {
+          node: {
+            __typename: 'Story',
+            post_id: 'pB',
+            url: 'https://www.facebook.com/u/posts/pfbidPB',
+            attachments: [{ media: { image: { uri: 'https://scontent.fbcdn.net/b.jpg' } } }],
+          },
+        },
+      ],
+    },
+  };
+  const entries = collectPostMedia(obj);
+  const byId = Object.fromEntries(entries.map((e) => [e.postId, new Set(e.urls)]));
+  assert.ok(byId['pA'].has('https://scontent.fbcdn.net/a.jpg'));
+  assert.ok(!byId['pA'].has('https://scontent.fbcdn.net/b.jpg'),
+    "post pA must NOT carry post pB's image (SPA-pollution regression)");
+  assert.ok(byId['pB'].has('https://scontent.fbcdn.net/b.jpg'));
+  assert.ok(!byId['pB'].has('https://scontent.fbcdn.net/a.jpg'),
+    "post pB must NOT carry post pA's image (SPA-pollution regression)");
+});
+
+test('collectPostMedia walks at any descendant depth', () => {
+  const obj = {
+    data: { story: { __typename: 'Story', post_id: 'pd', creation_time: 1,
+      url: 'https://www.facebook.com/u/posts/pfbidD',
+      something: { else: { attachments: { items: [{ image: { uri: 'https://scontent.fbcdn.net/deep.jpg' } }] } } },
+    }},
+  };
+  const urls = collectPostMedia(obj).find((e) => e.postId === 'pd').urls;
+  assert.ok(urls.includes('https://scontent.fbcdn.net/deep.jpg'));
+});
+
+test('collectPostMedia returns [] when no post node identifies the media', () => {
+  // image.uri exists but no enclosing Story / post_id / creation_time — drop.
+  const obj = { something: { image: { uri: 'https://scontent.fbcdn.net/unowned.jpg' } } };
+  assert.deepEqual(collectPostMedia(obj), []);
+});
+
+test('collectPostMedia attributes reshared embed media to the outer reshare post', () => {
+  // In FB GraphQL, the reshare post is the outer Story; its `attached_story`
+  // is the original. Media on the attached_story is what we want to capture
+  // for the outer post — and that's exactly how the depth-first walker
+  // hands the current postIds context down to descendants.
+  const obj = {
+    node: {
+      __typename: 'Story',
+      post_id: 'outer',
+      url: 'https://www.facebook.com/u/posts/pfbidOuter',
+      attached_story: {
+        attachments: [{ media: { image: { uri: 'https://scontent.fbcdn.net/inner.jpg' } } }],
+      },
+    },
+  };
+  const urls = collectPostMedia(obj).find((e) => e.postId === 'outer').urls;
+  assert.ok(urls.includes('https://scontent.fbcdn.net/inner.jpg'));
+});
+
+test('collectPostMedia ignores non-http "uri" values', () => {
+  const obj = {
+    node: {
+      __typename: 'Story', post_id: 'pn',
+      url: 'https://www.facebook.com/u/posts/pfbidN',
+      image: { uri: 'data:image/png;base64,iVBOR...' },
+    },
+  };
+  const entry = collectPostMedia(obj).find((e) => e.postId === 'pn');
+  // No http URLs → entry should not exist (Set was never populated).
+  assert.equal(entry, undefined);
+});
+
+test('collectPostMedia tolerates cycles', () => {
+  const inner = {
+    __typename: 'Story', post_id: 'pc', creation_time: 1,
+    url: 'https://www.facebook.com/u/posts/pfbidC',
+    image: { uri: 'https://scontent.fbcdn.net/c.jpg' },
+  };
+  inner.self = inner; // cycle
+  const urls = collectPostMedia({ root: inner }).find((e) => e.postId === 'pc').urls;
+  assert.ok(urls.includes('https://scontent.fbcdn.net/c.jpg'));
+});
+
+// ── parseTextForMedia ────────────────────────────────────────────────────────
+
+test('parseTextForMedia handles standard JSON', () => {
+  const obj = {
+    node: {
+      __typename: 'Story', post_id: 'p',
+      url: 'https://www.facebook.com/u/posts/pfbidP',
+      image: { uri: 'https://scontent.fbcdn.net/x.jpg' },
+    },
+  };
+  const entries = parseTextForMedia(JSON.stringify(obj));
+  const urls = entries.find((e) => e.postId === 'p').urls;
+  assert.ok(urls.includes('https://scontent.fbcdn.net/x.jpg'));
+});
+
+test('parseTextForMedia handles line-delimited multi-JSON (FB pagination format)', () => {
+  const obj1 = { node: { __typename: 'Story', post_id: 'a',
+    url: 'https://www.facebook.com/u/posts/pfbidA',
+    image: { uri: 'https://scontent.fbcdn.net/aa.jpg' } } };
+  const obj2 = { node: { __typename: 'Story', post_id: 'b',
+    url: 'https://www.facebook.com/u/posts/pfbidB',
+    image: { uri: 'https://scontent.fbcdn.net/bb.jpg' } } };
+  const text = JSON.stringify(obj1) + '\n' + JSON.stringify(obj2);
+  const entries = parseTextForMedia(text);
+  const byId = Object.fromEntries(entries.map((e) => [e.postId, new Set(e.urls)]));
+  assert.ok(byId['a'].has('https://scontent.fbcdn.net/aa.jpg'));
+  assert.ok(byId['b'].has('https://scontent.fbcdn.net/bb.jpg'));
+});
+
+test('parseTextForMedia returns [] for irrelevant text without parsing', () => {
+  assert.deepEqual(parseTextForMedia(''), []);
+  assert.deepEqual(parseTextForMedia('<html><body>not json</body></html>'), []);
+  // JSON that has no media markers + no timestamp markers — fast-path skipped.
+  assert.deepEqual(parseTextForMedia('{"foo":"bar"}'), []);
 });

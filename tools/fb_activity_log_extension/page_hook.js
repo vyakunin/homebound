@@ -126,35 +126,134 @@
   }
 
   // Cheap text-level pre-check before JSON.parse — parsing a 5 MB feed
-  // response that has no timestamps anywhere is wasted work.
+  // response that has no timestamps OR media anywhere is wasted work.
   function textLooksRelevant(text) {
     if (typeof text !== 'string' || text.length < 32) return false;
     return text.includes('creation_time')
       || text.includes('created_time')
       || text.includes('publish_time')
-      || text.includes('publishTime');
+      || text.includes('publishTime')
+      // Media-relevance signals: any GraphQL fragment containing an image
+      // URI or video playback URL is worth parsing for full-res media
+      // capture, even if it has no timestamp field. (Sometimes FB's
+      // story-fetch and media-fetch are split into separate queries.)
+      || text.includes('"image":{"uri"')
+      || text.includes('"playable_url"')
+      || text.includes('"viewer_image"')
+      || text.includes('"preferred_image"')
+      || text.includes('"large_image"');
   }
 
-  function parseTextForTimestamps(text) {
+  // Walk an arbitrary JSON tree and yield media URLs grouped by the nearest
+  // post-identifying ancestor. Used to capture full-resolution image and
+  // video CDN URLs from FB GraphQL responses while the user scrolls the
+  // Activity Log, eliminating the need to navigate to each post's permalink
+  // page later.
+  //
+  // Returns: [{ postId, urls: [...] }] where postId is one of pfbid URL,
+  // numeric fbid, or story_id (whichever the response provided), and urls
+  // is an array of unique CDN URLs (image OR video).
+  function collectPostMedia(rootJson) {
+    // postId → Set<url>
+    const byPost = new Map();
+    const seen = new WeakSet();
+
+    function ensure(id) {
+      let s = byPost.get(id);
+      if (!s) { s = new Set(); byPost.set(id, s); }
+      return s;
+    }
+
+    function pushUrl(node, postIds) {
+      if (!postIds || postIds.length === 0) return;
+      // image.uri / large_image.uri / viewer_image.uri / preferred_image.uri
+      // — all carry a single "uri" string field with a CDN URL.
+      const imgKeys = ['image', 'large_image', 'viewer_image', 'preferred_image'];
+      for (const k of imgKeys) {
+        const v = node[k];
+        if (v && typeof v === 'object' && typeof v.uri === 'string' && v.uri.startsWith('http')) {
+          for (const id of postIds) ensure(id).add(v.uri);
+        }
+      }
+      // video sources: playable_url, playable_url_quality_hd, browser_native_hd_url,
+      // browser_native_sd_url, hd_src, sd_src. All are direct URL strings.
+      const vidKeys = [
+        'playable_url',
+        'playable_url_quality_hd',
+        'browser_native_hd_url',
+        'browser_native_sd_url',
+        'hd_src',
+        'sd_src',
+      ];
+      for (const k of vidKeys) {
+        const v = node[k];
+        if (typeof v === 'string' && v.startsWith('http')) {
+          for (const id of postIds) ensure(id).add(v);
+        }
+      }
+    }
+
+    function walk(node, postIds) {
+      if (!node || typeof node !== 'object') return;
+      if (seen.has(node)) return;
+      seen.add(node);
+      if (Array.isArray(node)) {
+        for (const x of node) walk(x, postIds);
+        return;
+      }
+      // If THIS node looks like a post, replace the context with its IDs.
+      // collectPostIds is conservative; widen for media-only nodes that
+      // happen to carry creation_time + id but no __typename.
+      let myIds = collectPostIds(node);
+      if (myIds.length === 0 && typeof node.id === 'string' && (
+        'creation_time' in node || 'created_time' in node || 'publish_time' in node
+      )) {
+        myIds = [node.id];
+      }
+      const here = myIds.length > 0 ? myIds : postIds;
+      pushUrl(node, here);
+      for (const k in node) {
+        const v = node[k];
+        if (v && typeof v === 'object') walk(v, here);
+      }
+    }
+
+    walk(rootJson, null);
+    const out = [];
+    for (const [postId, urls] of byPost) {
+      out.push({ postId, urls: Array.from(urls) });
+    }
+    return out;
+  }
+
+  // Generic dispatcher: parse `text` as JSON (or per-line JSON, FB's
+  // line-delimited multi-object pagination format), run `extract(obj)` on
+  // each parsed object, concat results.
+  function parseTextWith(text, extract) {
     if (!textLooksRelevant(text)) return [];
     try {
       const obj = JSON.parse(text);
-      return collectPostTimestamps(obj);
+      return extract(obj);
     } catch {
-      // FB sometimes returns prefixed JSON ("for (;;);{…}") or chunked
-      // multi-object responses with one JSON per line. Try the line-by-line
-      // form before giving up — that's how feed pagination is delivered.
       const all = [];
       for (const line of text.split('\n')) {
         const t = line.trim();
         if (!t || t === 'for (;;);') continue;
         try {
           const obj = JSON.parse(t);
-          for (const e of collectPostTimestamps(obj)) all.push(e);
+          for (const e of extract(obj)) all.push(e);
         } catch { /* skip */ }
       }
       return all;
     }
+  }
+
+  function parseTextForTimestamps(text) {
+    return parseTextWith(text, collectPostTimestamps);
+  }
+
+  function parseTextForMedia(text) {
+    return parseTextWith(text, collectPostMedia);
   }
 
   const api = {
@@ -162,7 +261,10 @@
     normalizeEpochSeconds,
     collectPostIds,
     collectPostTimestamps,
+    collectPostMedia,
     parseTextForTimestamps,
+    parseTextForMedia,
+    parseTextWith,
     textLooksRelevant,
   };
 
@@ -181,6 +283,13 @@
       if (!entries || !entries.length) return;
       try {
         window.postMessage({ __fbExport: true, type: 'POST_TIMESTAMPS', entries }, '*');
+      } catch { /* noop */ }
+    }
+
+    function forwardMedia(entries) {
+      if (!entries || !entries.length) return;
+      try {
+        window.postMessage({ __fbExport: true, type: 'POST_MEDIA', entries }, '*');
       } catch { /* noop */ }
     }
 
@@ -214,6 +323,8 @@
       }
       const entries = parseTextForTimestamps(text);
       if (entries.length) forward(entries);
+      const media = parseTextForMedia(text);
+      if (media.length) forwardMedia(media);
     }
 
     const origFetch = window.fetch;

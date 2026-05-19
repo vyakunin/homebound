@@ -5,8 +5,9 @@
 // image attached to the wrong post (Apr 7 G+/Facebook goodbye post in
 // fb-activity-export-v2.8.13-2026-05-18T21-11-24) was the trigger.
 //
-// Trusted post media now comes exclusively through tab-enrichment via
-// buildPostManifestEntries. If anyone re-adds row-level media collection
+// Trusted post media now comes exclusively through enrichment — the
+// per-post GraphQL cache (page_hook intercept) with mbasic.facebook.com
+// static-HTML fallback. If anyone re-adds row-level media collection
 // to the posts phase, this test fails and points them at the bug history.
 
 const test = require('node:test');
@@ -40,7 +41,7 @@ test("harvestPostsPhase does not call collectMediaFromRow with the 'post' contex
     !/collectMediaFromRow\s*\([^)]*['"]post['"][^)]*\)/.test(stripped),
     "harvestPostsPhase contains an uncommented call to collectMediaFromRow(..., 'post', ...) — " +
       'this re-introduces the wrong-image-on-post bug. Trusted post media must come ' +
-      'through tab-enrichment + buildPostManifestEntries only.',
+      'through per-post GraphQL-cache + mbasic.facebook.com fallback only.',
   );
 });
 

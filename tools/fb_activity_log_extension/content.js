@@ -15,6 +15,16 @@ let _currentToken = { cancelled: false };
 // page_hook emits entries under several id aliases (post_id, fbid, full URL),
 // so we accept lookups under any of them.
 const _postTimestampCache = new Map();
+// Map<postId, Set<url>>: full-resolution media URLs captured by page_hook's
+// GraphQL intercept while the user scrolls the Activity Log. Populated as
+// posts come into viewport — each post FB renders sends a GraphQL response
+// containing image.uri / playable_url that we capture here. Lookup keys
+// mirror _postTimestampCache: pfbid URL, numeric fbid, story_id, etc.
+//
+// This is the v2.8.23+ replacement for tab-extraction-of-permalink-pages,
+// which hit deterministic FB-SPA cache pollution (every background tab
+// rendered the same cached post regardless of the requested URL).
+const _postMediaCache = new Map();
 // Diagnostic dump of the first few raw GraphQL response bodies the page_hook
 // observed. Persisted into graphql_debug.json in the export dir so we can
 // iterate on the timestamp walker without doing a full re-export each time
@@ -34,6 +44,17 @@ if (typeof window !== 'undefined') {
         const ts = typeof e.creationTime === 'number' ? e.creationTime : null;
         if (id && ts && ts > 0) _postTimestampCache.set(id, ts);
       }
+    } else if (d.type === 'POST_MEDIA') {
+      const entries = Array.isArray(d.entries) ? d.entries : [];
+      for (const e of entries) {
+        if (!e) continue;
+        const id = e.postId == null ? '' : String(e.postId);
+        const urls = Array.isArray(e.urls) ? e.urls : [];
+        if (!id || urls.length === 0) continue;
+        let set = _postMediaCache.get(id);
+        if (!set) { set = new Set(); _postMediaCache.set(id, set); }
+        for (const u of urls) if (typeof u === 'string' && u.startsWith('http')) set.add(u);
+      }
     } else if (d.type === 'GRAPHQL_SAMPLE') {
       if (_graphqlSamples.length < _GRAPHQL_SAMPLES_CAP) {
         _graphqlSamples.push({
@@ -46,6 +67,27 @@ if (typeof window !== 'undefined') {
       }
     }
   });
+}
+
+// Mirror of lookupPrecisePostTimestamp: walk all id aliases (URL, pfbid, fbid,
+// story_id) until we find a media-cache hit. Returns array of URLs, possibly
+// empty. The post may match under multiple aliases; we union all matches.
+function lookupCachedPostMedia(postKey, fbId) {
+  const keys = [];
+  if (postKey) {
+    keys.push(postKey);
+    const stripped = stripCommentParamsUrl(postKey);
+    if (stripped && stripped !== postKey) keys.push(stripped);
+    const pfbid = (postKey.match(/(pfbid[A-Za-z0-9]+)/) || [])[1];
+    if (pfbid) keys.push(pfbid);
+  }
+  if (fbId) keys.push(String(fbId));
+  const out = new Set();
+  for (const k of keys) {
+    const set = _postMediaCache.get(k);
+    if (set) for (const u of set) out.add(u);
+  }
+  return [...out];
 }
 
 function lookupPrecisePostTimestamp(postKey, fbId) {
@@ -849,69 +891,81 @@ async function pickCdnUrlFromPermalinkWithFallbacks(fetchUrl) {
 }
 
 /**
- * Sends a message to the service worker to open postUrl in a background tab,
- * wait for JS hydration, extract CDN media URLs from the live DOM, then close.
- * Returns an array of CDN URLs (empty on failure).
+ * Fetch the mbasic.facebook.com version of a post URL and extract CDN
+ * <img> URLs. mbasic serves a minimal static-HTML view that doesn't
+ * depend on FB's React/SPA — fetching its body returns the actual rendered
+ * post content synchronously, with media URLs as plain `<img src>` tags.
+ * Cookies from the user's facebook.com session authenticate the request.
+ *
+ * Returns array of acceptable CDN URLs, possibly empty.
  */
-async function extractMediaViaTabNavigation(postUrl, opts) {
-  const attachHtmlDump = !!(opts?.attachHtmlDump);
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      { type: 'FB_EXPORT_TAB_EXTRACT', url: postUrl, attachHtmlDump },
-      (response) => {
-        if (chrome.runtime.lastError || !response?.ok) {
-          resolve({ urls: [], reactionCount: 0, linkAttachments: [], mainHtml: null, tabDebug: null });
-          return;
-        }
-        resolve({
-          urls: Array.isArray(response.urls) ? response.urls : [],
-          postContentUrls: Array.isArray(response.postContentUrls) ? response.postContentUrls : [],
-          reactionCount: response.reactionCount ?? 0,
-          linkAttachments: Array.isArray(response.linkAttachments) ? response.linkAttachments : [],
-          mainHtml: response.mainHtml ?? null,
-          tabDebug: response.tabDebug ?? null,
-        });
-      },
-    );
+async function fetchMediaViaMbasic(postUrl, timeoutMs = 15000) {
+  let mUrl;
+  try {
+    const u = new URL(postUrl);
+    if (!/(\.|^)facebook\.com$/.test(u.host)) return [];
+    u.host = 'mbasic.facebook.com';
+    u.protocol = 'https:';
+    mUrl = u.toString();
+  } catch (_) {
+    return [];
+  }
+  let res;
+  try {
+    res = await fetchWithTimeout(mUrl, timeoutMs, { credentials: 'include' });
+  } catch (_) {
+    return [];
+  }
+  if (!res.ok) return [];
+  const html = await res.text();
+  if (!html || html.length < 200) return [];
+  // mbasic is small, simple HTML — DOMParser is fast and safe (sandboxed).
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const urls = [];
+  const seen = new Set();
+  // Every <img> in mbasic with a scontent CDN src is post content. Profile
+  // pic placeholders use `static.xx.fbcdn.net` (already excluded by
+  // isAcceptableCdnUrl).
+  doc.querySelectorAll('img').forEach((img) => {
+    const src = (img.getAttribute('src') || '').trim();
+    if (!src || seen.has(src)) return;
+    if (!isAcceptableCdnUrl(src)) return;
+    seen.add(src);
+    urls.push(src);
   });
+  return urls;
 }
 
 /**
- * Activity Log "Your posts" is a lean list — rows rarely include scontent <img> nodes.
- * Fetch each post permalink (tab fetch when host matches Activity Log; extension for m/mbasic) and take og:image / scontent.
- * When caps.useTabExtraction is true, opens real browser tabs for hydrated DOM extraction instead of fetch-based HTML parsing.
+ * v2.8.23+: enrich post media via page_hook GraphQL cache (Layer A) +
+ * mbasic.facebook.com fetch fallback (Layer B). Replaces the previous
+ * tab-extraction path which hit FB-SPA cache pollution.
+ *
+ * Layer A: while the user scrolled the Activity Log, page_hook intercepted
+ * GraphQL responses and built _postMediaCache: postId → CDN URLs (full-res).
+ * Lookup is O(1) and free.
+ *
+ * Layer B: for posts whose media wasn't observed in any GraphQL response
+ * (rare — usually older / less-viewed posts), fetch mbasic.facebook.com's
+ * static-HTML view of the post and extract <img> tags.
+ *
+ * Returns the same shape as the legacy enrichMediaFromPermalinkFetches so
+ * runMediaAndZip's call site doesn't change:
+ *   { out, reactionCounts, allLinkAttachments, htmlDumps, permalinkDebug }
  */
 async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps) {
   const c = normalizeCaps(caps);
   const effImg = effectiveImageCap(c);
   const imagesInMerged = merged.filter((m) => !isVideoMediaUrl(m.url)).length;
   const imageRoom = Math.max(0, effImg - imagesInMerged);
-  // `caps.maxImages == 0` from the wizard means "use safe default", not "run
-  // forever" — truly-unlimited tab-extraction at scale hangs Chrome (see the
-  // PERMALINK_TAB_EXTRACT_MAX_POSTS_DEFAULT comment). When the user wants
-  // more than the safe default, they raise the wizard's "Max images" input
-  // explicitly.
-  const wantsExplicitCap = c.maxImages > 0;
-  const ogFetchCap = wantsExplicitCap
-    ? Math.min(c.maxImages, imageRoom)
-    : Math.min(MAX_PERMALINK_OG_FETCH, imageRoom);
-  const maxOgByCap = ogFetchCap;
-
-  const useTabExtraction = !!(caps?.useTabExtraction);
-  const consecutiveMissLimit = useTabExtraction
-    ? PERMALINK_ENRICH_STOP_AFTER_CONSECUTIVE_MISS_TAB
-    : PERMALINK_ENRICH_STOP_AFTER_CONSECUTIVE_MISS_FETCH;
 
   const out = [];
-  const reactionCounts = {}; // postUrl → reaction count (tab extraction only)
-  const allLinkAttachments = {}; // postUrl → array of {url, title, image}
-  const htmlDumps = {}; // permalinkKey → HTML string (first 3 enriched posts only)
-  const enrichMethod = useTabExtraction ? 'tab_navigate' : 'fetch_html';
+  const reactionCounts = {};      // unused in v2.8.23+ (was tab-extraction signal)
+  const allLinkAttachments = {};  // unused in v2.8.23+
+  const htmlDumps = {};           // unused in v2.8.23+
   const permalinkDebug = {
-    note: useTabExtraction
-      ? 'Tab-based: opens each post in a background tab, waits for JS hydration, extracts from live DOM. Slower but accurate.'
-      : 'Fetch-based: HTML fetch (www → m → mbasic). Stops after ~10s wall time or 8 consecutive posts with no image. See enrichStop.',
-    method: enrichMethod,
+    note: 'v2.8.23 cache+mbasic: Layer A (page_hook GraphQL cache, captured during Activity Log scroll) + Layer B (mbasic.facebook.com static-HTML fetch fallback). Replaces tab-extraction.',
+    method: 'cache+mbasic',
     posts: [],
     enrichStop: null,
     mediaAllowlistCanonicalKeys: null,
@@ -942,11 +996,10 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     //   - linkHint: "shared a link" with external URL card
     //   - reshareCommentary defined: any reshare ("shared a post.") — the
     //     reshared content may be a photo/video/link, and we want to embed
-    //     the original's media. v2.8.20 unblocked reshare enrichment:
-    //     previously skipped because the broad CDN bag leaked unrelated
-    //     images, but v2.8.16's trusted-image marker filter
-    //     (lib/build_manifest_entries.js) now scopes captured media to
-    //     the post's own [role="article"] / feedImage tags.
+    //     the original's media. Enrichment now reads from per-post
+    //     GraphQL cache (page_hook intercept) and falls back to
+    //     mbasic.facebook.com static-HTML fetch — both are post-scoped
+    //     by construction so reshares no longer leak unrelated images.
     if (!p.mediaHint && !p.linkHint && !('reshareCommentary' in p)) continue;
     const pk = canonicalPermalinkKey(postKey);
     if (!pk || seenKeys.has(pk)) continue;
@@ -973,230 +1026,85 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     });
   }
 
-  let done = 0;
-  // Per-mode attempt cap, bounded against Chrome resource exhaustion. When the
-  // user sets maxImages > 0 they're explicitly opting in — we respect that
-  // (but the consecutive-miss watchdog still guards against runaway).
-  const tabAttemptCap = wantsExplicitCap
-    ? Math.min(c.maxImages, candidates.length)
-    : Math.min(PERMALINK_TAB_EXTRACT_MAX_POSTS_DEFAULT, candidates.length);
-  const fetchAttemptCap = wantsExplicitCap
-    ? Math.min(c.maxImages, candidates.length)
-    : Math.min(MAX_PERMALINK_FETCH_ATTEMPTS, candidates.length);
-  const rawMaxAttempts = useTabExtraction ? tabAttemptCap : fetchAttemptCap;
-  const maxAttempts = Math.min(rawMaxAttempts, maxOgByCap > 0 ? maxOgByCap : rawMaxAttempts);
-  const targetMsg = Math.min(candidates.length, maxOgByCap);
+  // v2.8.23 enrichment loop: cache (page_hook GraphQL) → mbasic fallback.
+  // No tab navigation, no consecutive-miss watchdog (mbasic is fast +
+  // deterministic), no time-budget cliff (each post is bounded by the
+  // fetchWithTimeout inside fetchMediaViaMbasic).
   const enrichT0 = Date.now();
-  // Wall-clock deadline only applies to fetch mode (tab mode can take 20s+ per post)
-  const enrichDeadline = useTabExtraction ? Infinity : enrichT0 + PERMALINK_ENRICH_MAX_WALL_MS;
-  let consecutiveMiss = 0;
-  let stopReason = 'complete';
-
+  let cacheHits = 0;
+  let mbasicFetches = 0;
+  let mbasicHits = 0;
+  let imagesFound = 0;
+  const maxAttempts = candidates.length;
   if (maxAttempts > 0) {
     await writeZipProgress({
       stage: 'enrich',
       enrichMax: maxAttempts,
-      maxOgByCap,
       enrichAttempt: 0,
       imagesFound: 0,
-      enrichLabel: useTabExtraction ? 'opening post pages (tab mode)' : 'post page previews',
+      enrichLabel: 'looking up media (GraphQL cache → mbasic fallback)',
     });
   }
-  let htmlDumpCount = 0;
-
-  function processTabResult(i, permalinkKey, fetchUrl, tabResult) {
-    const { urls: tabUrls, postContentUrls: tabPostContentUrls, reactionCount: tabReactionCount, linkAttachments: tabLinkAttachments, mainHtml, tabDebug, finalUrl } = tabResult;
-    const cdnUrls = tabUrls.filter((u) => isAcceptableCdnUrl(u));
-    const rejectedUrls = tabUrls.filter((u) => !isAcceptableCdnUrl(u));
-    const cdnImages = cdnUrls.filter((u) => !isVideoMediaUrl(u));
-    const cdnVideos = cdnUrls.filter((u) => isVideoMediaUrl(u));
-    // postImageUrls: CDN images from the post's own [role="article"] container,
-    // excluding "Suggested for you" feed items that appear below the post.
-    const postImageUrls = (tabPostContentUrls || []).filter((u) => isAcceptableCdnUrl(u));
-    if (tabReactionCount > 0) reactionCounts[permalinkKey] = tabReactionCount;
-    if (tabLinkAttachments && tabLinkAttachments.length > 0) allLinkAttachments[permalinkKey] = tabLinkAttachments;
-    // Store HTML dump for the first few posts, plus any post that found 0 CDN URLs,
-    // plus the first /posts/ permalink (different DOM structure than /photo/ overlays).
-    // Cap at 10 total dumps.
-    const isPostsUrl = permalinkKey.includes('/posts/');
-    const havePostsDump = Object.keys(htmlDumps).some((k) => k.includes('/posts/'));
-    if (mainHtml && (htmlDumpCount < 3 || cdnUrls.length === 0 || (isPostsUrl && !havePostsDump))
-        && Object.keys(htmlDumps).length < 10) {
-      htmlDumps[permalinkKey] = mainHtml;
-      htmlDumpCount++;
+  for (let i = 0; i < candidates.length; i++) {
+    if (token?.cancelled) break;
+    const cand = candidates[i];
+    const fbId = extractFbId(cand.permalinkKey);
+    // LAYER A: cache lookup — free, instant
+    let urls = lookupCachedPostMedia(cand.permalinkKey, fbId);
+    let method = 'graphql_cache';
+    let methodNote = null;
+    if (urls.length === 0) {
+      // LAYER B: mbasic fetch — ~300ms-1s per post, but deterministic
+      method = 'mbasic';
+      methodNote = `fetch mbasic.facebook.com for ${cand.fetchUrl}`;
+      try {
+        await delayMs(300 + Math.floor(Math.random() * 400));
+        urls = await fetchMediaViaMbasic(cand.fetchUrl);
+        mbasicFetches += 1;
+        if (urls.length > 0) mbasicHits += 1;
+      } catch (e) {
+        permalinkDebug.posts.push({
+          enrichIndex: i, permalinkKey: cand.permalinkKey, fetchUrl: cand.fetchUrl,
+          method, error: String(e),
+        });
+        continue;
+      }
+    } else {
+      cacheHits += 1;
+    }
+    // Dedupe + filter
+    const seen = new Set();
+    const acceptable = [];
+    for (const u of urls) {
+      if (seen.has(u)) continue;
+      seen.add(u);
+      if (!isAcceptableCdnUrl(u)) continue;
+      acceptable.push(u);
     }
     permalinkDebug.posts.push({
-      enrichIndex: i,
-      permalinkKey,
-      fetchUrl,
-      finalUrl: finalUrl || fetchUrl,
-      method: 'tab_navigate',
-      reactionCount: tabReactionCount,
-      foundImageUrl: cdnImages[0] || null,
-      foundVideoUrl: cdnVideos[0] || null,
-      tabUrlsCount: tabUrls.length,
-      cdnUrlsCount: cdnUrls.length,
-      cdnImageCount: cdnImages.length,
-      cdnVideoCount: cdnVideos.length,
-      allCdnUrls: cdnUrls.slice(0, 8),
-      postImageUrls: postImageUrls.slice(0, 8),
-      rejectedUrlSamples: rejectedUrls.slice(0, 5).map((u) => u.slice(0, 120)),
-      tabDebug,
+      enrichIndex: i, permalinkKey: cand.permalinkKey, fetchUrl: cand.fetchUrl,
+      method, methodNote, urlsFound: urls.length, acceptableUrls: acceptable.length,
+      sample: acceptable.slice(0, 3),
     });
-    // Use the trusted post-content image set (DOM-marked feedImage /
-    // media-vc-image) + matched videos. The broad cdnUrls bag still leaks
-    // images from FB's "Suggested for you" rail rendered on the post
-    // permalink page (chess-pic-on-G+-goodbye bug, Apr 7 2026).
-    const manifestEntries = buildPostManifestEntries({
-      permalinkKey,
-      tabUrls,
-      postContentUrls: tabPostContentUrls,
-      isAcceptableCdnUrl,
-      isVideoMediaUrl,
-    });
-    for (const entry of manifestEntries) {
-      out.push(entry);
+    for (const u of acceptable) {
+      out.push({ url: u, sourcePermalink: cand.permalinkKey, context: 'post' });
+      imagesFound += 1;
     }
-    const imageUrl = cdnImages[0] || cdnUrls[0] || null;
-    return imageUrl;
-  }
-
-  if (useTabExtraction) {
-    const TAB_BATCH_SIZE = 2;
-    for (let i = 0; i < maxAttempts && done < maxOgByCap; i += TAB_BATCH_SIZE) {
-      if (token.cancelled) { stopReason = 'cancelled'; break; }
-      if (merged.length + out.length >= MEDIA_CANDIDATES_HARD_CAP) { stopReason = 'media_hard_cap'; break; }
-      // Random 2–5s delay between batches
-      if (i > 0) await delayMs(2000 + Math.floor(Math.random() * 3000));
-
-      const batch = [];
-      for (let j = 0; j < TAB_BATCH_SIZE && (i + j) < maxAttempts; j++) {
-        batch.push({ idx: i + j, ...candidates[i + j] });
-      }
-      if (batch.length === 0) break;
-
-      if (i % 10 === 0 || i === 0) {
-        fbLog('info', 'enrich', `attempt ${i + 1}/${maxAttempts} via ${enrichMethod} (${done} images found, batch of ${batch.length})`, { fetchUrl: batch[0].fetchUrl });
-      }
-
-      const batchResults = await Promise.all(
-        batch.map((b) => {
-          // Always request HTML dump — we'll only store it for the first few posts
-          // and for posts that return 0 CDN URLs (diagnostics for extraction failures).
-          return extractMediaViaTabNavigation(b.fetchUrl, { attachHtmlDump: true })
-            .then((result) => ({ ok: true, result, ...b }))
-            .catch((e) => ({ ok: false, error: e, ...b }));
-        }),
-      );
-
-      for (const br of batchResults) {
-        if (!br.ok) {
-          consecutiveMiss += 1;
-          permalinkDebug.posts.push({
-            enrichIndex: br.idx,
-            permalinkKey: br.permalinkKey,
-            fetchUrl: br.fetchUrl,
-            error: String(br.error),
-            attempts: [],
-          });
-        } else {
-          const imageUrl = processTabResult(br.idx, br.permalinkKey, br.fetchUrl, br.result);
-          if (!imageUrl) {
-            consecutiveMiss += 1;
-          } else {
-            consecutiveMiss = 0;
-            done += 1;
-            if (done % 15 === 0 || done === 1) {
-              console.info(`[fb-export] permalink preview images ${done}/${targetMsg}`);
-            }
-          }
-        }
-        if (consecutiveMiss >= consecutiveMissLimit) {
-          stopReason = 'consecutive_miss';
-          break;
-        }
-      }
-      if (stopReason !== 'complete') break;
+    if (i % 10 === 0 || i === 0) {
       await writeZipProgress({
-        stage: 'enrich',
-        enrichMax: maxAttempts,
-        maxOgByCap,
-        enrichAttempt: Math.min(i + TAB_BATCH_SIZE, maxAttempts),
-        imagesFound: done,
-        enrichLabel: 'opening post pages (tab mode)',
-      });
-    }
-  } else {
-    for (let i = 0; i < maxAttempts && done < maxOgByCap; i++) {
-      if (token.cancelled) { stopReason = 'cancelled'; break; }
-      if (Date.now() >= enrichDeadline) { stopReason = 'time_budget'; break; }
-      if (merged.length + out.length >= MEDIA_CANDIDATES_HARD_CAP) { stopReason = 'media_hard_cap'; break; }
-      const { fetchUrl, permalinkKey } = candidates[i];
-      if (i % 10 === 0 || i === 0) {
-        fbLog('info', 'enrich', `attempt ${i + 1}/${maxAttempts} via ${enrichMethod} (${done} images found)`, { fetchUrl });
-      }
-      try {
-        await delayMs(randomPauseMs(90, 0.4));
-        const dbg = await pickCdnUrlFromPermalinkWithFallbacksDebug(fetchUrl, {
-          attachBodySample: i < 3 && _diagnosticEnabled,
-          deadlineMs: enrichDeadline === Infinity ? undefined : enrichDeadline,
-        });
-        permalinkDebug.posts.push({
-          enrichIndex: i,
-          permalinkKey,
-          fetchUrl,
-          method: 'fetch_html',
-          foundImageUrl: dbg.imageUrl || null,
-          attempts: dbg.attempts,
-        });
-        const imageUrl = dbg.imageUrl;
-        if (!imageUrl) {
-          consecutiveMiss += 1;
-          if (consecutiveMiss >= consecutiveMissLimit) { stopReason = 'consecutive_miss'; break; }
-        } else {
-          consecutiveMiss = 0;
-          out.push({ url: imageUrl, sourcePermalink: permalinkKey, context: 'post' });
-          done += 1;
-          if (done % 15 === 0 || done === 1) {
-            console.info(`[fb-export] permalink preview images ${done}/${targetMsg}`);
-          }
-        }
-      } catch (_e) {
-        consecutiveMiss += 1;
-        permalinkDebug.posts.push({
-          enrichIndex: i,
-          permalinkKey,
-          fetchUrl,
-          error: String(_e),
-          attempts: [],
-        });
-        if (consecutiveMiss >= consecutiveMissLimit) { stopReason = 'consecutive_miss'; break; }
-      }
-      await writeZipProgress({
-        stage: 'enrich',
-        enrichMax: maxAttempts,
-        maxOgByCap,
-        enrichAttempt: i + 1,
-        imagesFound: done,
-        enrichLabel: 'post page previews',
+        stage: 'enrich', enrichMax: maxAttempts, enrichAttempt: i + 1,
+        imagesFound, enrichLabel: `cache_hits=${cacheHits} mbasic_fetches=${mbasicFetches}`,
       });
     }
   }
-
   permalinkDebug.enrichStop = {
-    reason: stopReason,
+    reason: token?.cancelled ? 'cancelled' : 'complete',
     wallMsElapsed: Date.now() - enrichT0,
-    wallBudgetMs: PERMALINK_ENRICH_MAX_WALL_MS,
-    consecutiveMissLimit,
+    cacheHits, mbasicFetches, mbasicHits,
+    candidates: candidates.length,
   };
-
-  if (done === 0 && maxAttempts > 0) {
-    console.info(
-      '[fb-export] permalink enrich found 0 images — open permalink_debug.json in the ZIP (htmlLength, fetchMode, loginHints, htmlHeadSample for first post).',
-    );
-  }
-  if (stopReason === 'time_budget' || stopReason === 'consecutive_miss') {
-    console.info(`[fb-export] permalink enrich stopped early (${stopReason}, ${permalinkDebug.enrichStop.wallMsElapsed}ms wall)`);
+  if (candidates.length > 0) {
+    console.info(`[fb-export] enrich done: ${cacheHits} cache hits, ${mbasicFetches} mbasic fetches (${mbasicHits} non-empty), ${imagesFound} media items, ${Math.round((Date.now() - enrichT0) / 1000)}s wall`);
   }
   return { out, reactionCounts, allLinkAttachments, htmlDumps, permalinkDebug };
 }
@@ -1741,12 +1649,12 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
     // wrapper attributed to it, while later posts get nothing. See the
     // chess-pic-on-Apr7-post bug in fb-activity-export-v2.8.13-...
     //
-    // Trusted post media now comes exclusively from tab-enrichment via
-    // buildPostManifestEntries (lib/build_manifest_entries.js), which
-    // filters to DOM-marked images (data-imgperflogname /
-    // data-visualcompletion) on the post's permalink page. Posts that
-    // don't get tab-enriched (e.g. no mediaHint/linkHint detected) end
-    // up with no media in the manifest — preferable to wrong media.
+    // Trusted post media now comes from per-post GraphQL cache
+    // (page_hook intercept while user scrolled the Activity Log) with
+    // an mbasic.facebook.com static-HTML fallback. Both are scoped to
+    // the post by construction (cache key is the post id; mbasic URL
+    // is the post's permalink). Posts that don't get enriched end up
+    // with no media in the manifest — preferable to wrong media.
     if (reshareCommentary === undefined) {
       // collection deliberately omitted; see comment above
     }
@@ -2350,26 +2258,21 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
   let allReactionCounts = {};
   let allLinkAttachments = {}; // postUrl → [{url, title, image}]
   let allHtmlDumps = {};
-  try {
-    if (!skipMedia && posts && !_currentToken.cancelled) {
-      const enrichedResult = await enrichMediaFromPermalinkFetches(posts, unique, _currentToken, caps);
-      permalinkDebugExport.permalinkEnrich = enrichedResult.permalinkDebug;
-      allReactionCounts = enrichedResult.reactionCounts ?? {};
-      allLinkAttachments = enrichedResult.allLinkAttachments ?? {};
-      allHtmlDumps = enrichedResult.htmlDumps ?? {};
-      const enriched = enrichedResult.out;
-      if (enriched.length) {
-        unique = dedupeMediaCandidates([...unique, ...enriched]);
-        console.info(`[fb-export] added ${enriched.length} image URL(s) from post permalink HTML (Activity Log list had few/no thumbnails)`);
-      }
-    } else if (skipMedia) {
-      permalinkDebugExport.permalinkEnrich = { skipped: true, reason: 'wizard_skip_media' };
-    } else if (!posts) {
-      permalinkDebugExport.permalinkEnrich = { skipped: true, reason: 'no_posts_payload' };
+  if (!skipMedia && posts && !_currentToken.cancelled) {
+    const enrichedResult = await enrichMediaFromPermalinkFetches(posts, unique, _currentToken, caps);
+    permalinkDebugExport.permalinkEnrich = enrichedResult.permalinkDebug;
+    allReactionCounts = enrichedResult.reactionCounts ?? {};
+    allLinkAttachments = enrichedResult.allLinkAttachments ?? {};
+    allHtmlDumps = enrichedResult.htmlDumps ?? {};
+    const enriched = enrichedResult.out;
+    if (enriched.length) {
+      unique = dedupeMediaCandidates([...unique, ...enriched]);
+      console.info(`[fb-export] added ${enriched.length} image URL(s) from post permalink HTML (Activity Log list had few/no thumbnails)`);
     }
-  } finally {
-    // Always close the dedicated export window after enrichment, even on error/cancel.
-    chrome.runtime.sendMessage({ type: 'FB_EXPORT_CLOSE_WINDOW' }).catch(() => {});
+  } else if (skipMedia) {
+    permalinkDebugExport.permalinkEnrich = { skipped: true, reason: 'wizard_skip_media' };
+  } else if (!posts) {
+    permalinkDebugExport.permalinkEnrich = { skipped: true, reason: 'no_posts_payload' };
   }
 
   const { out: cappedUnique, mediaCapped: zipMediaCapped } = sliceMediaCandidatesForOutput(unique, caps);
