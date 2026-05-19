@@ -211,21 +211,25 @@ def detect_language(text: str) -> Literal["ru", "en", "other"]:
     if total >= 3 and cyrillic / total > 0.30:
         return "ru"
 
-    # Non-ASCII Latin (umlauts/accents) strongly signals non-English Latin
-    # script. >5% threshold avoids triggering on the odd quoted name.
-    if non_ascii_latin > 0 and non_ascii_latin / total > 0.05:
+    # Non-ASCII Latin (umlauts, accents, eszett, łł, etc.) is a strong
+    # signal of non-English Latin script. Any single such character in
+    # an input dominated by Latin script → ``other``. (We already
+    # handled the case where it's mostly Cyrillic above.)
+    if non_ascii_latin >= 1:
         return "other"
 
-    # Pure Latin-script question (no Cyrillic, no diacritics). Short
-    # input (≤2 words) defaults to ``en`` — too short to disambiguate
-    # German/etc. and English greetings ("Hi", "Hello there") are common.
-    # For 3+ words, require at least one English function-word match;
-    # otherwise the input is likely German/French/Spanish without
-    # diacritics → ``other``.
+    # Pure ASCII-Latin question. Short input (≤2 words) defaults to
+    # ``en`` — too short to disambiguate German/etc. and English
+    # greetings ("Hi", "Hello there") are common. For 3+ words,
+    # require at least 2 distinct English function-word matches
+    # (single shared-with-German words like "in" / "was" / "is"
+    # don't qualify alone).
     if total >= 1 and cyrillic / max(total, 1) < 0.05:
         words = re.findall(r"[a-z']+", text.lower())
-        if len(words) >= 3 and not any(w in _EN_FUNCTION_WORDS for w in words):
-            return "other"
+        if len(words) >= 3:
+            matches = sum(1 for w in set(words) if w in _EN_FUNCTION_WORDS)
+            if matches < 2:
+                return "other"
         return "en"
 
     return "other"
