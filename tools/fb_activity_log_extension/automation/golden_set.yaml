@@ -98,32 +98,63 @@ posts:
       media_count_exact: 0
       media_sha256: []
 
-  # ─── 5: OTHER's-content reshare without commentary (Nov 2024) ──────────
-  # Vladimir reshares Mike Tamm's Nov 5 2024 post about the US election.
-  # The captured row currently shows reshareCommentary = Mike's full
-  # body text — that's a known bug: the embedded reshared-post text is
-  # being mis-captured as Vladimir's commentary. The expected behaviour
-  # for a "bare" reshare is empty commentary, same as the self-reshare
-  # case (#4). This entry exists specifically to verify that the
-  # self-vs-other reshare paths behave the same.
+  # ─── 5: OTHER's-content reshare WITH commentary (Nov 2024) ─────────────
+  # Vladimir reshares Mike Tamm's Nov 5 2024 post about the US election
+  # and adds a long Russian commentary about voting Trump in California
+  # despite supporting Harris. Inspecting the saved reshare row dump
+  # (reshare_row_00_…mike_tamm_9…html) confirmed the captured text IS
+  # Vladimir's commentary (NOT Mike's body leaking through, as I
+  # initially assumed). This entry pins regression on the trailer-strip
+  # fix (v2.8.19) — captured commentary must not contain "Public<HH:MM>"
+  # Activity-Log row artifact.
   #
-  # Caveat: the captured postKey currently is Mike's pfbid (the link
-  # the activity-log row anchors to), NOT Vladimir's reshare pfbid.
-  # That's a separate bug; for now we anchor the golden by Mike's
-  # pfbid since that's what posts.json has. Once postKey identity is
-  # fixed, the suffix will need to change to Vladimir's pfbid.
-  - id: mike_tamm_other_reshare_no_commentary
+  # Caveat: captured postKey currently equals Mike's pfbid (the link the
+  # activity-log row anchors to), NOT Vladimir's reshare pfbid. That's a
+  # separate identity bug; anchored here by Mike's pfbid until fixed.
+  - id: mike_tamm_other_reshare_with_long_commentary
     scope: {year: 2024, month: 11}
     post_key_suffix: pfbid02irxsrn4dagXMBuJxj2cbBqntAugxMwTBs8KGTsPb
     expect:
       is_reshare: true
-      reshare_commentary_exact: ""
-      # Mike's post is text-only; the reshare should attribute zero media
-      # to Vladimir (any image in the embedded post belongs to Mike).
-      media_count_exact: 0
-      media_sha256: []
+      reshare_commentary_starts_with: "это один из десятка достаточных аргументов не голосовать за Трампа"
+      # Regression for the Public<HH:MM> trailer bug (fixed v2.8.19):
+      # the captured commentary must end at the user's last sentence,
+      # NOT include "Public9:13 PM" or similar.
+      reshare_commentary_must_not_contain: ["Public", "View", "AM", "PM"]
+      reshared_from_url_contains: "/mike.tamm.9/posts/"
+      timestamp_rawText: "November 5, 2024"
+      # Mike's original post has one image. v2.8.20 unblocked reshare
+      # enrichment + v2.8.21 routes enrichment to the original-post URL
+      # where DOM markers live.
+      media_count_exact: 1
+      media_sha256:
+        - 438363c4437d84763eaeff03e474754517f9c2f76f362251dcf51380a387109f
 
 # Comments goldens. comments-own-posts-only is OFF by default in the
 # wizard (training-data mode → harvest comments on others' posts too).
 # Add entries once a stable comment exists with known wording.
 comments: []
+
+# Scope-level invariants. test_extraction.py asserts these per (year, month)
+# scope across all posts harvested in that scope — not per individual
+# golden entry. Use for "must not happen" properties that span the whole
+# harvest output.
+scope_invariants:
+
+  # ─── R1: distinct posts must have distinct media (SPA-pollution guard) ──
+  # Observed 2026-05-19 (v2.8.22, golden-set test b7m87brk7): every
+  # enrichment in a multi-post scope captured the SAME feedImage src
+  # (701559568_10166638455437228_n.jpg, alt='моЖЕМ ГЛАСНОСТЬ', from
+  # Kolyandr's "Идея не моя, нет" post) regardless of which fetchUrl the
+  # SW navigated to. `chrome.tabs.get(tabId).url` reported the correct
+  # final URL, but the rendered DOM kept showing the SAME post — FB's
+  # SPA/service-worker is bleeding state between ephemeral tabs in the
+  # shared export window.
+  #
+  # This invariant catches the regression: if N posts in a scope each
+  # claim media, their media-set sha256s must NOT all be identical.
+  # Two posts with literally the same content (e.g. two reshares of the
+  # same chain) is acceptable; ALL posts sharing one hash is not.
+  - id: distinct_posts_distinct_media
+    rule: media_hashes_not_all_identical
+    min_posts_with_media: 3   # only fire when there's enough sample size

@@ -130,9 +130,22 @@ class MediaItem:
         )
 
 
-def load_golden(path: pathlib.Path) -> list[GoldenEntry]:
+@dataclass
+class ScopeInvariant:
+    id: str
+    rule: str   # one of: media_hashes_not_all_identical
+    min_posts_with_media: int
+
+
+@dataclass
+class GoldenFile:
+    entries: list[GoldenEntry]
+    scope_invariants: list[ScopeInvariant]
+
+
+def load_golden(path: pathlib.Path) -> GoldenFile:
     raw = yaml.safe_load(path.read_text())
-    entries = []
+    entries: list[GoldenEntry] = []
     for r in raw.get("posts") or []:
         s = r["scope"]
         entries.append(GoldenEntry(
@@ -141,7 +154,14 @@ def load_golden(path: pathlib.Path) -> list[GoldenEntry]:
             post_key_suffix=str(r.get("post_key_suffix") or "").strip(),
             expect=r.get("expect") or {},
         ))
-    return entries
+    invariants: list[ScopeInvariant] = []
+    for r in raw.get("scope_invariants") or []:
+        invariants.append(ScopeInvariant(
+            id=r["id"],
+            rule=str(r["rule"]),
+            min_posts_with_media=int(r.get("min_posts_with_media") or 0),
+        ))
+    return GoldenFile(entries=entries, scope_invariants=invariants)
 
 
 def run_driver_for_scope(scope: Scope, max_items: int, phase: str, with_media: bool) -> pathlib.Path:
@@ -361,6 +381,57 @@ def print_outcome(o: CheckOutcome) -> None:
             print(f"        {line}", file=sys.stderr)
 
 
+def check_scope_invariant(invariant: ScopeInvariant, scope: Scope, export_dir: pathlib.Path) -> CheckOutcome:
+    """Assert a scope-wide invariant. Currently supports:
+       - media_hashes_not_all_identical: at least one post in the scope must
+         have a media hash different from the others.
+    """
+    posts_raw = (json.loads((export_dir / "posts.json").read_text()) or {}).get("postsWithText") or []
+    manifest_raw = json.loads((export_dir / "media_manifest.json").read_text()) if (export_dir / "media_manifest.json").exists() else []
+    manifest = [MediaItem.from_raw(r) for r in manifest_raw]
+
+    if invariant.rule == "media_hashes_not_all_identical":
+        per_post_hashes: dict[str, list[str]] = {}
+        for m in manifest:
+            per_post_hashes.setdefault(m.source_permalink, []).append(sha256_of(export_dir / "media" / m.filename) if (export_dir / "media" / m.filename).exists() else "<missing>")
+        posts_with_media = [k for k, v in per_post_hashes.items() if any(h != "<missing>" for h in v)]
+        if len(posts_with_media) < invariant.min_posts_with_media:
+            return CheckOutcome(
+                entry_id=f"{invariant.id}@{scope.year}-{scope.month:02d}",
+                result=CheckResult.PASS,
+                diffs=[],
+                post_key=None,
+                media_count=0,
+            )
+        first_hash_per_post = [sorted(per_post_hashes[k])[0] for k in posts_with_media]
+        if len(set(first_hash_per_post)) == 1:
+            sample = first_hash_per_post[0]
+            return CheckOutcome(
+                entry_id=f"{invariant.id}@{scope.year}-{scope.month:02d}",
+                result=CheckResult.FAIL,
+                diffs=[
+                    f"{len(posts_with_media)} posts all share the same media hash {sample[:16]}…",
+                    "Symptom: FB SPA/service-worker is bleeding state across sequential tab extractions.",
+                ],
+                post_key=None,
+                media_count=len(posts_with_media),
+            )
+        return CheckOutcome(
+            entry_id=f"{invariant.id}@{scope.year}-{scope.month:02d}",
+            result=CheckResult.PASS,
+            diffs=[],
+            post_key=None,
+            media_count=len(posts_with_media),
+        )
+    return CheckOutcome(
+        entry_id=invariant.id,
+        result=CheckResult.FAIL,
+        diffs=[f"unknown rule {invariant.rule!r}"],
+        post_key=None,
+        media_count=0,
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--golden", default=str(HERE / "golden_set.yaml"))
@@ -371,7 +442,8 @@ def main() -> None:
                     help="skip the driver, assert against the newest export dir as-is")
     args = ap.parse_args()
 
-    entries = load_golden(pathlib.Path(args.golden))
+    golden = load_golden(pathlib.Path(args.golden))
+    entries = golden.entries
     if args.only:
         entries = [e for e in entries if e.id == args.only]
         if not entries:
@@ -401,6 +473,13 @@ def main() -> None:
         o = check_entry(e, posts, manifest, d)
         print_outcome(o)
         all_outcomes.append(o)
+
+    # Scope-wide invariants — applied once per (scope, invariant) pair.
+    for scope, export_dir in scope_to_dir.items():
+        for inv in golden.scope_invariants:
+            o = check_scope_invariant(inv, scope, export_dir)
+            print_outcome(o)
+            all_outcomes.append(o)
 
     counts = {r: sum(1 for o in all_outcomes if o.result == r) for r in CheckResult}
     print(
