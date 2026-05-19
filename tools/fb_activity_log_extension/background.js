@@ -272,8 +272,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // viewport-based lazy-loaders (reel video src, intersection observers) fire.
         // This doesn't affect the user's focused window.
         await chrome.tabs.update(tabId, { active: true });
-        // 6s: enough for intersection observer to fire, video fetch to start AND complete
-        await new Promise((r) => setTimeout(r, 6000));
+        // Initial settle: enough for intersection observer + first photo
+        // hydration to fire.
+        await new Promise((r) => setTimeout(r, 3000));
+
+        // v2.8.18: scroll the post into view + past it so lazy-loaded
+        // gallery photos (positions 2..N in multi-photo posts) come into
+        // viewport and FB tags them with the feedImage marker. The
+        // v2.8.17 export showed every enriched post returned at most 1
+        // trusted-img hit; multi-photo galleries got truncated to the
+        // first photo because positions 2..N were never visible during
+        // the static settle. Now we scroll ~viewport-height past the
+        // post body, wait, then scroll back so the post header is in
+        // view again before the extractor reads og:image / feedImage.
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+              try { window.scrollBy({ top: 800, behavior: 'auto' }); } catch (_) {}
+            },
+          });
+          await new Promise((r) => setTimeout(r, 1500));
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+              try { window.scrollBy({ top: 800, behavior: 'auto' }); } catch (_) {}
+            },
+          });
+          await new Promise((r) => setTimeout(r, 1500));
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+              try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch (_) {}
+            },
+          });
+          await new Promise((r) => setTimeout(r, 800));
+        } catch (_) { /* tab may have closed; extractor will return what it has */ }
 
         // Check if the tab URL changed (redirect to login, marketplace, etc.)
         const tabInfo = await chrome.tabs.get(tabId);
