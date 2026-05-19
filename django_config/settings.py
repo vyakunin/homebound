@@ -177,6 +177,15 @@ BOT_SITE_RATE_LIMIT_PER_DAY = int(os.environ.get('BOT_SITE_RATE_LIMIT_PER_DAY', 
 # Haiku regardless — Sonnet doesn't add much for one-liners.
 BOT_DEFAULT_MODEL = os.environ.get('BOT_DEFAULT_MODEL', 'claude-haiku-4-5')
 BOT_PREMIUM_MODEL = os.environ.get('BOT_PREMIUM_MODEL', 'claude-sonnet-4-6')
+
+# Dual-model language routing (added 2026-05-19). Python-side language
+# classifier picks RU or EN persona+model per request. ``BOT_MODEL_EN``
+# falls back to ``BOT_DEFAULT_MODEL`` if unset. ``BOT_MODEL_RU``
+# defaults to Qwen 2.5-72B on OpenRouter — better Russian than Haiku at
+# comparable per-token cost. Slash in the model name routes to the
+# OpenRouter adapter; bare model name routes to Anthropic.
+BOT_MODEL_RU = os.environ.get('BOT_MODEL_RU', 'qwen/qwen-2.5-72b-instruct')
+BOT_MODEL_EN = os.environ.get('BOT_MODEL_EN', BOT_DEFAULT_MODEL)
 BOT_SONNET_PER_IP_PER_DAY = int(os.environ.get('BOT_SONNET_PER_IP_PER_DAY', '1'))
 BOT_SONNET_MIN_WORDS = int(os.environ.get('BOT_SONNET_MIN_WORDS', '6'))
 

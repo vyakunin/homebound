@@ -1,38 +1,50 @@
-"""Public bot service: persona + retrieval + Anthropic call + cache.
+"""Public bot service: persona + retrieval + dual-model call + cache.
 
 One-shot Q&A. No session state.
 
-**Model tiering.** Default is Haiku 4.5 (`BOT_DEFAULT_MODEL`). Each IP
-gets one free Sonnet 4.6 (`BOT_PREMIUM_MODEL`) call per day, gated by
-``BOT_SONNET_MIN_WORDS`` (trivial questions stay on Haiku — Sonnet
-doesn't add much for one-liners).
+**Language routing (dual model).** A Python-side language detector
+classifies the visitor's question into ``ru`` / ``en`` / ``other``:
 
-**Response cache.** Before calling Anthropic we look up
-``(prompt_hash, context_hash, model)``. If the same prompt+context has
-already been answered by *any* model, we prefer the Sonnet response
-(superior wins). On Sonnet write we evict the Haiku row for the same
-key so we don't keep both.
+- ``ru`` → Russian persona + ``BOT_MODEL_RU`` (default Qwen 2.5-72B on
+  OpenRouter; better Russian than Haiku, comparable cost).
+- ``en`` → English persona + ``BOT_MODEL_EN`` (default Haiku 4.5 on
+  Anthropic; English is Haiku's strong suit).
+- ``other`` (German tourist, gibberish, transliterated Russian, etc.) →
+  short bilingual deterrent returned without an LLM call.
 
-**Persona file.** Loaded from ``BOT_PERSONA_PATH`` (defaults to
-``/etc/homebound/bot_persona.md``). The file is loaded fresh on each
-call so a hot-deploy of the persona doesn't require a restart.
+This is deterministic — the model never decides which language to
+answer in; the host code does.
 
-**Prompt caching.** The persona system block gets ``cache_control:
-ephemeral`` so the first call writes the cache (~1.25× cost), every
-subsequent call within 5 minutes reads it (~0.1× cost).
+**Response cache.** Before calling the LLM we look up
+``(prompt_hash, context_hash, model)``. Cache lookup still works
+across both providers; the model name is part of the cache key.
+
+**Persona file.** Loaded from ``BOT_PERSONA_PATH_RU`` /
+``BOT_PERSONA_PATH_EN`` (legacy ``BOT_PERSONA_PATH`` is honoured as
+the RU path for backward compatibility). The file is loaded fresh
+on each call so a hot-deploy of the persona doesn't require a
+restart.
+
+**Prompt caching.** On Anthropic, the persona system block gets
+``cache_control: ephemeral`` so the first call writes the cache
+(~1.25× cost), every subsequent call within 5 minutes reads it
+(~0.1× cost). OpenRouter doesn't support ephemeral cache; per-token
+cost is low enough that re-tokenizing the persona each call is fine.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
+import httpx
 from anthropic import Anthropic, APIError
 from django.conf import settings
 from django.db import transaction
@@ -95,6 +107,29 @@ def _api_key() -> str | None:
     return None
 
 
+def _openrouter_key() -> str | None:
+    """Read the OpenRouter API key (env var wins, then file fallbacks).
+    Returns ``None`` if not configured — RU path will degrade by falling
+    back to the Anthropic model in that case (handled in ``answer``)."""
+    env = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if env:
+        return env
+    candidates = [
+        os.environ.get("OPENROUTER_API_KEY_FILE"),
+        str(Path.home() / "tokens" / "homebound_openrouter_key"),
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        path = Path(raw)
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8").strip() or None
+            except OSError:
+                continue
+    return None
+
+
 def is_available() -> bool:
     return _api_key() is not None
 
@@ -102,11 +137,21 @@ def is_available() -> bool:
 # ── Persona ───────────────────────────────────────────────────────────
 
 
-def _persona_text() -> str:
-    candidates = [
-        os.environ.get("BOT_PERSONA_PATH"),
-        "/etc/homebound/bot_persona.md",
-    ]
+def _persona_text(lang: Literal["ru", "en"] = "ru") -> str:
+    """Load the language-specific persona file. Falls back to the legacy
+    single-persona path if the lang-specific one isn't configured."""
+    if lang == "en":
+        candidates = [
+            os.environ.get("BOT_PERSONA_PATH_EN"),
+            "/etc/homebound/bot_persona_en.md",
+        ]
+    else:
+        candidates = [
+            os.environ.get("BOT_PERSONA_PATH_RU"),
+            os.environ.get("BOT_PERSONA_PATH"),  # legacy
+            "/etc/homebound/bot_persona_ru.md",
+            "/etc/homebound/bot_persona.md",      # legacy
+        ]
     for raw in candidates:
         if not raw:
             continue
@@ -117,6 +162,80 @@ def _persona_text() -> str:
             except OSError:
                 continue
     return FALLBACK_PERSONA
+
+
+# ── Language detection ────────────────────────────────────────────────
+
+
+# Liberal Cyrillic/Latin ratio classifier. Russians frequently code-switch
+# inline (English brand names, technical terms), so we lean toward "ru"
+# whenever there's a meaningful Cyrillic presence and toward "en" only on
+# near-pure Latin input.
+# Common English function words. If a Latin-script question has more than
+# a handful of words and ZERO function-word matches, the language is most
+# likely not English (German, French, Spanish, Indonesian, etc.).
+_EN_FUNCTION_WORDS = {
+    "the", "is", "and", "what", "do", "you", "to", "a", "an", "of", "in",
+    "i", "me", "my", "your", "are", "was", "were", "be", "been", "this",
+    "that", "it", "for", "on", "at", "with", "as", "by", "or", "but",
+    "not", "no", "yes", "have", "has", "had", "will", "would", "can",
+    "could", "should", "about", "from", "if", "how", "when", "why",
+    "where", "who", "which", "any", "all", "some", "more", "most",
+}
+
+
+def detect_language(text: str) -> Literal["ru", "en", "other"]:
+    """Classify the visitor's question into ru / en / other.
+
+    Rules (applied in order):
+      - <3 alphabetic chars total → ``other`` (numbers/symbols only).
+      - Cyrillic ratio > 30% of alphabetics → ``ru``.
+      - Non-ASCII Latin characters present (ß, ü, é, ç, ł, etc.) → ``other``.
+      - >5 Latin words with ZERO English function-word matches → ``other``
+        (catches German / French / Spanish without diacritics).
+      - Cyrillic ratio < 5% AND looks English → ``en``.
+      - Otherwise → ``other`` (mixed Latin-Greek, ambiguous scripts).
+    """
+    if not text:
+        return "other"
+    cyrillic = sum(1 for c in text if "Ѐ" <= c <= "ӿ")
+    ascii_latin = sum(1 for c in text if c.isalpha() and c.isascii())
+    non_ascii_latin = sum(
+        1 for c in text
+        if c.isalpha() and not c.isascii() and not ("Ѐ" <= c <= "ӿ")
+    )
+    total = cyrillic + ascii_latin + non_ascii_latin
+    if total < 1:
+        return "other"
+
+    if total >= 3 and cyrillic / total > 0.30:
+        return "ru"
+
+    # Non-ASCII Latin (umlauts/accents) strongly signals non-English Latin
+    # script. >5% threshold avoids triggering on the odd quoted name.
+    if non_ascii_latin > 0 and non_ascii_latin / total > 0.05:
+        return "other"
+
+    # Pure Latin-script question (no Cyrillic, no diacritics). Short
+    # input (≤2 words) defaults to ``en`` — too short to disambiguate
+    # German/etc. and English greetings ("Hi", "Hello there") are common.
+    # For 3+ words, require at least one English function-word match;
+    # otherwise the input is likely German/French/Spanish without
+    # diacritics → ``other``.
+    if total >= 1 and cyrillic / max(total, 1) < 0.05:
+        words = re.findall(r"[a-z']+", text.lower())
+        if len(words) >= 3 and not any(w in _EN_FUNCTION_WORDS for w in words):
+            return "other"
+        return "en"
+
+    return "other"
+
+
+DETERRENT_MESSAGE = (
+    "I answer in Russian or English only. "
+    "Я отвечаю по-русски или по-английски. "
+    "Спроси на одном из этих языков."
+)
 
 
 # ── Hashing for the response cache ────────────────────────────────────
@@ -288,23 +407,59 @@ def answer(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str | None = None,
 ) -> BotAnswer:
-    """Run retrieval → cache → Anthropic. Returns BotAnswer.
+    """Run language detect → retrieval → cache → LLM. Returns BotAnswer.
 
-    ``model`` defaults to ``BOT_DEFAULT_MODEL``. Pass the premium model
-    explicitly to override (the view does this based on
-    ``sonnet_eligible``).
+    Routing is deterministic in Python: the visitor's question is
+    classified into ru / en / other, and the persona + model that
+    match are loaded. ``other`` returns the bilingual deterrent
+    without any LLM call.
+
+    Explicit ``model`` override (e.g. the view passing the Sonnet
+    premium tier for one query) wins over the per-language default
+    but still uses the matching persona.
     """
     question = (question or "").strip()
     if not question:
         raise ValueError("question is required")
-    key = _api_key()
-    if not key:
+
+    lang = detect_language(question)
+
+    # Deterrent path: no LLM call, no retrieval, no cache write.
+    if lang == "other":
+        return BotAnswer(
+            answer=DETERRENT_MESSAGE,
+            cited_slugs=[],
+            cited_titles=[],
+            model="deterrent",
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_input_tokens=0,
+            latency_ms=0,
+            cache_hit=False,
+        )
+
+    # Resolve model + provider from language defaults, unless the caller
+    # forced one (Sonnet upgrade path keeps its model regardless of lang).
+    if model is None:
+        if lang == "ru":
+            model = getattr(settings, "BOT_MODEL_RU", "qwen/qwen-2.5-72b-instruct")
+        else:
+            model = getattr(settings, "BOT_MODEL_EN", None) or \
+                    getattr(settings, "BOT_DEFAULT_MODEL", "claude-haiku-4-5")
+
+    is_openrouter = "/" in model  # provider/model-name shape
+    if is_openrouter:
+        if not _openrouter_key():
+            # Soft-fall back to the Anthropic model so the bot still works
+            # while OpenRouter is being set up.
+            logger.warning("OpenRouter key missing, falling back to Haiku for RU")
+            model = getattr(settings, "BOT_DEFAULT_MODEL", "claude-haiku-4-5")
+            is_openrouter = False
+    if not is_openrouter and not _api_key():
         raise BotUnavailableError(
-            "Public bot API key missing — write the key to "
+            "No Anthropic API key configured — write the key to "
             "~/tokens/homebound_publicbot_anthropic_key or set ANTHROPIC_API_KEY."
         )
-    if model is None:
-        model = getattr(settings, "BOT_DEFAULT_MODEL", "claude-haiku-4-5")
 
     try:
         hits = retrieve(question, top_k=top_k)
@@ -312,16 +467,12 @@ def answer(
         logger.warning("bot retrieval failed (continuing cold): %s", e)
         hits = []
 
-    # Load persona once per request (cheap, ~22KB read) so we can fold
-    # its hash into context_hash. Reused for the system block below.
-    persona = _persona_text()
+    # Load language-matched persona once per request.
+    persona = _persona_text(lang)
     p_hash = _prompt_hash(question)
     c_hash = _context_hash(hits, persona)
     cached = _cache_lookup(p_hash, c_hash, requested_model=model)
     if cached is not None:
-        # Reconstitute titles from the hits we just retrieved (sources
-        # block in the UI uses titles). cited_slugs in the cache is
-        # canonical; titles are best-effort.
         title_by_slug = {h.slug: h.title for h in hits}
         titles = [title_by_slug.get(s, s) for s in cached.cited_slugs]
         return BotAnswer(
@@ -339,33 +490,21 @@ def answer(
     user_msg = _build_user_message(question, hits)
 
     t0 = time.monotonic()
-    client = Anthropic(api_key=key)
     try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=[{
-                "type": "text",
-                "text": persona,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{"role": "user", "content": user_msg}],
-        )
-    except APIError as e:
-        raise BotUnavailableError(f"Anthropic call failed: {e}") from e
-
+        if is_openrouter:
+            text, input_tokens, output_tokens, cache_read, resolved_model = \
+                _call_openrouter(model, persona, user_msg, max_tokens)
+        else:
+            text, input_tokens, output_tokens, cache_read, resolved_model = \
+                _call_anthropic(model, persona, user_msg, max_tokens)
+    except (APIError, httpx.HTTPError, ValueError) as e:
+        raise BotUnavailableError(f"LLM call failed: {e}") from e
     latency_ms = int((time.monotonic() - t0) * 1000)
-    text = _extract_text(resp)
-    usage = getattr(resp, "usage", None)
-    input_tokens = getattr(usage, "input_tokens", 0) or 0
-    output_tokens = getattr(usage, "output_tokens", 0) or 0
-    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-    resolved_model = getattr(resp, "model", model)
 
     _cache_write(
         prompt_hash=p_hash,
         context_hash=c_hash,
-        model=resolved_model if "-" in resolved_model else model,
+        model=resolved_model if "-" in resolved_model or "/" in resolved_model else model,
         question=question,
         answer=text,
         cited_slugs=[h.slug for h in hits],
@@ -384,7 +523,81 @@ def answer(
     )
 
 
-def _extract_text(resp) -> str:
+# ── Provider adapters ─────────────────────────────────────────────────
+
+
+def _call_anthropic(
+    model: str, persona: str, user_msg: str, max_tokens: int,
+) -> tuple[str, int, int, int, str]:
+    """Call Anthropic Messages API with ephemeral persona caching.
+    Returns (text, input_tokens, output_tokens, cache_read_tokens, model)."""
+    client = Anthropic(api_key=_api_key())
+    resp = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=[{
+            "type": "text",
+            "text": persona,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    text = _extract_anthropic_text(resp)
+    usage = getattr(resp, "usage", None)
+    return (
+        text,
+        getattr(usage, "input_tokens", 0) or 0,
+        getattr(usage, "output_tokens", 0) or 0,
+        getattr(usage, "cache_read_input_tokens", 0) or 0,
+        getattr(resp, "model", model),
+    )
+
+
+def _call_openrouter(
+    model: str, persona: str, user_msg: str, max_tokens: int,
+) -> tuple[str, int, int, int, str]:
+    """Call OpenRouter chat completions endpoint (OpenAI-compatible).
+    Returns (text, input_tokens, output_tokens, cache_read_tokens=0, model).
+    OpenRouter doesn't expose ephemeral prompt caching the way Anthropic
+    does, so cache_read_tokens is always 0 on this path."""
+    key = _openrouter_key()
+    if not key:
+        raise ValueError("OPENROUTER_API_KEY not configured")
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                # Optional but recommended attribution headers.
+                "HTTP-Referer": "https://vyakunin.org/",
+                "X-Title": "vyakunin.org public bot",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": persona},
+                    {"role": "user", "content": user_msg},
+                ],
+            },
+        )
+    if resp.status_code >= 400:
+        raise ValueError(f"OpenRouter HTTP {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content") or ""
+    usage = data.get("usage") or {}
+    return (
+        text.strip(),
+        int(usage.get("prompt_tokens", 0) or 0),
+        int(usage.get("completion_tokens", 0) or 0),
+        0,
+        data.get("model") or model,
+    )
+
+
+def _extract_anthropic_text(resp) -> str:
     parts: list[str] = []
     for block in getattr(resp, "content", []) or []:
         text = getattr(block, "text", None)
