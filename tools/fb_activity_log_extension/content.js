@@ -923,7 +923,18 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
   const seenKeys = new Set();
   for (const p of postsExport.postsWithText) {
     const postKey = p.postKey || p.url;
-    const fetchUrl = (p.url || postKey || '').trim();
+    // For reshare rows, the reshare's own permalink page typically doesn't
+    // expose feedImage markers — it shows Vladimir's commentary wrapped
+    // around a card linking to the original. The ORIGINAL post's permalink
+    // page is where the trusted DOM markers live, so use reshared_from_url
+    // as the fetch target. Manifest sourcePermalink stays as the user's
+    // pfbid (permalinkKey), so attribution remains correct.
+    const rsUrl = (p.reshared_from_url || '').trim();
+    const useReshareSource =
+      rsUrl.startsWith('http') &&
+      rsUrl.includes('facebook.com') &&
+      'reshareCommentary' in p;
+    const fetchUrl = (useReshareSource ? rsUrl : (p.url || postKey || '')).trim();
     if (!fetchUrl.startsWith('http') || !fetchUrl.includes('facebook.com')) continue;
     if (hasStrongMediaForPermalink(merged, postKey)) continue;
     // Only enrich posts we know likely have media:
