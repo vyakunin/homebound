@@ -121,6 +121,10 @@ class Command(BaseCommand):
         if not dry_run and not binpb_path.exists():
             raise CommandError(f'Extractor produced no posts.binpb at {binpb_path}')
 
+        # Ensure an (empty) media dir exists — extract() only creates it when
+        # there's media to copy, but import_posts requires the path to exist.
+        media_dir.mkdir(parents=True, exist_ok=True)
+
         if dry_run:
             self.stdout.write('Dry run — stopping before DB changes.')
             return
