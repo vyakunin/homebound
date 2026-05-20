@@ -713,6 +713,15 @@ def _call_openrouter(
                     {"role": "system", "content": persona},
                     {"role": "user", "content": user_msg},
                 ],
+                # OpenRouter routes the same model through multiple
+                # downstream providers; the cheap ones (Novita, etc.)
+                # have started 403'ing with "NOT_ENOUGH_BALANCE" mid-day.
+                # Avoid those routes; the official upstream is cheaper
+                # per cost-per-quality than dealing with provider flap.
+                "provider": {
+                    "ignore": ["Novita"],
+                    "allow_fallbacks": True,
+                },
             },
         )
     if resp.status_code >= 400:
