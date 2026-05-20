@@ -55,6 +55,20 @@ DEFAULT_TOP_K = 10
 # busy days like 2022-02-24 have 19+ public posts.
 DATE_HIT_MAX = 12
 
+# Mild dampening factor on reposted-content rows in fusion. Reposts can
+# still surface (and dominate) when no own-text candidate is available;
+# this just biases ties toward Vladimir's own writing. 1.0 = no
+# dampening; 0.0 = drop all reposts. Keep mild — 0.95 means a repost
+# loses by ~5% of its rank-contribution, breaks ties only.
+REPOST_DAMPENING = 0.95
+# MMR (Maximal Marginal Relevance) anti-redundancy weight for year-based
+# diversity. Higher = stronger penalty for picking N posts from the same
+# year. Mild here too — at 0.10 a candidate sharing a year with an
+# already-picked hit pays 10% of the max possible score. Helps surface
+# posts spanning the corpus's temporal range so the model doesn't infer
+# "Vladimir lost interest after Y" from a single old hit.
+MMR_YEAR_PENALTY = 0.10
+
 
 @dataclass(frozen=True, slots=True)
 class BotHit:
@@ -448,7 +462,60 @@ def _fuse(
                 repost_author=existing.repost_author,
                 repost_excerpt=existing.repost_excerpt,
             )
-    return sorted(merged.values(), key=lambda h: h.score, reverse=True)[:top_k]
+
+    # Mild repost dampening — break ties toward Vladimir's own writing
+    # without hiding reposts entirely (they still surface when no own
+    # candidate matches the query).
+    if REPOST_DAMPENING != 1.0:
+        for h_id, h in list(merged.items()):
+            if h.repost_author:
+                merged[h_id] = _with_score(h, h.score * REPOST_DAMPENING)
+
+    return _mmr_select(list(merged.values()), top_k=top_k)
+
+
+def _mmr_select(candidates: list[BotHit], *, top_k: int) -> list[BotHit]:
+    """Greedy MMR with year-based redundancy penalty.
+
+    Standard MMR is:  pick = argmax_i  [ score(i) − α · sim(i, picked) ]
+    where sim is some similarity to already-picked items. We use
+    year-overlap as the sim signal because (a) it's free (just parse
+    created_at), (b) the failure mode we want to fix is "all retrieved
+    posts cluster in one year, model infers Vladimir lost interest" —
+    so spreading year coverage directly addresses that.
+
+    Concretely: a candidate sharing a year with one already-picked hit
+    loses MMR_YEAR_PENALTY × score. Two same-year matches loses 2× that.
+    Math works out so a strong hit still wins, but among ties the year
+    diversity breaks the tie.
+    """
+    candidates = sorted(candidates, key=lambda h: h.score, reverse=True)
+    if not candidates:
+        return []
+
+    def _year(h: BotHit) -> int | None:
+        iso = h.created_at_iso or ""
+        return int(iso[:4]) if len(iso) >= 4 and iso[:4].isdigit() else None
+
+    picked: list[BotHit] = []
+    picked_years: dict[int, int] = {}
+    pool = list(candidates)
+    while pool and len(picked) < top_k:
+        best_idx = 0
+        best_mmr = float("-inf")
+        for i, h in enumerate(pool):
+            y = _year(h)
+            same_year_count = picked_years.get(y, 0) if y is not None else 0
+            mmr = h.score - MMR_YEAR_PENALTY * same_year_count * h.score
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+        chosen = pool.pop(best_idx)
+        picked.append(chosen)
+        y = _year(chosen)
+        if y is not None:
+            picked_years[y] = picked_years.get(y, 0) + 1
+    return picked
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

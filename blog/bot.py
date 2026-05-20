@@ -391,26 +391,143 @@ def _build_user_message(question: str, hits: Iterable[BotHit]) -> str:
     if not hits:
         parts.append("\n*(No relevant past posts found.)*\n")
     else:
+        timeline = _topic_timeline_summary(hits)
+        if timeline:
+            parts.append(timeline)
         for i, h in enumerate(hits, 1):
-            date_str = h.created_at_iso[:10] if h.created_at_iso else "unknown date"
-            header = f"\n## Post {i} — /post/{h.slug}/ ({date_str})"
-            if h.repost_author:
-                # Structured repost marker — the persona's "Handling
-                # retrieved content" rule relies on this being explicit
-                # so the model attributes quoted words to the original
-                # author, not to Vladimir.
-                header += f" — REPOST from {h.repost_author}"
-            if h.title:
-                header += f"\n**{h.title}**"
-            parts.append(header)
-            parts.append(h.snippet)
-            if h.repost_excerpt:
-                parts.append(
-                    f"\n*Reposted content (by {h.repost_author}):*\n{h.repost_excerpt}"
-                )
+            parts.append(_render_hit(i, h))
     parts.append("\n---\n\n# Visitor question\n")
     parts.append(question.strip())
     return "\n".join(parts)
+
+
+# Tokens this short are noise; tokens this common (Russian closed-class
+# words + English function words) shouldn't drive topic-cluster detection.
+_TIMELINE_STOPWORDS = frozenset({
+    "что", "это", "был", "была", "было", "были", "есть", "если", "когда",
+    "потому", "очень", "только", "также", "более", "менее", "ещё", "еще",
+    "сам", "сама", "сами", "себе", "себя", "свой", "своя", "свои",
+    "the", "this", "that", "have", "with", "from", "your", "their", "about",
+})
+
+
+def _topic_timeline_summary(hits: list[BotHit]) -> str:
+    """Emit a one-line summary of year-coverage IF the top hits actually
+    cluster around a shared term.
+
+    Goal: combat the "Vladimir lost interest after Y" hallucination by
+    surfacing the temporal range of on-topic posts. But — per user
+    instruction — only do this when the hits are genuinely on-topic, not
+    when retrieval grabbed unrelated posts. Heuristic for "genuinely
+    clustered": at least 3 hits share a content-bearing token of length
+    ≥ 4 (excluding stopwords). Otherwise skip the summary.
+
+    The summary lists years a user with the shared token appears in,
+    deduped and sorted.
+    """
+    if len(hits) < 3:
+        return ""
+    # Per-hit token sets from snippet + title.
+    tokenized: list[set[str]] = []
+    for h in hits:
+        text = f"{h.title or ''} {h.snippet or ''} {h.repost_excerpt or ''}".lower()
+        # Split on '_' and '-' so @rap_anacondaz tokenizes to {rap, anacondaz}
+        # — catches the case where the same entity appears with and without
+        # the social-handle prefix. Stays a fixed-cost regex transform; no
+        # entity-specific knowledge baked in.
+        text = text.replace("_", " ").replace("-", " ")
+        tokens = {
+            t for t in re.findall(r"[\wа-яё]{4,}", text)
+            if t not in _TIMELINE_STOPWORDS
+        }
+        tokenized.append(tokens)
+    # Find tokens that appear in ≥3 hits (the cluster signal).
+    token_counts: dict[str, int] = {}
+    for ts in tokenized:
+        for t in ts:
+            token_counts[t] = token_counts.get(t, 0) + 1
+    shared = {t for t, c in token_counts.items() if c >= 3}
+    if not shared:
+        return ""  # No cluster — don't emit anything misleading
+    # Which hits participate in the cluster?
+    on_topic_hits = [
+        h for h, ts in zip(hits, tokenized) if ts & shared
+    ]
+    if len(on_topic_hits) < 3:
+        return ""
+    years = sorted({
+        h.created_at_iso[:4]
+        for h in on_topic_hits
+        if h.created_at_iso and h.created_at_iso[:4].isdigit()
+    })
+    if len(years) < 3:
+        return ""
+    return (
+        f"*Year coverage of on-topic retrieved posts: "
+        f"{', '.join(years)}. Use this to gauge whether Vladimir's "
+        f"engagement with the topic is recent, sustained, or a one-off.*\n"
+    )
+
+
+def _render_hit(idx: int, h: BotHit) -> str:
+    """Format one retrieved post with an explicit ownership SOURCE line.
+
+    Three shapes, picked by which of (repost_author, repost_excerpt) is set:
+
+    1. Vladimir's own post (no repost_author) →
+         SOURCE: Vladimir wrote this himself.
+
+    2. Pure repost (repost_author set, no separate excerpt — snippet IS
+       the reshared text) →
+         SOURCE: Vladimir reshared this from <author>. The text below is
+         <author>'s words, NOT Vladimir's…
+
+    3. Repost + Vladimir's own commentary (both content_text and
+       reshared_content_text non-empty) →
+         SOURCE: Vladimir's own commentary, attached to a repost from
+         <author>. Two labelled sections follow.
+
+    Persona's "Handling retrieved content" section explains how to use
+    each SOURCE shape; this function's job is just to make the
+    attribution structurally unambiguous in the prompt.
+    """
+    date_str = h.created_at_iso[:10] if h.created_at_iso else "unknown date"
+    lines: list[str] = [f"\n## Post {idx} — /post/{h.slug}/ ({date_str})"]
+    if h.title:
+        lines.append(f"**{h.title}**")
+
+    if not h.repost_author:
+        lines.append("SOURCE: Vladimir wrote this himself.")
+        lines.append("---")
+        lines.append(h.snippet)
+    elif h.repost_excerpt:
+        # Vladimir wrote commentary AND the reshared body is separately
+        # captured. Two labelled sections.
+        lines.append(
+            f"SOURCE: Vladimir's own commentary, attached to a repost "
+            f"from {h.repost_author}."
+        )
+        lines.append("---")
+        lines.append(f"*Vladimir's commentary:*\n{h.snippet}")
+        lines.append(
+            f"\n*Reposted from {h.repost_author} (NOT Vladimir's words):*\n"
+            f"{h.repost_excerpt}"
+        )
+    else:
+        # Pure reshare — the snippet itself is the reshared text.
+        # @-handles inside the text are flagged so the model knows the
+        # reshared author may themselves be quoting/tagging someone else.
+        lines.append(
+            f"SOURCE: Vladimir reshared this from {h.repost_author}. "
+            f"The text below is {h.repost_author}'s words, NOT Vladimir's. "
+            f"If it contains an @-handle (e.g. @rap_anacondaz = Russian band "
+            f"Anacondaz), that's a third party Vladimir is indirectly "
+            f"endorsing by resharing. Do NOT quote this text in the first "
+            f"person."
+        )
+        lines.append("---")
+        lines.append(h.snippet)
+    return "\n".join(lines)
 
 
 # ── Entry point ───────────────────────────────────────────────────────
