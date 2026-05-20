@@ -1,7 +1,9 @@
-"""Django management command: reimport Facebook posts from a ZIP export.
+"""Django management command: reimport Facebook posts from an activity-log export.
 
-Finds the latest fb-activity-export-*.zip in ~/Downloads/ unless --zip is given.
-Extracts to output/activity_log/ in the project root, then runs the full import.
+Finds the latest fb-activity-export-* in ~/Downloads/ (either a .zip file from
+extension v2.7.x / full-mode runs, or a directory from extension v2.8.0+
+iter-mode runs) unless --source is given. Extracts to output/activity_log/ in
+the project root, then runs the full import.
 
 By default this WIPES every existing FB post before importing — destroys any
 embeddings on those rows. Pass --preserve-existing to keep existing posts:
@@ -12,7 +14,8 @@ re-embed only the rows whose text actually changed.
 Usage:
     manage.py fb_reimport                          # WIPE + reimport (destroys embeddings)
     manage.py fb_reimport --preserve-existing      # update-in-place; keep embeddings
-    manage.py fb_reimport --zip /path/to/file.zip
+    manage.py fb_reimport --source /path/to/file.zip
+    manage.py fb_reimport --source /path/to/export-dir
     manage.py fb_reimport --dry-run                # extract only, no DB changes
 """
 import logging
@@ -27,20 +30,35 @@ from blog.models import Post, PostSource
 logger = logging.getLogger(__name__)
 
 
-def _find_latest_zip() -> Path | None:
+def _find_latest_export() -> Path | None:
+    """Latest fb-activity-export-* on disk — either a .zip file (extension
+    v2.7.x and earlier, or full-mode runs that succeed at the zip step) or
+    a directory (extension v2.8.0+ — iter-mode writes a directory directly,
+    no zip step). Extractor handles both."""
     downloads = Path.home() / 'Downloads'
-    zips = sorted(downloads.glob('fb-activity-export-*.zip'), key=lambda p: p.stat().st_mtime)
-    return zips[-1] if zips else None
+    candidates = []
+    for p in downloads.glob('fb-activity-export-*'):
+        if p.is_file() and p.suffix == '.zip':
+            candidates.append(p)
+        elif p.is_dir():
+            candidates.append(p)
+    candidates.sort(key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
 
 
 class Command(BaseCommand):
-    help = 'Wipe all Facebook posts and reimport from the latest (or given) activity log ZIP.'
+    help = 'Wipe all Facebook posts and reimport from the latest (or given) activity-log export (ZIP or directory).'
 
     def add_arguments(self, parser):
         parser.add_argument(
+            '--source',
             '--zip',
+            dest='source',
             default=None,
-            help='Path to fb-activity-export-*.zip (default: latest in ~/Downloads/)',
+            help=(
+                'Path to fb-activity-export-* (either .zip or a directory; '
+                'default: newest matching entry in ~/Downloads/)'
+            ),
         )
         parser.add_argument(
             '--dry-run',
@@ -63,17 +81,20 @@ class Command(BaseCommand):
         dry_run = options['dry_run']
         preserve_existing = options['preserve_existing']
 
-        # -- Resolve ZIP path --------------------------------------------------
-        zip_arg = options.get('zip')
-        if zip_arg:
-            zip_path = Path(zip_arg).expanduser()
-            if not zip_path.exists():
-                raise CommandError(f'ZIP not found: {zip_path}')
+        # -- Resolve export source (ZIP or directory) --------------------------
+        source_arg = options.get('source')
+        if source_arg:
+            source_path = Path(source_arg).expanduser()
+            if not source_path.exists():
+                raise CommandError(f'Export source not found: {source_path}')
         else:
-            zip_path = _find_latest_zip()
-            if not zip_path:
-                raise CommandError('No fb-activity-export-*.zip found in ~/Downloads/. Pass --zip explicitly.')
-            self.stdout.write(f'Using latest export: {zip_path.name}')
+            source_path = _find_latest_export()
+            if not source_path:
+                raise CommandError(
+                    'No fb-activity-export-* (zip or directory) found in ~/Downloads/. '
+                    'Pass --source explicitly.'
+                )
+            self.stdout.write(f'Using latest export: {source_path.name}')
 
         # -- Output directory --------------------------------------------------
         project_root = Path(__file__).resolve().parents[3]
@@ -87,8 +108,8 @@ class Command(BaseCommand):
         # -- Extract -----------------------------------------------------------
         from extractors.activity_log import extract
 
-        self.stdout.write(f'Extracting {zip_path.name} → {output_dir}/')
-        summary = extract(zip_path, output_dir, media_dir, dry_run=dry_run)
+        self.stdout.write(f'Extracting {source_path.name} → {output_dir}/')
+        summary = extract(source_path, output_dir, media_dir, dry_run=dry_run)
         self.stdout.write(
             f"  Posts: {summary['posts']}  "
             f"media: {summary['media_attached']}  "

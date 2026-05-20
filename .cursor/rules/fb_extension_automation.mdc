@@ -115,6 +115,56 @@ harvest being slow".
   the content script, which sends an init message to the SW — waking
   it. The driver auto-detects a dormant SW and runs the wake step.
 
+## Rule: Don't use `--mode full` for a whole archive — loop iter year-by-year
+
+`--mode full --from-year 2018 --to-year 2026` (the full archive) tries to
+run **one giant `media_zip` IPC call** across all years. Chrome MV3 caps
+`chrome.tabs.sendMessage` async responses at ~5 minutes. A full-archive
+`enrichMediaFromPermalinkFetches` runs ~30 minutes (we observed 686
+reshare candidates × ~700 ms Googlebot fetch each). The IPC channel
+dies long before the work finishes; the driver gets:
+
+  `"A listener indicated an asynchronous response by returning true,
+   but the message channel closed before a response was received"`
+
+…and `zip=FAIL` even though the harvest itself ran (941 posts in
+`chrome.storage`). The enrichment work doesn't checkpoint to storage,
+so re-dispatch restarts enrichment from scratch and hits the same wall.
+
+**Workaround:** loop iter mode year-by-year. Each year stays under the
+5-min window — the busiest observed year (2019: 428 posts; 2020: 442;
+2022: 345 in full mode) finished iter-mode harvest + enrichment + zip
+in 5–8 min each. Each iter run writes its own ZIP.
+
+```bash
+for Y in 2018 2019 2020 2021 2022 2023 2024 2025 2026; do
+  uv run --with websockets --no-project python3 \
+    tools/fb_activity_log_extension/automation/drive_via_cdp.py \
+    --mode iter --year "$Y" --with-media --max-items 0
+  sleep 5  # let Chrome settle between years
+done
+```
+
+Bonus: iter mode often captures MORE items per year than full mode —
+full-mode's per-year scroll-stable detection can fire prematurely when
+the whole-archive page is huge (observed 2018: 26 items in full mode
+vs 223 in iter mode). Until that's investigated, prefer iter.
+
+**Future fix (extension side):** split `media_zip` into checkpointed
+phases — `start_enrichment` returns immediately, `poll_progress` reads
+from storage, `build_zip` is short. Or persist enrichment results
+incrementally so re-dispatch resumes from checkpoint instead of zero.
+
+**Don't stack CDP probes during long runs.** When the SW is doing
+heavy work (mass bot fetches), opening many concurrent CDP WebSocket
+connections exhausts Chrome's DevTools server. Symptom: `curl
+http://localhost:9222/json/version` times out; Chrome appears hung.
+Kill stacked connections (`pkill curl`, `pkill -f probe_sw_state`)
+and let CDP settle ~30s. If still wedged, kill the debug Chrome
+instance (find by `ps aux | grep "Chrome-debug-9222"`) — the
+chrome.storage data survives across restarts, but in-flight
+`media_zip` work does not.
+
 ## Rule: Use `--refresh` after long gaps
 
 The slim profile copy doesn't auto-sync. If FB invalidates cookies
