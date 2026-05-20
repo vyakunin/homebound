@@ -526,18 +526,28 @@ const GOOGLEBOT_UA = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google
 
 /**
  * Fetch the public-bot view of a Facebook post (Googlebot UA, no cookies)
- * and extract CDN media URLs. Returns [] on any error.
+ * and return BOTH the CDN media URLs and the authoritative commentary
+ * derived from the page's <title>/og:description.
+ *
+ * Returns { urls: string[], commentary: string | null }.
+ *   commentary === '' → confirmed bare reshare (FB title was just the
+ *     author's name; no user text)
+ *   commentary === '<str>' → user-typed text (overrides DOM extraction)
+ *   commentary === null → couldn't determine (e.g. fetch failed, or the
+ *     page didn't match the expected SSR shape — common for non-public
+ *     posts where FB strips og tags). Caller keeps the DOM value.
  */
-async function fetchMediaViaPublicBotView(postUrl, timeoutMs = 15000) {
+async function fetchPostViaPublicBotView(postUrl, timeoutMs = 15000) {
+  const empty = { urls: [], commentary: null };
   let url;
   try {
     const u = new URL(postUrl);
-    if (!/(\.|^)facebook\.com$/.test(u.host)) return [];
+    if (!/(\.|^)facebook\.com$/.test(u.host)) return empty;
     u.host = 'www.facebook.com';
     u.protocol = 'https:';
     url = u.toString();
   } catch (_) {
-    return [];
+    return empty;
   }
   let res;
   try {
@@ -547,11 +557,15 @@ async function fetchMediaViaPublicBotView(postUrl, timeoutMs = 15000) {
       headers: { 'User-Agent': GOOGLEBOT_UA },
     });
   } catch (_) {
-    return [];
+    return empty;
   }
-  if (!res.ok) return [];
+  if (!res.ok) return empty;
   const html = await res.text();
-  return parseMediaFromPublicBotHtml(html, isAcceptableCdnUrl);
+  const urls = parseMediaFromPublicBotHtml(html, isAcceptableCdnUrl);
+  const commentary = (typeof parseCommentaryFromPublicBotHtml === 'function')
+    ? parseCommentaryFromPublicBotHtml(html)
+    : null;
+  return { urls, commentary };
 }
 
 /**
@@ -596,18 +610,15 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
   const seenKeys = new Set();
   for (const p of postsExport.postsWithText) {
     const postKey = p.postKey || p.url;
-    // For reshare rows, the reshare's own permalink page typically doesn't
-    // expose feedImage markers — it shows Vladimir's commentary wrapped
-    // around a card linking to the original. The ORIGINAL post's permalink
-    // page is where the trusted DOM markers live, so use reshared_from_url
-    // as the fetch target. Manifest sourcePermalink stays as the user's
-    // pfbid (permalinkKey), so attribution remains correct.
-    const rsUrl = (p.reshared_from_url || '').trim();
-    const useReshareSource =
-      rsUrl.startsWith('http') &&
-      rsUrl.includes('facebook.com') &&
-      'reshareCommentary' in p;
-    const fetchUrl = (useReshareSource ? rsUrl : (p.url || postKey || '')).trim();
+    // Fetch the user's own permalink, not the reshared-from URL. Googlebot
+    // resolves the user's reshare pfbid to a page whose <title> carries the
+    // user's commentary ("X - Vladimir Yakunin" for commented, just
+    // "Vladimir Yakunin" for bare) AND whose og:image is the embedded
+    // original's primary image (FB walks the reshare graph). This gives us
+    // BOTH the right media URL AND the authoritative user-typed text in
+    // one fetch — earlier versions used reshared_from_url which only gave
+    // us media and made title-derived commentary refer to the wrong post.
+    const fetchUrl = (p.url || postKey || '').trim();
     if (!fetchUrl.startsWith('http') || !fetchUrl.includes('facebook.com')) continue;
     if (hasStrongMediaForPermalink(merged, postKey)) continue;
     // Only enrich posts we know likely have media:
@@ -664,6 +675,12 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
       enrichLabel: 'looking up media (GraphQL cache → public-bot fallback)',
     });
   }
+  // commentaryOverrides maps canonicalPermalinkKey(postKey) → authoritative
+  // user-typed text (or '' for confirmed bare reshare). runMediaAndZip
+  // applies these to the post entries so DOM-side body-bleed-through
+  // (text-only originals rendering inline) gets corrected to the truth.
+  const commentaryOverrides = new Map();
+  let commentaryOverrideCount = 0;
   for (let i = 0; i < candidates.length; i++) {
     if (token?.cancelled) break;
     const cand = candidates[i];
@@ -672,14 +689,18 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     let urls = lookupCachedPostMedia(cand.permalinkKey, fbId);
     let method = 'graphql_cache';
     let methodNote = null;
+    let commentary = null;
     if (urls.length === 0) {
       // LAYER B: public-bot fetch — Googlebot UA hits FB's crawler-friendly
-      // SSR view that exposes og:image. ~300ms-1s per post, deterministic.
+      // SSR view that exposes og:image AND authoritative <title>/og:description
+      // (the source of truth for user-typed text). ~300ms-1s per post.
       method = 'public_bot';
       methodNote = `Googlebot-UA fetch of www.facebook.com for ${cand.fetchUrl}`;
       try {
         await delayMs(300 + Math.floor(Math.random() * 400));
-        urls = await fetchMediaViaPublicBotView(cand.fetchUrl);
+        const r = await fetchPostViaPublicBotView(cand.fetchUrl);
+        urls = r.urls;
+        commentary = r.commentary;
         botFetches += 1;
         if (urls.length > 0) botHits += 1;
       } catch (e) {
@@ -691,6 +712,14 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
       }
     } else {
       cacheHits += 1;
+    }
+    // Stash commentary override (only when bot path was used + returned non-null).
+    if (commentary !== null) {
+      const canonKey = canonicalPermalinkKey(cand.permalinkKey);
+      if (canonKey) {
+        commentaryOverrides.set(canonKey, commentary);
+        commentaryOverrideCount += 1;
+      }
     }
     // Dedupe + filter
     const seen = new Set();
@@ -705,6 +734,8 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
       enrichIndex: i, permalinkKey: cand.permalinkKey, fetchUrl: cand.fetchUrl,
       method, methodNote, urlsFound: urls.length, acceptableUrls: acceptable.length,
       sample: acceptable.slice(0, 3),
+      commentaryOverride: (commentary === null) ? undefined
+        : (commentary === '' ? '<empty>' : commentary.slice(0, 80)),
     });
     for (const u of acceptable) {
       out.push({ url: u, sourcePermalink: cand.permalinkKey, context: 'post' });
@@ -720,13 +751,13 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
   permalinkDebug.enrichStop = {
     reason: token?.cancelled ? 'cancelled' : 'complete',
     wallMsElapsed: Date.now() - enrichT0,
-    cacheHits, botFetches, botHits,
+    cacheHits, botFetches, botHits, commentaryOverrideCount,
     candidates: candidates.length,
   };
   if (candidates.length > 0) {
-    console.info(`[fb-export] enrich done: ${cacheHits} cache hits, ${botFetches} bot fetches (${botHits} non-empty), ${imagesFound} media items, ${Math.round((Date.now() - enrichT0) / 1000)}s wall`);
+    console.info(`[fb-export] enrich done: ${cacheHits} cache hits, ${botFetches} bot fetches (${botHits} non-empty), ${imagesFound} media items, ${commentaryOverrideCount} commentary overrides, ${Math.round((Date.now() - enrichT0) / 1000)}s wall`);
   }
-  return { out, reactionCounts, allLinkAttachments, htmlDumps, permalinkDebug };
+  return { out, reactionCounts, allLinkAttachments, htmlDumps, permalinkDebug, commentaryOverrides };
 }
 
 /** First URL in a srcset (Activity Log often uses srcset-only <img> with no src). */
@@ -919,15 +950,18 @@ function extractRowTextForAnchor(anchor, targetHref) {
   return t.slice(0, 8000);
 }
 
-// extractReshareCommentary + rowHasReshareThumbnail live in
-// lib/reshare_commentary.js (Node-testable via captured DOM fixtures).
-// content.js calls the lib through a thin adapter that wires in this
-// file's stripActivityNoise + isAcceptableCdnUrl.
+// extractReshareCommentary lives in lib/reshare_commentary.js (Node-testable
+// via captured DOM fixtures). It's the LOW-CONFIDENCE path — when the
+// reshared post is text-only, FB renders the original's body inline and the
+// DOM-side extractor can't tell that apart from genuine commentary. The
+// HIGH-CONFIDENCE path is parseCommentaryFromPublicBotHtml in
+// lib/parse_public_bot.js, applied during enrichMediaFromPermalinkFetches,
+// which overrides this value when the bot fetch returns non-null.
 function extractReshareCommentary(row) {
   if (!row) return '';
   const fn = (typeof globalThis !== 'undefined') ? globalThis.extractReshareCommentary_lib : null;
   if (!fn) return '';
-  return fn(row, { stripActivityNoise, isAcceptableCdnUrl });
+  return fn(row, { stripActivityNoise });
 }
 
 /**
@@ -1844,6 +1878,24 @@ async function runMediaAndZipInner(skipMedia, rawCaps) {
     if (enriched.length) {
       unique = dedupeMediaCandidates([...unique, ...enriched]);
       console.info(`[fb-export] added ${enriched.length} image URL(s) from post permalink HTML (Activity Log list had few/no thumbnails)`);
+    }
+    // Apply authoritative commentary overrides (from Googlebot <title>/og:description)
+    // back onto the post entries. The DOM-side extractor returns body-bleed-through
+    // for bare reshares of text-only originals — this corrects those.
+    const overrides = enrichedResult.commentaryOverrides;
+    if (overrides && overrides.size && Array.isArray(posts?.postsWithText)) {
+      let applied = 0;
+      for (const p of posts.postsWithText) {
+        if (!('reshareCommentary' in p)) continue;
+        const k = canonicalPermalinkKey(p.postKey || p.url);
+        if (!k || !overrides.has(k)) continue;
+        const truth = overrides.get(k);
+        if (p.reshareCommentary !== truth) {
+          p.reshareCommentary = truth;
+          applied += 1;
+        }
+      }
+      if (applied) console.info(`[fb-export] overrode ${applied} reshareCommentary value(s) from Googlebot authoritative source`);
     }
   } else if (skipMedia) {
     permalinkDebugExport.permalinkEnrich = { skipped: true, reason: 'wizard_skip_media' };

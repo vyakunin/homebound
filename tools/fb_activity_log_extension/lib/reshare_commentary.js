@@ -60,25 +60,35 @@ function _stripChromeTrailer(t) {
 }
 
 /**
- * Extract Vladimir-typed commentary from a "shared a post." Activity-Log row.
+ * DOM-side commentary extractor: best-effort guess from the Activity Log row
+ * by stripping anchors + activity noise.
  *
- * @param {Element} row  cloned (caller's responsibility) or live DOM row
+ * **Important: this is the LOW-CONFIDENCE path.** When the reshared post is
+ * text-only and FB renders its body inline (no thumbnail to display), the
+ * body bleeds into this extractor's output — it sees plain text and can't
+ * tell apart "Vladimir typed this commentary" from "FB rendered the
+ * original's body here as a preview." A previous version of this function
+ * had a >200-char heuristic to suppress likely body-bleed-through, but
+ * that wrongly nukes legitimate long commentary on text-only originals
+ * (regression test: parseCommentaryFromPublicBotHtml LONG-commentary test).
+ *
+ * The HIGH-CONFIDENCE path is parseCommentaryFromPublicBotHtml against a
+ * Googlebot-UA fetch of the user's own reshare permalink (see
+ * lib/parse_public_bot.js). content.js's enrichMediaFromPermalinkFetches
+ * calls that during enrichment and overrides the DOM-extracted value when
+ * the bot path returns non-null.
+ *
+ * This function returns the raw DOM extraction with no heuristic suppression
+ * — accepting that bare-reshare-of-text-original rows produce body-bleed-through
+ * here, on the assumption that enrichment will correct it.
+ *
+ * @param {Element} row
  * @param {object} deps
  * @param {(s: string) => string} deps.stripActivityNoise
- * @param {(url: string) => boolean} deps.isAcceptableCdnUrl
- * @returns {string} '' for bare reshare; commentary text otherwise.
- *
- * Bare-reshare-of-text-original guard: when the reshared post is text-only
- * (no media → no thumbnail), FB renders the original's BODY inline in the
- * same div that would otherwise hold the user's commentary. Stripping
- * anchors leaves that body intact, so without this guard we'd mis-attribute
- * the original body as commentary. Detect by absence of any
- * isAcceptableCdnUrl thumbnail in the row; if extracted text is also
- * substantial (>200 chars), treat as bare-reshare and emit ''.
+ * @returns {string}
  */
-function extractReshareCommentary(row, { stripActivityNoise, isAcceptableCdnUrl }) {
+function extractReshareCommentary(row, { stripActivityNoise }) {
   if (!row) return '';
-  const hasThumbnail = rowHasReshareThumbnail(row, isAcceptableCdnUrl);
   const clone = row.cloneNode(true);
   clone.querySelectorAll('script,style').forEach((n) => n.remove());
   // Strip every anchor — the embedded original's preview card is wrapped
@@ -94,10 +104,6 @@ function extractReshareCommentary(row, { stripActivityNoise, isAcceptableCdnUrl 
   t = t.replace(/^[\s\S]*?\bshared\s+a\b[^.]*\.\s*/i, '').trim();
   t = _stripChromeLines(t);
   t = _stripChromeTrailer(t);
-
-  if (!hasThumbnail && t.length > 200) {
-    return '';
-  }
   return t;
 }
 

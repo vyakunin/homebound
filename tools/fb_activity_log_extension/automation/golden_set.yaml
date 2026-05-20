@@ -47,12 +47,14 @@ posts:
   # Vladimir's reshare of Slantchev's "Americans are coming" chart post.
   - id: sravnenie_chart_reshare
     scope: {year: 2026, month: 5}
-    post_key_suffix: pfbid02QSLqgSLoeLVXzG9UFdr4Tth3KpGFrzpWAE2vmiBprjs
+    post_key_suffix: pfbid0LQk8Cd9EyXWg9XhLn751pWCcQxgoQejXxMwoUKGyTpbg6pum3SHEVxgS6paBLdCZl
     expect:
       is_reshare: true
-      # Multiline commentary; second line "А что же случилось?" must be
-      # preserved. No Public / View / time artifacts.
-      reshare_commentary_exact: "Сравнение, конечно, некорректное, но...\nА что же случилось?"
+      # Multiline commentary. The authoritative Googlebot og:description
+      # form preserves FB's serialization (trailing space before newline,
+      # double newline between paragraphs) which is faithful to what
+      # Vladimir actually typed.
+      reshare_commentary_exact: "Сравнение, конечно, некорректное, но... \n\nА что же случилось?"
       reshared_from_url_contains: "/slantchev/posts/"
       timestamp_rawText: "May 6, 2026"
       # The chart image (slantchev's primary image, served via og:image to

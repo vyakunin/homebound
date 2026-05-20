@@ -46,9 +46,73 @@ function parseMediaFromPublicBotHtml(html, isAcceptableCdnUrlFn, opts) {
   return urls;
 }
 
+/**
+ * Parse the authoritative reshare commentary from a Googlebot-UA Facebook
+ * post page. Replaces the brittle "DOM body-bleed heuristic" by using FB's
+ * own SSR-rendered metadata.
+ *
+ * FB serves Googlebot a stripped page with three relevant tags:
+ *   <title>X - {authorDisplayName}</title>        — commented post
+ *   <title>{authorDisplayName}</title>            — bare reshare (no user text)
+ *   <meta property="og:title" content="{authorDisplayName}">
+ *   <meta property="og:description" content="...">
+ *
+ * For bare reshares of text-only originals, FB renders the embedded body
+ * into og:description but NOT into title (title is just the author name).
+ * For commented posts, the title carries the commentary (FB truncates
+ * to ~50 chars and adds "..."), and og:description has the unabridged
+ * version. This is the structural signal we need — no >200-char hack.
+ *
+ * @returns {string | null}
+ *   ''     — confirmed bare reshare (no user-typed text)
+ *   <str>  — user-typed text (commentary on a reshare OR caption on a
+ *            non-reshare; caller decides whether to apply it as commentary)
+ *   null   — couldn't determine (Googlebot returned an unrecognised shape;
+ *            caller should fall back to DOM extraction)
+ */
+function parseCommentaryFromPublicBotHtml(html, opts) {
+  if (!html || html.length < 200) return null;
+  const Ctor = opts?.DOMParserCtor || (typeof DOMParser !== 'undefined' ? DOMParser : null);
+  if (!Ctor) return null;
+  const doc = new Ctor().parseFromString(html, 'text/html');
+
+  const titleText = (doc.querySelector('title')?.textContent || '').trim();
+  if (!titleText) return null;
+
+  const ogTitleEl = doc.querySelector('meta[property="og:title"]');
+  const ogTitle = (ogTitleEl?.getAttribute('content') || '').trim();
+  // Display name MUST be present + non-trivial; otherwise we can't anchor.
+  if (!ogTitle || ogTitle.length < 2) return null;
+
+  // Bare reshare: <title> is exactly the author display name.
+  if (titleText === ogTitle) return '';
+
+  // Commented / captioned: <title> = "X - {authorDisplayName}".
+  const sep = ' - ';
+  const suffix = sep + ogTitle;
+  if (!titleText.endsWith(suffix)) return null;
+  const titlePrefix = titleText.slice(0, titleText.length - suffix.length);
+
+  // Prefer og:description when it carries a longer version starting with
+  // the same head (FB truncates title to ~50 chars with "..." marker;
+  // og:description has the unabridged text).
+  const ogDescEl = doc.querySelector('meta[property="og:description"]');
+  const ogDesc = (ogDescEl?.getAttribute('content') || '').trim();
+  if (ogDesc && ogDesc.length > titlePrefix.length) {
+    // Strip FB's truncation marker (one or more trailing dots) from the
+    // title prefix, then check if og:description starts with that head.
+    const head = titlePrefix.replace(/[.…]+\s*$/, '').slice(0, 20).trim();
+    if (head && ogDesc.startsWith(head)) {
+      return ogDesc;
+    }
+  }
+  return titlePrefix;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseMediaFromPublicBotHtml };
+  module.exports = { parseMediaFromPublicBotHtml, parseCommentaryFromPublicBotHtml };
 }
 if (typeof globalThis !== 'undefined') {
   globalThis.parseMediaFromPublicBotHtml = parseMediaFromPublicBotHtml;
+  globalThis.parseCommentaryFromPublicBotHtml = parseCommentaryFromPublicBotHtml;
 }
