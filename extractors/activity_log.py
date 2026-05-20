@@ -857,6 +857,10 @@ def extract(
         # Track which source_ids are reshare entries ("shared a post." prefix)
         is_reshare_by_source_id: dict[str, bool] = {}
         reshare_commentary_by_source_id: dict[str, str] = {}  # unused; kept for ZIP compat
+        # Extension v2.8.x records the resolved reshare target URL per post (from the
+        # Googlebot-rendered permalink). Authoritative when present — covers self-
+        # reshares that pair-linking can't match (own_profile == other_profile).
+        reshared_from_url_by_source_id: dict[str, str] = {}
 
         skipped_no_id = 0
         skipped_no_text = 0
@@ -924,6 +928,9 @@ def extract(
                 rc = raw.get('reshareCommentary')
                 if rc is not None:
                     reshare_commentary_by_source_id[source_id] = _clean_reshare_commentary(str(rc))
+                rfu = (raw.get('reshared_from_url') or '').strip()
+                if rfu:
+                    reshared_from_url_by_source_id[source_id] = rfu
 
         # ---------- Detect own profile ----------
         # Needed before media attachment to reclassify Marketplace/memory posts.
@@ -949,6 +956,10 @@ def extract(
                     continue
                 # Already pair-linked reshares have reshared_from set — skip those
                 if record.reshared_from and record.reshared_from.url:
+                    continue
+                # Extension-resolved reshare target — keep the reshare flag even
+                # without commentary (a self-reshare with an empty commentary box).
+                if reshared_from_url_by_source_id.get(sid):
                     continue
                 try:
                     post_profile = urlparse(record.source_url).path.strip('/').split('/')[0]
@@ -1219,11 +1230,18 @@ def extract(
                 post_profile = ''
             if own_profile and post_profile == own_profile:
                 rc = reshare_commentary_by_source_id.get(sid, '')
-                if rc:
-                    # User reshared someone else's post WITH commentary.
-                    # content_text is the user's commentary; the original post
-                    # content was not captured.  Keep content_text as-is and
-                    # mark as a reshare with unknown source.
+                rfu = reshared_from_url_by_source_id.get(sid, '')
+                if rfu:
+                    # Extension resolved the original via the Googlebot permalink.
+                    # Works for self-reshares (pair-linking can't match own→own).
+                    record.reshared_from = ResharedFrom(
+                        url=rfu,
+                        author=_author_from_url(rfu, slug_to_name),
+                    )
+                elif rc:
+                    # User reshared someone else's post WITH commentary, but the
+                    # extension couldn't resolve the original URL. Keep content_text
+                    # (user's commentary) and mark the source as unknown.
                     record.reshared_from = ResharedFrom(
                         content_text='(original post not available)',
                     )

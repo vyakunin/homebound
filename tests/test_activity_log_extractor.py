@@ -886,6 +886,92 @@ class TestResharePairLinking:
         )
 
 
+class TestExtensionResharedFromUrl:
+    """Extension v2.8.x records `reshared_from_url` per post — the resolved
+    permalink of the original being reshared, extracted from the Googlebot
+    HTML of the reshare's own permalink. This is the authoritative signal
+    for pair-linking; pair-linking-by-other-profile is a fallback for
+    older exports.
+
+    Regression: a self-reshare (user reshares one of their own earlier posts)
+    has both entries on `own_profile`, so the legacy other-profile pair
+    walker matches nothing, leaving `reshared_from.url=''` and rendering
+    "(original post not available)" in the embed slot.
+    """
+
+    def _extract_self_reshare(self, tmp_path) -> list:
+        # User on Apr 7 reshares their own Jan 3 status post. Both entries
+        # live on `vyakunin/posts/...`. Extension JSON gives us the original
+        # permalink directly via `reshared_from_url`.
+        reshare_entry = {
+            "fbId": "pfbid0RESHARE",
+            "url": "https://www.facebook.com/vyakunin/posts/pfbid0RESHARE",
+            "postKey": "https://www.facebook.com/vyakunin/posts/pfbid0RESHARE",
+            "timestamp": {"utime": 1712534400},
+            "text": "shared a .Как это часто бывает, не надо торопиться признавать ошибку.Public10:36 PMView",
+            "reshareCommentary": "Как это часто бывает, не надо торопиться признавать ошибку.",
+            "reshared_from_url": "https://www.facebook.com/vyakunin/posts/pfbid0ORIGINAL",
+        }
+        original_entry = {
+            "fbId": "pfbid0ORIGINAL",
+            "url": "https://www.facebook.com/vyakunin/posts/pfbid0ORIGINAL",
+            "postKey": "https://www.facebook.com/vyakunin/posts/pfbid0ORIGINAL",
+            "timestamp": {"utime": 1704240000},
+            "text": "updated his status.Мой прогноз не оправдался.Public",
+        }
+        filler_posts = [
+            {
+                "fbId": f"4000008000{i}",
+                "url": f"https://www.facebook.com/vyakunin/posts/4000008000{i}",
+                "timestamp": {"utime": 1700000000 + i},
+                "text": f"added a new photo.Filler {i}Public",
+            }
+            for i in range(3)
+        ]
+        posts = {
+            "collectedAt": "2026-04-07T22:00:00.000Z",
+            "postsWithText": filler_posts + [reshare_entry, original_entry],
+        }
+        (tmp_path / "test.zip").write_bytes(make_zip(posts))
+        extract(tmp_path / "test.zip", tmp_path / "out", dry_run=False)
+        return [
+            r for r in read_records(tmp_path / "out" / "posts.binpb")
+            if not r.source_id.startswith("400000")
+        ]
+
+    def test_self_reshare_attributes_to_original_url(self, tmp_path):
+        records = self._extract_self_reshare(tmp_path)
+        reshare = next((r for r in records if 'торопиться' in r.content_text), None)
+        assert reshare is not None, "reshare row must survive extraction"
+        assert reshare.reshared_from is not None
+        assert reshare.reshared_from.url, (
+            "reshared_from.url must be populated from the extension's "
+            "reshared_from_url field — bug shipped 2026-05-20 left this empty "
+            "for self-reshares and the site rendered '(original post not available)'"
+        )
+        assert "pfbid0ORIGINAL" in reshare.reshared_from.url
+
+    def test_self_reshare_keeps_user_commentary(self, tmp_path):
+        records = self._extract_self_reshare(tmp_path)
+        reshare = next((r for r in records if 'торопиться' in r.content_text), None)
+        assert reshare is not None
+        assert "Как это часто бывает" in reshare.content_text
+        # The original body lives in a separate record (the Jan 3 post); the
+        # reshare embed renders by FB iframe at view time, not from the blockquote.
+        assert reshare.reshared_from.content_text == "" or (
+            "(original post not available)" not in reshare.reshared_from.content_text
+        )
+
+    def test_self_reshare_does_not_render_unavailable_placeholder(self, tmp_path):
+        records = self._extract_self_reshare(tmp_path)
+        reshare = next((r for r in records if 'торопиться' in r.content_text), None)
+        assert reshare is not None
+        # This is the literal string the buggy code put into the blockquote
+        # when pair-linking failed; it must NEVER appear when the extension
+        # supplied an authoritative reshared_from_url.
+        assert "(original post not available)" not in reshare.reshared_from.content_text
+
+
 class TestStripCommentParams:
     def test_strips_comment_id(self):
         url = "https://www.facebook.com/vyakunin/posts/pfbid0abc?comment_id=12345"
