@@ -1,12 +1,19 @@
-"""Django management command: wipe all Facebook posts and reimport from a ZIP export.
+"""Django management command: reimport Facebook posts from a ZIP export.
 
 Finds the latest fb-activity-export-*.zip in ~/Downloads/ unless --zip is given.
 Extracts to output/activity_log/ in the project root, then runs the full import.
 
+By default this WIPES every existing FB post before importing — destroys any
+embeddings on those rows. Pass --preserve-existing to keep existing posts:
+import_posts then runs in update mode (existing rows updated by source_id;
+new rows created). content_hash on each post lets the next embedding pass
+re-embed only the rows whose text actually changed.
+
 Usage:
-    manage.py fb_reimport                        # auto-picks latest ZIP from ~/Downloads/
+    manage.py fb_reimport                          # WIPE + reimport (destroys embeddings)
+    manage.py fb_reimport --preserve-existing      # update-in-place; keep embeddings
     manage.py fb_reimport --zip /path/to/file.zip
-    manage.py fb_reimport --dry-run              # extract only, no DB changes
+    manage.py fb_reimport --dry-run                # extract only, no DB changes
 """
 import logging
 import shutil
@@ -41,9 +48,20 @@ class Command(BaseCommand):
             default=False,
             help='Extract only — report what would be imported without touching the DB.',
         )
+        parser.add_argument(
+            '--preserve-existing',
+            action='store_true',
+            default=False,
+            help=(
+                'Skip the wipe step; instead update existing posts in place by source_id. '
+                'Embeddings persist on update (content_hash drives the next embedding '
+                'pass to re-embed only the rows whose text actually changed).'
+            ),
+        )
 
     def handle(self, *args, **options):
         dry_run = options['dry_run']
+        preserve_existing = options['preserve_existing']
 
         # -- Resolve ZIP path --------------------------------------------------
         zip_arg = options.get('zip')
@@ -86,9 +104,16 @@ class Command(BaseCommand):
             self.stdout.write('Dry run — stopping before DB changes.')
             return
 
-        # -- Wipe Facebook posts -----------------------------------------------
-        deleted, _ = Post.objects.filter(source=PostSource.FACEBOOK).delete()
-        self.stdout.write(f'Wiped {deleted} existing Facebook post(s).')
+        # -- Wipe (default) or preserve (opt-in) -------------------------------
+        if preserve_existing:
+            existing = Post.objects.filter(source=PostSource.FACEBOOK).count()
+            self.stdout.write(
+                f'Preserving {existing} existing Facebook post(s); '
+                f'import_posts will update by source_id and re-embed via content_hash.'
+            )
+        else:
+            deleted, _ = Post.objects.filter(source=PostSource.FACEBOOK).delete()
+            self.stdout.write(f'Wiped {deleted} existing Facebook post(s).')
 
         # -- Import ------------------------------------------------------------
         self.stdout.write('Importing...')
@@ -97,7 +122,7 @@ class Command(BaseCommand):
             source='facebook_activity_log',
             file=str(binpb_path),
             media_dir=str(media_dir),
-            update_existing=False,
+            update_existing=preserve_existing,
             dry_run=False,
             profile_links=str(output_dir / 'profile_links.json') if (output_dir / 'profile_links.json').exists() else None,
             stdout=self.stdout,
