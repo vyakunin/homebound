@@ -2,9 +2,11 @@ from django.db import models
 from django.utils.text import slugify
 from pgvector.django import VectorField
 
-# Embedding dimension for Voyage's `voyage-3-lite` model. Kept as a module
+# Embedding dimension for Voyage's `voyage-3.5` model. Kept as a module
 # constant so the migration, model field, and embeddings adapter agree on it.
-EMBEDDING_DIM = 512
+# Migration history: 0006 created at 512 (voyage-3-lite), 0011 promoted to
+# 1024 (voyage-3.5) for measurably better cross-lingual recall.
+EMBEDDING_DIM = 1024
 
 
 class PostSource(models.IntegerChoices):

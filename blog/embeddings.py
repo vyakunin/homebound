@@ -16,9 +16,19 @@ When no key is configured every call raises
 ``EmbeddingsUnavailableError`` and the caller is expected to degrade
 gracefully (keyword search still works without embeddings).
 
-Model: ``voyage-3-lite`` at 512 dimensions — kept in sync with
-``Post.EMBEDDING_DIM`` and the migration. ~$0.02/1M tokens; backfilling
-the entire 11k-post corpus is well under a dollar.
+Model: ``voyage-3.5`` at 1024 dimensions — kept in sync with the
+migrations 0006 (vector(1024)) + 0011 (model rebump). voyage-3.5 has
+materially better cross-lingual recall than voyage-3-lite at the cost
+of a 2x dim (irrelevant at this scale: ~25 MB more on disk) and ~3x
+per-token price ($0.06 vs $0.02 per 1M). Backfill cost: ~$0.50
+for the full corpus + chunks.
+
+Spike data (10 EN queries → 8 RU seed posts + 50 distractors, May 2026):
+- voyage-3-lite:   mean rank 1.3, hit@1 80%, hit@3 100%
+- voyage-3.5-lite: mean rank 1.2, hit@1 80%, hit@3 100%
+- voyage-3.5:      mean rank 1.1, hit@1 90%, hit@3 100%
+The 90% hit@1 catches the Venezuela query that voyage-3-lite ranked at
+position 2 — exact bug observed in the bot transcripts.
 """
 
 from __future__ import annotations
@@ -35,8 +45,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
-DEFAULT_MODEL = "voyage-3-lite"
-DEFAULT_DIM = 512
+DEFAULT_MODEL = "voyage-3.5"
+DEFAULT_DIM = 1024
 DEFAULT_TIMEOUT_S = 30.0
 # Voyage's per-request batch limit. Backfill hits this often; query-time
 # never gets close (single string per request).
