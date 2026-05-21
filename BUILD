@@ -144,6 +144,7 @@ py_binary(
         "//blog/management/commands:fb_reimport",
         requirement("Django"),
         requirement("psycopg2-binary"),
+        requirement("Pillow"),
         requirement("django-allauth"),
         requirement("requests"),
         requirement("PyJWT"),
