@@ -27,7 +27,7 @@ posts:
     # The harvester also emits a row for the original reel URL — the test
     # only suffix-matches, so anchoring on Vladimir's pfbid is the precise
     # form (and avoids false-matching FB's own canonical reel post).
-    post_key_suffix: pfbid0pAHLYJnbSkivNmN8HTNiqHJg8MjcBJiZm3eX2Y4nupzhPKJZ74vYfyVLpzowbzosl
+    post_key_suffix: pfbid02sXmXAL9DUQQ2d3ivQTezw1KYi3CbLrfkhFMZtVCuZMVmtfBmgWz7iwxa1gUmYR8Bl
     expect:
       is_reshare: true
       # Exact commentary — no "Public6:23 AM" / "View" Activity Log row
@@ -47,7 +47,7 @@ posts:
   # Vladimir's reshare of Slantchev's "Americans are coming" chart post.
   - id: sravnenie_chart_reshare
     scope: {year: 2026, month: 5}
-    post_key_suffix: pfbid0LQk8Cd9EyXWg9XhLn751pWCcQxgoQejXxMwoUKGyTpbg6pum3SHEVxgS6paBLdCZl
+    post_key_suffix: pfbid02QGBqPJ54puNDTaAHjt4SriHmECCSSMhrbjyTNF9DNit8dSrkZyKhkGgJ1oxdKkFTl
     expect:
       is_reshare: true
       # Multiline commentary. The authoritative Googlebot og:description
@@ -82,7 +82,7 @@ posts:
     # Originally suspected of being the chess-pic-on-Apr7 victim of the
     # SPA-pollution bug (v2.8.13–.17 era). v2.8.25 Layer B (public-bot
     # og:image fetch) correctly fetches the actual post photo.
-    post_key_suffix: pfbid02FeSXNBV55zGmMhrYpnVoWbmPDXH46EGU7e4pwcC3Kq8yqTmpFxL1Q2cu7heNkwN5l
+    post_key_suffix: pfbid02FUHX53DLGdAjvuwvBrbpVwib3vEpZokQgBW71rm1vEvvav8p388QAizVxiTg6ot9l
     expect:
       is_reshare: false
       # Caption appears in `text` after the action-label prefix ("added a
@@ -140,7 +140,7 @@ posts:
     # Vladimir's reshare pfbid (Mike's pfbid gets dropped by v2.8.27
     # dedupReshareOriginalSide, since Vladimir's own-namespace entry
     # carries the reshared_from_url pointing at Mike's post).
-    post_key_suffix: pfbid02qgddm3U74eHjDaq6d9iUTwR5Mx6PBxcTyr2w2zikLGY7ikEGwhjfxFsmNXrgf9C9l
+    post_key_suffix: pfbid02qzSA2Yma4zRKM4RQjLzfBvaZNbpoDkpoZa25HYStUgGrb9GRPzGgS7sywNguCHBRl
     expect:
       is_reshare: true
       reshare_commentary_starts_with: "это один из десятка достаточных аргументов не голосовать за Трампа"
