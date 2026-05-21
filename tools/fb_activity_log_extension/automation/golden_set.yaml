@@ -105,8 +105,15 @@ posts:
     scope: {year: 2026, month: 2}
     # Vladimir's reshare permalink for the Feb 24 2026 self-reshare of his
     # own March 2 2022 long-text post about "Что такое Россия". Captured
-    # in the 2026-02 harvest 2026-05-20.
-    post_key_suffix: pfbid02oick7TXPr6mNKXfigEjfu3HKprGdaf7Z2UCgwEa6hKudDY1fmpBN7PUCkZiF3wGml
+    # in the 2026-02 harvest 2026-05-21 — FB pfbids drift across viewing
+    # contexts (see also april7_gplus_memorial), update on next mismatch.
+    # Pinning v2.8.31 fix: when the activity-log row anchors on the
+    # original's URL (url == reshared_from_url), the content.js
+    # enrichment loop forces reshareCommentary='' because Googlebot
+    # returns the original page (title="body - Author") and can't tell
+    # bare-vs-commented. The other row anchored on the actual reshare
+    # pfbid below also gets '' through the normal Googlebot title path.
+    post_key_suffix: pfbid0kAyZCHu2zsk8QSNGrZzLZSbMGwRrD53xUDiLZ8MntLt1Kzo43Y4EdnQBp1JTP73ul
     expect:
       is_reshare: true
       reshare_commentary_exact: ""
@@ -160,6 +167,46 @@ posts:
       # forces a re-pin once the fix lands.
       media_count_exact: 0
       media_sha256: []
+
+  # ─── 6: 2014 Dec 21 "Дебильчик" post + phantom-row guard ────────────────
+  # Vladimir's Dec 21 2014 post about Roskomnadzor / Navalny. The
+  # extension's row-anchor scanner has historically also picked up an
+  # EMBEDDED video preview link
+  # (/vyakunin/videos/843193369029416/?idorvanity=1425133237723661) as
+  # a SECOND row anchor; findRowContainer walks up to the whole page
+  # chrome so the captured text is the activity-log shell prefixed
+  # with "Your posts, photos and videosAllArchiveTrashChange Audience…"
+  # and the timestamp falls to epoch-1970 in the Python importer.
+  # v2.8.32 rejects `idorvanity`-bearing URLs as row anchors.
+  - id: vyakunin_2014_debilchik_post
+    scope: {year: 2014, month: 12}
+    # Real Dec 21 2014 post permalink (pfbid form, captured in
+    # 2014-12 harvest 2026-05-21). FB pfbids drift; update on mismatch.
+    post_key_suffix: pfbid0c9db4iyMDNHQsvKRoW6XcTHERorQCDCphzxWb3ka74ckgSpaYrS74mHxzhBga1mDl
+    expect:
+      is_reshare: false
+      commentary_or_reshare_commentary_contains:
+        - "Дебильчики"
+      timestamp_rawText: "December 21, 2014"
+      # Pinning v2.8.32 chrome-bleed guard: text must NOT contain the
+      # activity-log shell prefix "Your posts, photos and videos" (the
+      # prior phantom row's findRowContainer captured the whole page).
+      text_must_not_contain:
+        - "Your posts, photos and videos"
+        - "AllArchiveTrash"
+      # The Dec 21 "shared a link" Navalny post carries one link-card
+      # preview image. Captured 2026-05-21.
+      media_count_exact: 1
+      media_sha256:
+        - 63ef318d96b5d0d0ceba6e04a4e622b1158335cdc67c49e27839132c6f655058
+
+  # Phantom-row guard: the /videos/843193369029416/?idorvanity=… URL
+  # must NOT appear as a row anchor in the 2014-12 scope.
+  - id: vyakunin_2014_phantom_video_idorvanity
+    scope: {year: 2014, month: 12}
+    post_key_suffix: "videos/843193369029416"
+    expect:
+      must_be_absent: true
 
 # Comments goldens. comments-own-posts-only is OFF by default in the
 # wizard (training-data mode → harvest comments on others' posts too).

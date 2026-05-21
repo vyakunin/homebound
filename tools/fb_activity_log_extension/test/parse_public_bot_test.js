@@ -111,6 +111,26 @@ test('parseCommentaryFromPublicBotHtml: bare self-reshare returns "" (february)'
   assert.equal(out, '', `expected '' for bare reshare; got ${JSON.stringify((out || '').slice(0, 100))}`);
 });
 
+test('parseCommentaryFromPublicBotHtml: FB-drifted self-reshare URL returns BODY (documents the limitation v2.8.31 override fixes)', () => {
+  // When the activity-log row anchors on the original's URL (instead of the
+  // reshare's own pfbid), Googlebot fetches the original's page directly.
+  // FB then serves title="{body prefix} - {author}" (the commented format)
+  // — there's no way to distinguish bare-reshare from real commentary from
+  // the HTML alone. The parser correctly returns the body (it cannot know
+  // the URL is anchored on the original's). content.js v2.8.31 carries an
+  // isSelfReshareSameUrl flag set at candidate-build time (url ===
+  // reshared_from_url AND the row carries reshareCommentary) — when that
+  // flag is true the enrichment loop forces commentary='' regardless of
+  // what this parser returned. Fixture captured 2026-05-21.
+  const html = fs.readFileSync(
+    path.join(FIX, 'vyakunin_february_bare_self_reshare_googlebot_drifted.html'),
+    'utf8',
+  );
+  const out = parseCommentaryFromPublicBotHtml(html, { DOMParserCtor: jsdomParserCtor() });
+  assert.ok(out && out.length > 50, `expected body (long); got ${JSON.stringify((out || '').slice(0, 100))}`);
+  assert.ok(out.startsWith('Что такое Родина?'), `expected body to start with "Что такое Родина?"; got ${JSON.stringify(out.slice(0, 100))}`);
+});
+
 test('parseCommentaryFromPublicBotHtml: short commentary preserved (nuff said)', () => {
   const html = fs.readFileSync(
     path.join(FIX, 'vyakunin_nuff_said_reshare_googlebot.html'),

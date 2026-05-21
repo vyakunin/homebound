@@ -242,6 +242,19 @@ def check_entry(entry: GoldenEntry, posts: list[PostRecord], manifest: list[Medi
                 export_dir: pathlib.Path) -> CheckOutcome:
     """Run every expectation on the extracted record. Returns a CheckOutcome."""
     p = find_post_record(posts, entry.post_key_suffix)
+    must_be_absent = bool(entry.expect.get("must_be_absent"))
+    if must_be_absent:
+        # Negative-match entry: PASS if the suffix does NOT appear in posts.
+        if p is None:
+            return CheckOutcome(
+                entry_id=entry.id, result=CheckResult.PASS, diffs=[],
+                post_key=None, media_count=0,
+            )
+        return CheckOutcome(
+            entry_id=entry.id, result=CheckResult.FAIL,
+            diffs=[f"phantom row present: postKey={p.post_key!r} matches forbidden suffix {entry.post_key_suffix!r}"],
+            post_key=p.post_key, media_count=0,
+        )
     if not p:
         return CheckOutcome(
             entry_id=entry.id,
@@ -325,6 +338,9 @@ def _check_text(e: dict, p: PostRecord) -> list[str]:
     for needle in e.get("text_contains", []) or []:
         if needle not in p.text:
             diffs.append(f"text should contain {needle!r}, got {p.text[:200]!r}")
+    for forbidden in e.get("text_must_not_contain", []) or []:
+        if forbidden in p.text:
+            diffs.append(f"text must NOT contain {forbidden!r}, got {p.text[:200]!r}")
     return diffs
 
 

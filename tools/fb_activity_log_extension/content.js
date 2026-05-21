@@ -634,7 +634,19 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
     const pk = canonicalPermalinkKey(postKey);
     if (!pk || seenKeys.has(pk)) continue;
     seenKeys.add(pk);
-    candidates.push({ fetchUrl: normalize(fetchUrl), permalinkKey: pk });
+    // Self-reshare-same-URL detection: activity-log rows sometimes anchor on
+    // the embedded original's URL rather than the reshare's own pfbid. The
+    // Googlebot fetch then returns the ORIGINAL post's HTML — title="body -
+    // Author" (commented format) regardless of whether the row carries
+    // commentary. parseCommentaryFromPublicBotHtml cannot disambiguate. We
+    // mark these candidates so the override step forces commentary=''
+    // (bare-reshare interpretation: if there were real commentary, FB
+    // would have created a distinct pfbid for the reshare row).
+    const isReshareRow = ('reshareCommentary' in p);
+    const rfu = (p.reshared_from_url || '').trim();
+    const isSelfReshareSameUrl = isReshareRow && rfu
+      && canonicalPermalinkKey(rfu) === canonicalPermalinkKey(fetchUrl);
+    candidates.push({ fetchUrl: normalize(fetchUrl), permalinkKey: pk, isSelfReshareSameUrl });
   }
   // Posts whose action label says "added N photos/videos" are known to have media —
   // always include them in enrichment regardless of the manual allowlist.
@@ -712,6 +724,12 @@ async function enrichMediaFromPermalinkFetches(postsExport, merged, token, caps)
       }
     } else {
       cacheHits += 1;
+    }
+    // Self-reshare-same-URL: Googlebot returns the original's page so its
+    // title carries the original's body, not the reshare's commentary.
+    // Force '' — a commented self-reshare would have a distinct pfbid.
+    if (cand.isSelfReshareSameUrl) {
+      commentary = '';
     }
     // Stash commentary override (only when bot path was used + returned non-null).
     if (commentary !== null) {
@@ -1172,6 +1190,14 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
     if (!postKey.includes('/posts/') && !postKey.includes('pfbid') && !postKey.includes('story_fbid') && !postKey.includes('permalink') && !postKey.includes('/photo') && !postKey.includes('/reel/') && !postKey.includes('/videos/')) {
       continue;
     }
+    // Reject FB context-link URLs: /videos/<id>/?idorvanity=<vid> is the
+    // shape FB uses to anchor an EMBEDDED video preview inside a row —
+    // never a row's own permalink. When findRowContainer walked up too
+    // far on such anchors (e.g. the 2014 Dec 21 case) the captured text
+    // included the activity-log page chrome ("Your posts, photos and
+    // videosAllArchiveTrashChange Audience...") producing a phantom row
+    // that fell to epoch-1970 in the importer.
+    if (/[?&]idorvanity=/.test(href)) continue;
 
     const row = findRowContainer(a);
     // Per-row dedup (v2.8.22): if this row has a preferred (own-profile)
