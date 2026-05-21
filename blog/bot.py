@@ -56,6 +56,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TOP_K = 10
 
+# OpenRouter downstream-provider allowlist (preference order).
+# Observed stable for both deepseek/deepseek-chat-v3 and
+# qwen/qwen-2.5-72b-instruct. Update when failure logs show one
+# of these going sour, or when a new downstream proves itself.
+# allow_fallbacks=False (see _call_openrouter) means OR will NOT
+# silently fall back to providers outside this list.
+OPENROUTER_PROVIDER_ORDER = ("DeepInfra", "Fireworks", "Together", "DeepSeek")
+
+# Models we trust to be the Anthropic safety net when OpenRouter fails
+# end-to-end (every allowlisted downstream errored). Picked for cost +
+# latency: Haiku at $0.80/$4 per Mtok is roughly OR-comparable for a
+# fallback, and runs in ~3s. The fallback intentionally does NOT switch
+# language personas — RU questions still get the RU persona, just
+# served by Haiku instead of DeepSeek.
+ANTHROPIC_FALLBACK_MODEL = "claude-haiku-4-5"
+
 FALLBACK_PERSONA = """\
 You are a chatbot speaking AS Vladimir Yakunin (first-person),
 answering visitor questions from his public multilingual blog.
@@ -623,10 +639,31 @@ def answer(
     user_msg = _build_user_message(question, hits)
 
     t0 = time.monotonic()
+    fallback_from_openrouter = False
     try:
         if is_openrouter:
-            text, input_tokens, output_tokens, cache_read, resolved_model = \
-                _call_openrouter(model, persona, user_msg, max_tokens)
+            try:
+                text, input_tokens, output_tokens, cache_read, resolved_model = \
+                    _call_openrouter(model, persona, user_msg, max_tokens)
+            except (httpx.HTTPError, ValueError) as e:
+                # OpenRouter call failed end-to-end — every allowlisted
+                # downstream errored, or the request was rejected at the
+                # OR edge. Fall back to Haiku on Anthropic so the visitor
+                # still gets an answer (slightly worse RU phrasing, but
+                # the persona + retrieval are unchanged).
+                if not _api_key():
+                    # No Anthropic key to fall back to. Let the original
+                    # error surface.
+                    raise
+                logger.warning(
+                    "OpenRouter call failed (%s); falling back to %s",
+                    e, ANTHROPIC_FALLBACK_MODEL,
+                )
+                fallback_from_openrouter = True
+                text, input_tokens, output_tokens, cache_read, resolved_model = \
+                    _call_anthropic(
+                        ANTHROPIC_FALLBACK_MODEL, persona, user_msg, max_tokens,
+                    )
         else:
             text, input_tokens, output_tokens, cache_read, resolved_model = \
                 _call_anthropic(model, persona, user_msg, max_tokens)
@@ -713,14 +750,15 @@ def _call_openrouter(
                     {"role": "system", "content": persona},
                     {"role": "user", "content": user_msg},
                 ],
-                # OpenRouter routes the same model through multiple
-                # downstream providers; the cheap ones (Novita, etc.)
-                # have started 403'ing with "NOT_ENOUGH_BALANCE" mid-day.
-                # Avoid those routes; the official upstream is cheaper
-                # per cost-per-quality than dealing with provider flap.
+                # Pin to a small allowlist of historically-stable downstream
+                # providers. allow_fallbacks=False means OpenRouter refuses
+                # to silently route us through anything else (no surprise
+                # Novita / Lepton / etc. that 403 on NOT_ENOUGH_BALANCE).
+                # Order is preference, not strict — OR tries them in order
+                # until one accepts.
                 "provider": {
-                    "ignore": ["Novita"],
-                    "allow_fallbacks": True,
+                    "order": OPENROUTER_PROVIDER_ORDER,
+                    "allow_fallbacks": False,
                 },
             },
         )

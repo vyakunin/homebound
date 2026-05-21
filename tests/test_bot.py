@@ -498,5 +498,120 @@ def test_response_cache_sonnet_evicts_haiku(monkeypatch):
     assert BotResponseCache.objects.filter(model="claude-haiku-4-5").count() == 0
 
 
+# ── OpenRouter provider allowlist + Anthropic fallback ───────────────
+
+
+@pytest.mark.django_db
+@override_settings(BOT_MODEL_RU="deepseek/deepseek-chat", BOT_DEFAULT_MODEL="claude-haiku-4-5")
+def test_openrouter_failure_falls_back_to_anthropic_haiku(monkeypatch):
+    """When the OpenRouter call raises (e.g. all allowlisted downstreams
+    errored), the bot must transparently fall back to Haiku on Anthropic
+    so the visitor still gets an answer. The fallback model name should
+    appear in the response so the transcript review can spot the pattern."""
+    import httpx
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    fake = _FakeAnthropic()
+    monkeypatch.setattr(bot_module, "Anthropic", lambda **kw: fake)
+
+    def _boom(*a, **kw):
+        raise httpx.ConnectError("OR edge unreachable")
+
+    monkeypatch.setattr(bot_module, "_call_openrouter", _boom)
+    _make_public_post("p1", "t", "тестовый пост о коте", year=2021)
+
+    # RU question → routes to BOT_MODEL_RU (OpenRouter) → fails → Haiku.
+    response = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "как зовут кота?"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert body["model"].startswith("claude-haiku"), \
+        f"expected Haiku fallback, got {body['model']}"
+    # Anthropic was actually called (not just a cache short-circuit).
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.django_db
+@override_settings(BOT_MODEL_RU="deepseek/deepseek-chat")
+def test_openrouter_failure_without_anthropic_key_surfaces_error(monkeypatch):
+    """If OpenRouter fails AND there's no Anthropic key configured, the
+    original OR error must surface (don't silently swallow it)."""
+    import httpx
+    from blog import bot as bot_module
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_PUBLICBOT_API_KEY_FILE", "/nonexistent/path")
+    monkeypatch.setattr(Path, "home", lambda: Path("/nonexistent/home"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+
+    def _boom(*a, **kw):
+        raise httpx.ConnectError("OR edge unreachable")
+
+    monkeypatch.setattr(bot_module, "_call_openrouter", _boom)
+    _make_public_post("p1", "t", "тестовый пост")
+
+    response = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "что-то по-русски?"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 503, response.content
+
+
+def test_openrouter_provider_payload_uses_allowlist():
+    """The OpenRouter call payload must carry the provider allowlist
+    (order + allow_fallbacks=False). This is the entire defence against
+    surprise downstreams like Novita."""
+    from blog import bot as bot_module
+
+    captured: dict = {}
+
+    class _FakeHttpResponse:
+        status_code = 200
+        text = "{}"
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "model": "deepseek/deepseek-chat-v3",
+            }
+
+    class _FakeHttpClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeHttpResponse()
+
+    import blog.bot as bot_mod
+    import httpx as _httpx
+    orig_client = _httpx.Client
+    _httpx.Client = _FakeHttpClient
+    try:
+        # Need a key for the call to proceed past the early-return guard.
+        import os as _os
+        _os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
+        bot_mod._call_openrouter(
+            "deepseek/deepseek-chat", persona="P", user_msg="U", max_tokens=64,
+        )
+    finally:
+        _httpx.Client = orig_client
+
+    payload = captured["json"]
+    assert payload["provider"]["allow_fallbacks"] is False, \
+        "must refuse OR's silent fallback to non-allowlisted providers"
+    order = payload["provider"]["order"]
+    assert list(order) == list(bot_module.OPENROUTER_PROVIDER_ORDER)
+    assert "Novita" not in order
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))
