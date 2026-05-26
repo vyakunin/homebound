@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}About — Vladimir Yakunin{% endblock %}
+{% block meta_description %}About Vladimir Yakunin — personal blog, visa-bulletin.us, and the Ask Vladimir bot.{% endblock %}
+{% block og_description %}About Vladimir Yakunin — personal blog, visa-bulletin.us, and the Ask Vladimir bot.{% endblock %}
+
+{% block content %}
+<div class="about-page">
+  <h1>About</h1>
+
+  <p>
+    I'm Vladimir Yakunin. This site is my personal blog — posts archived from
+    Google+, Facebook, and Twitter, going back to around 2011, plus the
+    occasional new note.
+  </p>
+
+  <h2>Other things I publish</h2>
+  <ul>
+    <li>
+      <a href="https://visa-bulletin.us/" rel="me">visa-bulletin.us</a> —
+      green-card priority-date predictions for high-skilled workers. Most useful
+      if you're in the EB-1, EB-2, or EB-3 backlog.
+    </li>
+    {% if BOT_PUBLIC %}
+    <li>
+      <a href="/bot/">Ask Vladimir</a> — a small bot that answers questions
+      from the public posts on this site. It refuses anything outside the
+      public corpus.
+    </li>
+    {% endif %}
+  </ul>
+
+  <h2>Contact</h2>
+  <p>
+    {% if bot_telegram_url %}<a href="{{ bot_telegram_url }}" rel="me">Telegram</a> · {% endif %}
+    {% if bot_whatsapp_url %}<a href="{{ bot_whatsapp_url }}" rel="me">WhatsApp</a> · {% endif %}
+    <a href="mailto:vyakunin@gmail.com">vyakunin@gmail.com</a>
+  </p>
+
+  <h2>This site</h2>
+  <p>
+    Built on the open-source <a href="https://github.com/vyakunin/homebound">Homebound</a>
+    blogging engine — same one anyone can self-host to consolidate their own
+    social-media archive into a single home.
+  </p>
+</div>
+{% endblock %}

@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Vladimir Yakunin{% endblock %}</title>
-  <meta name="description" content="{% block meta_description %}Personal blog. Posts imported from Google+, Facebook, and Twitter.{% endblock %}">
+  <meta name="description" content="{% block meta_description %}Personal blog by Vladimir Yakunin.{% endblock %}">
   <meta property="og:title" content="{% block og_title %}Vladimir Yakunin{% endblock %}">
-  <meta property="og:description" content="{% block og_description %}Personal blog. Posts imported from Google+, Facebook, and Twitter.{% endblock %}">
+  <meta property="og:description" content="{% block og_description %}Personal blog by Vladimir Yakunin.{% endblock %}">
   <meta property="og:image" content="{% block og_image %}{{ request.scheme }}://{{ request.get_host }}{% static 'img/thumbnail.png' %}{% endblock %}">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
@@ -35,10 +35,9 @@
     <div class="inner site-header__inner">
       <a href="/" class="site-title">Vladimir Yakunin</a>
       <nav class="site-nav">
-        <a href="/source/google_plus/">Google+</a>
-        <a href="/source/facebook/">Facebook</a>
-        <a href="/source/twitter/">Twitter</a>
-        <a href="/word-cloud/">Word Cloud</a>
+        <a href="/">Blog</a>
+        {% if BOT_PUBLIC %}<a href="/bot/">Bot</a>{% endif %}
+        <a href="/about/">About</a>
         <a href="/feed/" title="RSS Feed">RSS</a>
       </nav>
       <div class="site-header__actions">
@@ -77,7 +76,11 @@
 
   <footer class="site-footer">
     <p>
-      Personal blog. Posts imported from Google+, Facebook, and Twitter.
+      Personal blog by Vladimir Yakunin.
+      <span class="site-footer__sep">·</span>
+      <a href="/about/" class="site-footer__bot-link">About</a>
+      <span class="site-footer__sep">·</span>
+      <a href="https://visa-bulletin.us/" class="site-footer__bot-link" rel="me">visa-bulletin.us</a>
       {% if BOT_PUBLIC %}
         <span class="site-footer__sep">·</span>
         <a href="/bot/" class="site-footer__bot-link">Ask Vladimir</a>

@@ -14,6 +14,7 @@ urlpatterns = [
     path('api/search/semantic/', views.semantic_search_api, name='semantic_search_api'),
     path('api/bot/ask/', views.bot_ask_api, name='bot_ask_api'),
     path('bot/', views.BotWidgetView.as_view(), name='bot_widget'),
+    path('about/', views.AboutView.as_view(), name='about'),
     path('tag/<slug:slug>/', views.TagView.as_view(), name='tag'),
     path('source/<str:name>/', views.SourceView.as_view(), name='source'),
     path('search/', views.SearchView.as_view(), name='search'),

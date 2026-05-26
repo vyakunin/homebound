@@ -315,6 +315,16 @@ class SearchView(_InfiniteScrollMixin, ListView):
 _BOT_GATE_QUERY_PARAM = "bot"
 
 
+class AboutView(TemplateView):
+    template_name = 'blog/about.html'
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx['bot_whatsapp_url'] = getattr(settings, "BOT_CONTACT_WHATSAPP_URL", "")
+        ctx['bot_telegram_url'] = getattr(settings, "BOT_CONTACT_TELEGRAM_URL", "")
+        return ctx
+
+
 class BotWidgetView(TemplateView):
     """Landing page for the public bot. Hard-gated behind ``?bot=1``
     until ``BOT_PUBLIC`` is set to True in settings (i.e. the user has
