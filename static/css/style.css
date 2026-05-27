@@ -1553,6 +1553,27 @@ article {
   transform: scale(1.08);
 }
 
+/* ── About page photo ─────────────────────────────────────── */
+.about-photo {
+  float: right;
+  margin: 0 0 1rem 1.25rem;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--border, #ddd);
+}
+
+@media (max-width: 480px) {
+  .about-photo {
+    float: none;
+    display: block;
+    margin: 0 auto 1rem;
+    width: 140px;
+    height: 140px;
+  }
+}
+
 /* ── Responsive additions ────────────────────────────────── */
 @media (max-width: 600px) {
   .nav-search__input { width: 90px; }

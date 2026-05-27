@@ -4,9 +4,13 @@
 {% block meta_description %}About Vladimir Yakunin — personal blog, visa-bulletin.us, and the Ask Vladimir bot.{% endblock %}
 {% block og_description %}About Vladimir Yakunin — personal blog, visa-bulletin.us, and the Ask Vladimir bot.{% endblock %}
 
+{% load static %}
 {% block content %}
 <div class="about-page">
   <h1>About</h1>
+
+  <img src="{% static 'img/about/vladimir.jpg' %}" alt="Vladimir Yakunin"
+       class="about-photo" width="160" height="160" loading="lazy">
 
   <p>
     I'm Vladimir Yakunin. This site is my personal blog — posts archived from
@@ -34,6 +38,8 @@
   <p>
     {% if bot_telegram_url %}<a href="{{ bot_telegram_url }}" rel="me">Telegram</a> · {% endif %}
     {% if bot_whatsapp_url %}<a href="{{ bot_whatsapp_url }}" rel="me">WhatsApp</a> · {% endif %}
+    <a href="https://www.linkedin.com/in/vladimir-yakunin-3685a42b/" rel="me">LinkedIn</a> ·
+    <a href="https://github.com/vyakunin" rel="me">GitHub</a> ·
     <a href="mailto:vyakunin@gmail.com">vyakunin@gmail.com</a>
   </p>
 
