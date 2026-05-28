@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FB Activity Log Export (personal)",
-  "version": "2.8.32",
+  "version": "2.8.35",
   "description": "Wizard: Activity Log comments, posts, streaming media export, GraphQL timestamp recovery, Finish-Now bail-out. Personal/local use; not affiliated with Meta.",
   "icons": {
     "16": "icons/icon16.png",
@@ -45,7 +45,7 @@
         "https://www.facebook.com/allactivity*",
         "https://www.facebook.com/me/allactivity*"
       ],
-      "js": ["lib/shared/timing.js", "lib/shared/zip_helpers.js", "lib/extract_timestamp.js", "lib/cdn_filter.js", "lib/parse_public_bot.js", "lib/reshare_commentary.js", "content.js"],
+      "js": ["lib/shared/timing.js", "lib/shared/zip_helpers.js", "lib/extract_timestamp.js", "lib/cdn_filter.js", "lib/parse_public_bot.js", "lib/reshare_commentary.js", "lib/strip_noise.js", "content.js"],
       "all_frames": false,
       "run_at": "document_idle"
     }

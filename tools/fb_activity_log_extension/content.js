@@ -337,18 +337,13 @@ function findRowContainer(anchor) {
   return anchor.parentElement;
 }
 
+// stripActivityNoise lives in lib/strip_noise.js — loaded earlier in
+// manifest.json content_scripts. Wrapper preserves the in-file name so
+// existing call sites (extractRowTextForAnchor, reshare_commentary hooks)
+// keep working without churn. Test coverage at test/strip_noise_test.js.
 function stripActivityNoise(s) {
-  return s
-    .replace(/\u00a0/g, ' ')
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    .filter((l) => !/^(Like|Reply|Comment|Share|More|See more|Hide|Following|Message|Save|Send)$/i.test(l))
-    .filter((l) => !/^\d+\s*(h|min|s|d|w|y|mo|yr)\b/i.test(l))
-    .filter((l) => !/^·+$/.test(l))
-    .join('\n')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
+  const fn = (typeof globalThis !== 'undefined') ? globalThis.stripActivityNoise_lib : null;
+  return fn ? fn(s) : (s || '');
 }
 
 // Step 8: cap mediaCandidates to prevent memory exhaustion on large profiles.
@@ -1241,6 +1236,28 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
       }
     }
 
+    // Self-referential phantom guard (v2.8.33): on a reshare row, the
+    // EMBEDDED original-post anchor (the "shared a post" link inside the
+    // reshare card) is also picked up as a row anchor by this scan loop.
+    // findRowContainer walks up to the same outer reshare row, the
+    // "shared a post" /i regex matches, and extractReshareSourceUrl
+    // returns this very anchor's URL as the source — producing a phantom
+    // "post" whose postKey EQUALS its own reshared_from_url. Real
+    // reshares always have a different reshare-event pfbid than the
+    // original they point at, so postKey === reshared_from_url is by
+    // definition a self-referential phantom.
+    let phantomSourceUrl = '';
+    if (reshareCommentary !== undefined) {
+      phantomSourceUrl = extractReshareSourceUrl(row, postKey);
+      if (phantomSourceUrl &&
+          canonicalPermalinkKey(phantomSourceUrl) === canonicalPermalinkKey(postKey)) {
+        // This anchor is the original-side capture inside a reshare row,
+        // not a real row of its own. Skip — the OTHER anchor in the same
+        // row (the reshare's own permalink) will produce the canonical entry.
+        continue;
+      }
+    }
+
     const prev = postByKey.get(postKey);
     if (!prev || (text && text.length > (prev.text || '').length) || (text && !prev.text)) {
       const entry = { postKey, fbId, url: norm, timestamp, text };
@@ -1250,8 +1267,7 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
         // (reshared-from) post. The Python importer's blog/_post_reshare_body
         // template uses this to embed the source post correctly instead of
         // serving Vladimir's pfbid as the source.
-        const sourceUrl = extractReshareSourceUrl(row, postKey);
-        if (sourceUrl) entry.reshared_from_url = sourceUrl;
+        if (phantomSourceUrl) entry.reshared_from_url = phantomSourceUrl;
       }
       // Posts whose action label says "added N photo(s)/video(s)" are known to have
       // media; mark them so enrichment prioritizes them.
@@ -1259,7 +1275,12 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
         entry.mediaHint = true;
       }
       // "shared a link" posts need permalink enrichment to extract the external URL card.
-      if (/^shared\s+a\s+link\b/i.test(text)) {
+      // Anchor-scoped text after row-capture tightening sometimes drops the
+      // "shared a link." prefix (the prefix was previously bleeding in from
+      // a wider container). Fall back to the row's innerText so the hint
+      // still fires when the action label exists in a sibling DOM node.
+      if (/^shared\s+a\s+link\b/i.test(text) ||
+          (row && /\bshared\s+a\s+link\b/i.test(row.innerText || ''))) {
         entry.linkHint = true;
       }
       // "shared a photo/memory/." without reshareCommentary are the user's own content

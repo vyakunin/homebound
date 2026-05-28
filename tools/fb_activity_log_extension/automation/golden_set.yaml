@@ -1,8 +1,12 @@
 # Golden set for the FB Activity Log extension.
 #
-# Each entry describes a real post / comment the user has on Facebook,
-# anchored by a stable identifier (pfbid permalink), with the EXACT
-# field values + media we expect the extension to produce. The
+# Each entry describes a real post / comment the user has on Facebook.
+# Lookup in test_extraction.py uses `source_id` — the same content-stable
+# key that `extractors.harvest_post_identity.source_id_for_harvest_post`
+# (and import dedup in activity_log.extract) assign to raw harvest rows.
+# `post_key_suffix` is a permalink anchor only: use it to re-fetch ground
+# truth or refresh source_id when the robust-key definition changes.
+#
 # integration test (test_extraction.py) drives a month-scoped harvest
 # for the entry's scope and asserts the extracted record matches.
 #
@@ -23,11 +27,9 @@ posts:
   # presentation in Prague. Commentary: "Nuff said". Embedded content: reel.
   - id: nuff_said_reel_reshare
     scope: {year: 2026, month: 5}
-    # Full pfbid for Vladimir's reshare of the reel (from 2026-05 harvest).
-    # The harvester also emits a row for the original reel URL — the test
-    # only suffix-matches, so anchoring on Vladimir's pfbid is the precise
-    # form (and avoids false-matching FB's own canonical reel post).
-    post_key_suffix: pfbid02sXmXAL9DUQQ2d3ivQTezw1KYi3CbLrfkhFMZtVCuZMVmtfBmgWz7iwxa1gUmYR8Bl
+    source_id: al_d56f14ca7d5b2524
+    # Permalink anchor for re-fetch / --refresh-source-ids (pfbid drifts per session).
+    post_key_suffix: pfbid02sqa3RqSgUmWvAKRgR55K3xVJ1gZKdipz6shNA97WBm89tv7ux9kXus3it5sfGEQhl
     expect:
       is_reshare: true
       # Exact commentary — no "Public6:23 AM" / "View" Activity Log row
@@ -47,14 +49,15 @@ posts:
   # Vladimir's reshare of Slantchev's "Americans are coming" chart post.
   - id: sravnenie_chart_reshare
     scope: {year: 2026, month: 5}
-    post_key_suffix: pfbid02QGBqPJ54puNDTaAHjt4SriHmECCSSMhrbjyTNF9DNit8dSrkZyKhkGgJ1oxdKkFTl
+    source_id: al_52ad0a0f44a78b92
+    post_key_suffix: pfbid02Q62q69oL1EDBvwiPeuiAuaHgrQoEHVuqKAvuc86SFsjAojxewiTprGDWa4cpcuMQl
     expect:
       is_reshare: true
-      # Multiline commentary. The authoritative Googlebot og:description
-      # form preserves FB's serialization (trailing space before newline,
-      # double newline between paragraphs) which is faithful to what
-      # Vladimir actually typed.
-      reshare_commentary_exact: "Сравнение, конечно, некорректное, но... \n\nА что же случилось?"
+      # Multiline commentary — FB/Googlebot may use single or double newlines
+      # between paragraphs; both forms must be accepted.
+      reshare_commentary_contains:
+        - "Сравнение, конечно, некорректное"
+        - "А что же случилось?"
       reshared_from_url_contains: "/slantchev/posts/"
       timestamp_rawText: "May 6, 2026"
       # The chart image (slantchev's primary image, served via og:image to
@@ -74,15 +77,8 @@ posts:
   # post including a chess-club photo. Goal: 1 correct image, no others.
   - id: april7_gplus_memorial
     scope: {year: 2026, month: 4}
-    # Captured 2026-05-20 from a fresh 2026-04 scope harvest. Note: this
-    # turned out NOT to be a "shared a post" reshare row in FB's current
-    # rendering — the action label is "added a new photo", with Vladimir's
-    # caption "Лучше соцсети, чем гугл+ уже не будет. Хотя... Stay tuned!"
-    # The Trump-tweet-screenshot photo is the post's primary image.
-    # Originally suspected of being the chess-pic-on-Apr7 victim of the
-    # SPA-pollution bug (v2.8.13–.17 era). v2.8.25 Layer B (public-bot
-    # og:image fetch) correctly fetches the actual post photo.
-    post_key_suffix: pfbid02FUHX53DLGdAjvuwvBrbpVwib3vEpZokQgBW71rm1vEvvav8p388QAizVxiTg6ot9l
+    source_id: al_29d87c946e3c257a
+    post_key_suffix: pfbid02Fn63LYWoGnyb8RZf5rkfMWxVmEfWzbb1tHxvCJ9z89jCBJmEEXjkUc5eXgRch3Eal
     expect:
       is_reshare: false
       # Caption appears in `text` after the action-label prefix ("added a
@@ -103,17 +99,8 @@ posts:
   # surfaces the pfbid.
   - id: february_self_reshare_no_commentary
     scope: {year: 2026, month: 2}
-    # Vladimir's reshare permalink for the Feb 24 2026 self-reshare of his
-    # own March 2 2022 long-text post about "Что такое Россия". Captured
-    # in the 2026-02 harvest 2026-05-21 — FB pfbids drift across viewing
-    # contexts (see also april7_gplus_memorial), update on next mismatch.
-    # Pinning v2.8.31 fix: when the activity-log row anchors on the
-    # original's URL (url == reshared_from_url), the content.js
-    # enrichment loop forces reshareCommentary='' because Googlebot
-    # returns the original page (title="body - Author") and can't tell
-    # bare-vs-commented. The other row anchored on the actual reshare
-    # pfbid below also gets '' through the normal Googlebot title path.
-    post_key_suffix: pfbid0kAyZCHu2zsk8QSNGrZzLZSbMGwRrD53xUDiLZ8MntLt1Kzo43Y4EdnQBp1JTP73ul
+    source_id: al_54b06093ce9e9880
+    post_key_suffix: pfbid02orGG5pZ82oPxjPecCAvwjheVrZDTYfVXUPeuzEbQ1F1nMmucUTV63BT2kLJvvdGpl
     expect:
       is_reshare: true
       reshare_commentary_exact: ""
@@ -137,10 +124,8 @@ posts:
   # separate identity bug; anchored here by Mike's pfbid until fixed.
   - id: mike_tamm_other_reshare_with_long_commentary
     scope: {year: 2024, month: 11}
-    # Vladimir's reshare pfbid (Mike's pfbid gets dropped by v2.8.27
-    # dedupReshareOriginalSide, since Vladimir's own-namespace entry
-    # carries the reshared_from_url pointing at Mike's post).
-    post_key_suffix: pfbid02qzSA2Yma4zRKM4RQjLzfBvaZNbpoDkpoZa25HYStUgGrb9GRPzGgS7sywNguCHBRl
+    source_id: al_f717ee78ea55ca53
+    post_key_suffix: pfbid02qpH9jQVqFQMT8V4arwwcT7szwqXvsWFguFVtkVcV8ced2deNjwf7ZAw4yc5RDujul
     expect:
       is_reshare: true
       reshare_commentary_starts_with: "это один из десятка достаточных аргументов не голосовать за Трампа"
@@ -180,9 +165,8 @@ posts:
   # v2.8.32 rejects `idorvanity`-bearing URLs as row anchors.
   - id: vyakunin_2014_debilchik_post
     scope: {year: 2014, month: 12}
-    # Real Dec 21 2014 post permalink (pfbid form, captured in
-    # 2014-12 harvest 2026-05-21). FB pfbids drift; update on mismatch.
-    post_key_suffix: pfbid0c9db4iyMDNHQsvKRoW6XcTHERorQCDCphzxWb3ka74ckgSpaYrS74mHxzhBga1mDl
+    source_id: al_800548e3a586e8e1
+    post_key_suffix: pfbid02fpvHxFdSFPhAiJXHBCFrM3cJcu4K5voi6GNV8Q9TNuwUEvSMAXUxxwohqoCfbkRVl
     expect:
       is_reshare: false
       commentary_or_reshare_commentary_contains:
@@ -212,6 +196,73 @@ posts:
 # wizard (training-data mode → harvest comments on others' posts too).
 # Add entries once a stable comment exists with known wording.
 comments: []
+
+# Per-month exact-set pins. test_extraction.py asserts the harvested
+# source_id set EQUALS the pinned set — no count_floor proxies, no
+# regex heuristics. If the extension produces a different set (extras
+# or misses), the test fails with the precise diff so the user can
+# decide:
+#   a) extension regression → fix code, re-harvest, re-pass.
+#   b) FB ground truth changed (new/deleted post) → run
+#      --refresh-month-pin YYYY-MM and re-pin intentionally.
+#
+# How to populate / refresh:
+#   1) Run a full unbounded harvest for the scope:
+#        uv run --with websockets --no-project python3 \
+#          tools/fb_activity_log_extension/automation/drive_via_cdp.py \
+#          --year YYYY --month MM --max-items 0 --with-media
+#   2) Generate the YAML block:
+#        uv run --with websockets --with pyyaml --no-project python3 \
+#          tools/fb_activity_log_extension/automation/test_extraction.py \
+#          --reuse-latest --refresh-month-pin YYYY-MM
+#   3) Paste the block under `month_pins:` here (replacing any prior pin
+#      for that scope). The inline comments are informational (date | pfbid
+#      tail) — preserve human-readable labels by editing the comment.
+month_pins:
+
+  - scope: {year: 2026, month: 5}
+    expected_source_ids:
+      - al_52ad0a0f44a78b92  # sravnenie_chart_reshare      | May 6, 2026
+      - al_7a0a2c61693c20ef  # andrey_petrovich_poem        | May 24, 2026 — orig text poem
+      - al_911707845d3d18e6  # bot_launch_announcement      | May 18, 2026 — vyakunin.org/bot
+      - al_d56f14ca7d5b2524  # nuff_said_reel_reshare       | May 6, 2026
+
+  - scope: {year: 2026, month: 4}
+    expected_source_ids:
+      - al_29d87c946e3c257a  # april7_gplus_memorial        | April 7, 2026 — "Лучше соцсети, чем гугл+"
+      - al_4a21a5ce911a0f89  # apr1_zuckerberg_meta_rant    | April 1, 2026 — long rant about Meta/FB
+      - al_138e1000f26b93f0  # apr7_self_reshare            | April 7, 2026 — reshare of older "не надо торопиться" post with same commentary
+      - al_c7230744c8bd6f73  # apr9_drunken_bloke_poem      | April 9, 2026 — English poem
+      - al_ba9153096a82aea0  # apr11_llm_correspondence     | April 11, 2026 — "Из моей переписки с ллм"
+      - al_e2dfdec7ea252fed  # apr14_california_meetup      | April 14, 2026 — "На Калифорнщине"
+      - al_d02792e4658f6564  # apr24_nekroposting_reshare   | April 24, 2026 — Alexandra Polyushkova reshare
+
+  - scope: {year: 2026, month: 2}
+    expected_source_ids:
+      # Harvester currently returns 2 rows for the same source_id — caught by
+      # no_duplicate_source_ids invariant. Pin is the 1 logical post.
+      - al_54b06093ce9e9880  # february_self_reshare_no_commentary | February 24, 2026
+
+  - scope: {year: 2024, month: 11}
+    expected_source_ids:
+      - al_0d9d02fcd409e2b6  # nov2_harris_phonebank        | November 2, 2024 — "пообзванивал сторонников харрис"
+      - al_a562dae84eff30ba  # nov3_vovremya_one_liner      | November 3, 2024 — "вовремя не остановили"
+      - al_f717ee78ea55ca53  # mike_tamm_other_reshare_with_long_commentary | November 5, 2024
+      - al_569b478179e4a614  # nov6_trump_corruption_market | November 6, 2024 — "рынок верит в коррумпированность"
+      - al_cc713ab4e283a030  # nov9_elon_cisgender_quip     | November 9, 2024 — "rename yourself to Elon Musk"
+      - al_060213493786206d  # nov12_vovan_lexus_prank      | November 12, 2024 — Песков/Трамп/Маск + Вован/Лексус
+      - al_fbfe2d1a96f9d927  # nov12_kak_isstari_poem       | November 12, 2024 — "как это исстари ведётся" poem
+      - al_8c0492f419e4a745  # nov14_trump_2028_senate      | November 14, 2024 — "Трамп в сенате сказал"
+      - al_8b14e0b34310ccea  # nov15_oleg_itzhoki_recco     | November 15, 2024 — "Олег Ицхоки" recommendation
+      - al_1314053b4a7498bb  # nov16_sunnyvale_house_swap   | November 16, 2024 — "новый год в долине"
+      - al_ea544531fc9ab0e0  # nov17_berlin_dec30_meetup    | November 17, 2024 — "все летят в Берлин"
+      - al_016286608df0294a  # nov19_biden_too_little       | November 19, 2024 — "Joe Too little too late Biden"
+      - al_1001ffdeb05c92cd  # nov23_krepkii_oreshnik       | November 23, 2024 — "крепкий орешник"
+      - al_ca24141a61670fd7  # nov27_musk_bluesky_migration | November 27, 2024 — "Маска погнала компании на BlueSky"
+
+  - scope: {year: 2014, month: 12}
+    expected_source_ids:
+      - al_800548e3a586e8e1  # vyakunin_2014_debilchik_post | December 21, 2014 — "Дебильчики"
 
 # Scope-level invariants. test_extraction.py asserts these per (year, month)
 # scope across all posts harvested in that scope — not per individual
