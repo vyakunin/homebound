@@ -164,6 +164,57 @@ class TestCleanText:
         # Only the action prefix "updated his status." should be stripped
         assert "U.S. news" in result
 
+    def test_strips_bare_public_without_time(self):
+        # FB Activity Log sometimes emits the audience pill without HH:MM time
+        # (observed in 9 rows of the 2026-05-28 full-archive re-harvest, where
+        # prod has "foo" and incoming has "fooPublic"). The hash must match
+        # across runs regardless of whether the trailer carries time.
+        raw = "shared a link.Some content.Public"
+        assert _clean_text(raw) == "Some content."
+
+    def test_strips_bare_audience_marker_friends(self):
+        raw = "updated his status.Hello world.Friends"
+        assert _clean_text(raw) == "Hello world."
+
+    def test_strips_audience_marker_with_view_but_no_time(self):
+        raw = "shared a post.Body text.PublicView"
+        assert _clean_text(raw) == "Body text."
+
+    def test_strips_leading_section_date_heading(self):
+        # Old harvests sometimes captured the section-date heading + audience
+        # pill at the start of row text (findRowContainer climbed too high).
+        # 8 prod rows from 2019–2022 showed this shape; preserved here so the
+        # importer-side strip stays in place even if extension regresses.
+        cases = [
+            ("September 17, 2019View shared a .вот они, политические репрессии.",
+             "вот они, политические репрессии."),
+            ("September 6, 2019View shared a .Собянин еще более трусливый",
+             "Собянин еще более трусливый"),
+            ("September 15, 2021View updated his status.Проверил несколько",
+             "Проверил несколько"),
+            ("February 20, 2021View shared a .акабы хуже говна.",
+             "акабы хуже говна."),
+            ("March 11, 2022View shared a link.давно ничего не рекламировал",
+             "давно ничего не рекламировал"),
+            ("February 11, 2021View shared a link.вот тут можно перевести",
+             "вот тут можно перевести"),
+            ("August 2, 2019View updated his status.какие молодцы!",
+             "какие молодцы!"),
+            ("June 27, 2019View shared a link.10% испытывали пытки на себе!",
+             "10% испытывали пытки на себе!"),
+        ]
+        for raw, expected in cases:
+            assert _clean_text(raw) == expected, raw
+
+    def test_leading_section_date_without_view_is_stripped(self):
+        raw = "September 6, 2019 shared a .Foo body"
+        assert _clean_text(raw) == "Foo body"
+
+    def test_section_date_inside_body_is_not_stripped(self):
+        # A date mention inside the body (not at start) must stay.
+        raw = "Body text mentioning September 17, 2019 in the middle"
+        assert _clean_text(raw) == "Body text mentioning September 17, 2019 in the middle"
+
 
 class TestCleanReshareCommentary:
     """The extension's ``extractReshareCommentary`` strips the action prefix
@@ -671,6 +722,10 @@ class TestResharePairLinking:
             "timestamp": {"utime": 1700000000, "iso": None, "rawText": None},
             "text": f"shared a post.{other_text}Public3:21\u202fPMView",
         }
+        # Extension v2.8.x supplies the original permalink when commentary differs
+        # from the embedded body (content-based pair-linking cannot match).
+        if own_text != other_text:
+            own_entry["reshared_from_url"] = other_entry["url"]
         # Add extra own-profile posts so the own-profile detection works
         # (Counter needs vyakunin to be the most common profile slug).
         filler_posts = [
@@ -749,22 +804,84 @@ class TestResharePairLinking:
             other_text=original_body,
             reshare_commentary=commentary,
         )
-        # Pair-linking only matches entries with identical content_text.
-        # Since own_text != other_text, they won't pair-link.
-        # The own-profile entry is an unmatched reshare with reshareCommentary set,
-        # so the post-process step treats it as a reshare with unknown source
-        # and keeps content_text (the commentary).
-        own_record = next((r for r in records if r.source_id == "20000000010"), None)
-        assert own_record is not None
-        assert commentary in own_record.content_text or (
-            own_record.reshared_from and commentary in own_record.reshared_from.content_text
-        )
+        # Commentary differs from the original body — URL-based pair-linking via
+        # reshared_from_url must attach the other-profile body without importing
+        # that row as a separate post.
+        assert len(records) == 1
+        own_record = records[0]
+        assert own_record.source_id == "20000000010"
+        assert commentary in own_record.content_text
+        assert own_record.reshared_from is not None
+        assert original_body in own_record.reshared_from.content_text
+        assert "someoneelse" in own_record.reshared_from.url
 
     def test_other_profile_entry_not_imported_separately(self, tmp_path):
         """The other-profile entry must not appear as a standalone post."""
         records = self._extract_reshare_pair(tmp_path)
         source_ids = {r.source_id for r in records}
         assert "20000000011" not in source_ids
+
+    def test_commentary_reshare_with_rfu_populates_original_body(self, tmp_path):
+        """Regression for /post/2019-11-04-3/: user commentary on own profile,
+        extension ``reshared_from_url`` points at the original, and a separate
+        other-profile Activity Log row carries the original body.
+
+        Content-based pair-linking cannot match (texts differ). URL-based
+        pairing must fill ``reshared_from.content_text`` and drop the other row.
+        """
+        commentary = (
+            "Друзья, которые не очень в политической теме, часто задают вопросы "
+            "про штаб Навального."
+        )
+        original_body = (
+            "Leonid original post about why working in a government office "
+            "is statistically more dangerous than NGO work."
+        )
+        leonid_url = (
+            "https://www.facebook.com/leonid.m.volkov/posts/"
+            "pfbid0qZs2NArScfhKmJJ5TEYLY5VEVmhY9YFxFZX9HC8XpLo468jocpg3DzLMPTAiVxNMl"
+        )
+        filler_posts = [
+            {
+                "fbId": f"5000008000{i}",
+                "url": f"https://www.facebook.com/vyakunin/posts/5000008000{i}",
+                "timestamp": {"utime": 1700000000 + i},
+                "text": f"added a new photo.Filler {i}Public",
+            }
+            for i in range(3)
+        ]
+        own_entry = {
+            "fbId": "pfbid0VYAKUNINRESHARE",
+            "url": "https://www.facebook.com/vyakunin/posts/pfbid0VYAKUNINRESHARE",
+            "timestamp": {"utime": 1572825600},
+            "text": f"shared a post.{commentary}Public",
+            "reshareCommentary": commentary,
+            "reshared_from_url": leonid_url,
+        }
+        leonid_entry = {
+            "fbId": "pfbid0LEONIDORIGINAL",
+            "url": leonid_url,
+            "timestamp": {"utime": 1572825600},
+            "text": f"shared a post.{original_body}Public",
+        }
+        posts = {
+            "collectedAt": "2019-11-04T12:00:00.000Z",
+            "postsWithText": filler_posts + [own_entry, leonid_entry],
+        }
+        (tmp_path / "test.zip").write_bytes(make_zip(posts))
+        extract(tmp_path / "test.zip", tmp_path / "out", dry_run=False)
+        records = [
+            r for r in read_records(tmp_path / "out" / "posts.binpb")
+            if not r.source_id.startswith("5000008")
+        ]
+        assert len(records) == 1, f"expected one merged record, got {len(records)}"
+        post = records[0]
+        assert commentary in post.content_text
+        assert post.reshared_from is not None
+        assert "leonid.m.volkov" in post.reshared_from.url
+        assert original_body in post.reshared_from.content_text, (
+            f"original body missing from reshared_from: {post.reshared_from.content_text!r}"
+        )
 
     def test_unpaired_commented_reshare_keeps_commentary_in_content_text(self, tmp_path):
         """Other-profile reshare with no matching other-profile entry (no

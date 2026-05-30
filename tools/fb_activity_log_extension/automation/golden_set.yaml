@@ -260,6 +260,82 @@ month_pins:
       - al_1001ffdeb05c92cd  # nov23_krepkii_oreshnik       | November 23, 2024 — "крепкий орешник"
       - al_ca24141a61670fd7  # nov27_musk_bluesky_migration | November 27, 2024 — "Маска погнала компании на BlueSky"
 
+  # 2026-05-30: pinned from the v2.8.39 aggressive-scroll harvest (export
+  # 07-54-35, 69 posts, full month Sep 1–28). Pre-2.8.39 the year/month
+  # scroll capped at ~27 newest rows (Sep 16–28); aggressive multi-container
+  # scroll now loads the whole month. Ground-truth verified via the truth loop.
+  - scope: {year: 2019, month: 9}
+    expected_source_ids:
+      - "1391542347668007"  # September 4, 2019 | ?fbid=1391542347668007&s
+      - "2701181746567558"  # September 17, 2019 | ?fbid=2701181746567558&s
+      - "2723030397716026"  # September 28, 2019 | ?fbid=2723030397716026&s
+      - al_10cd349bd2602305  # September 17, 2019 | pfbid04FcmaMSNi7Yq1MeQgo
+      - al_12e88eb54a69f361  # September 20, 2019 | pfbid02v8ozoScjV4Tf1Ki74
+      - al_2043fd56a59488a2  # September 16, 2019 | pfbid02BjqS8wN8UShANXopg
+      - al_27d611cf73faba5e  # September 20, 2019 | pfbid0srffeCeVkNDtsQX6qp
+      - al_2ae6d12ce1c47f44  # September 17, 2019 | pfbid02CeoYEU3vaKJhefLkZ
+      - al_2d44e72c2cbca21c  # September 25, 2019 | pfbid02jKcmMXB3rfGgUrrCb
+      - al_2eab00675d4cffa6  # September 26, 2019 | pfbid02H93t2Bwm3Kzf9iA4J
+      - al_33eba480ed9a5868  # September 19, 2019 | pfbid02WPzunQg1XedY9e3QK
+      - al_491f6e9ee9047736  # September 18, 2019 | pfbid0QsU7HZnYMhvDiZL1hm
+      - al_4aea6cdc111a3435  # September 17, 2019 | pfbid0CET5LVeLykUGZQvGnF
+      - al_50bdb87e80642eba  # September 19, 2019 | pfbid0241xwFoCPEKazyQSBx
+      - al_578a9e2aea536710  # September 18, 2019 | pfbid0namcQXdmPPTqfs2x9F
+      - al_5f43485911d425ea  # September 18, 2019 | pfbid021n1Fid4aUNnaqBh1A
+      - al_7cc769120da62d49  # September 18, 2019 | pfbid0KWsgbBKW57fZDJstgC
+      - al_816c3bef1441166f  # September 20, 2019 | pfbid0F34gLGSmKYXdEDjmAe
+      - al_86510aead02c7f6a  # September 23, 2019 | pfbid0314isYnsc7hGsazYTV
+      - al_8f674d9e1dc4090d  # September 27, 2019 | pfbid027BL4RK35oUdSnXyK9
+      - al_b4b2a2e5df3256fa  # September 17, 2019 | pfbid02PH5KxtP3XKosfLgWU
+      - al_c3f0c3befeb653bc  # September 28, 2019 | pfbid023mmWvginPFy2g5Lu3
+      - al_cb4201b5016dea86  # September 19, 2019 | pfbid0H7dcx1fxEuKZFat5ge
+      - al_d8144e9ad21724fa  # September 17, 2019 | pfbid02swULT8bX1HipTTRRQ
+      - al_d96905f021349fa9  # September 19, 2019 | pfbid0nzuVSZ54PxyH3WH936
+      - al_e0d40073d7e09e16  # September 21, 2019 | pfbid02ds1wAkZJg4QZ66Exn
+      - al_e82ff5ec5b568863  # September 18, 2019 | pfbid02YwDNNNR78ffT6c9e9
+      - al_f76517a5742a464e  # September 19, 2019 | pfbid0MUEZwYjZijemso1A9Z
+      - al_89b1a8e4436eec69  # pfbid0JcTGqu3gTU7omgZRwa
+      - al_950d1ceb0d27e1b9  # pfbid02h4g5NXFGk5Pp9oGFh
+      - al_5f0822975a88db64  # pfbid0mHdh36Npfc1Rme9FPd
+      - al_60c6a6922c7b1cfc  # pfbid0yGeTCsWYozpFCXbtbJ
+      - al_9eaa08b5ab1cbfb8  # pfbid0HfjsVbZhBW5kMmDfGb
+      - al_f49eea858481fdd3  # pfbid037a9pXDEiZUMaanLYt
+      - al_e0d302c7a659659d  # pfbid02EdN5Mq8QbMgd9bB3b
+      - al_c3b33af46786df57  # pfbid02dojugfv4pnV8FCVPM
+      - al_448c822b6ab6bd26  # pfbid0VaiF4e8f91irrQQn6V
+      - al_75940b88e024ff10  # pfbid028MavfykE2wut91hPR
+      - al_18ba268bae2f2496  # pfbid02yYUrF33hzfB5tBRNF
+      - al_88478efcd2f6f954  # pfbid02XqYYCDQVtizF8WHkD
+      - al_ca85d0abe2bcfd00  # pfbid0piBEyYV6Sjf5qc9uRk
+      - al_cfe63432f6fb0d41  # pfbid0kuFCznJ8C32CZq1njp
+      - al_ec15405f51dafe2c  # pfbid02JPnUQQEmB53SsDbw4
+      - al_792139920b640649  # pfbid0wmH6xjir7hMpiDwPqe
+      - al_ede841b1d01750c6  # pfbid0yYUw9VayGMKDUczE8k
+      - al_d961bb02a398812d  # pfbid0kog93DAX1JpH11XBwJ
+      - al_1434b30299c1991b  # pfbid0uATck65BstdJfgjRBp
+      - al_642ff6328031d5c4  # pfbid02HsCsnRGmPYDWF1hdm
+      - al_ab9c25385a7db66a  # pfbid02ViuFJcqbLArfFuFc4
+      - al_10e45da2394e3e2f  # pfbid02pST4P8uPKwmhrKbse
+      - al_635c4cbf5250817e  # pfbid02v2NHDV62iCkcqpQHj
+      - al_7d80b1ab6e1db2db  # pfbid02LzEo3tgGeQG7zP9Nj
+      - al_ede08d2bf902a2ef  # pfbid09RBU3WKH4k4DFmGp1n
+      - al_57a5dbf91657b31d  # pfbid09H6jiWTxNMdVyDRQw5
+      - al_29fc842f4cb721fa  # pfbid02XPZ2XDREn8KsJU1Kq
+      - al_424c4ed77ec2d517  # pfbid02PcJAmnrUktxNq4YeK
+      - al_06ff5df7a58d0951  # pfbid0FdFH9hgDuEoKddQ1wa
+      - al_755b52bb42c4205d  # pfbid025RSEpzEFo5g6AxhAW
+      - al_6c0853ca07be85ec  # pfbid02e6tNnVQgaW5gwoNk9
+      - al_046f0b1d49466ec1  # pfbid02fYDMs8GivZxArUFCh
+      - al_d2885cdf979336e8  # pfbid08gG7Ad4kNtwY1uCzbd
+      - al_ff292d10afca57eb  # pfbid05iFmFRMiCFoHzqhBKD
+      - al_daf6654aaaee9768  # pfbid0No7rsTi18bom3Yaz9U
+      - al_a7e6395ebc9c7ef8  # pfbid0P4qxZQkSym8ozS1s15
+      - al_82c28a72fd84e7e7  # pfbid02PLgMbaHcAFyFMT76x
+      - al_d8c33f522f2fcfff  # pfbid0qhBiEa6YtoWD4Gvabd
+      - al_7999a019a02f6e69  # pfbid02tSXEH3MZxAGAtvMo4
+      - al_1e5cbea3e76275dc  # pfbid0gJzTigFapu5WbLcVu9
+      - al_3dc29d84614dd9e1  # pfbid038CdTp8xYUZasr4CWy
+
   - scope: {year: 2014, month: 12}
     expected_source_ids:
       - al_800548e3a586e8e1  # vyakunin_2014_debilchik_post | December 21, 2014 — "Дебильчики"
@@ -287,3 +363,19 @@ scope_invariants:
   - id: distinct_posts_distinct_media
     rule: media_hashes_not_all_identical
     min_posts_with_media: 3   # only fire when there's enough sample size
+
+  # ─── R2: no leading section-date heading bleed into row text ───────────
+  # 2026-05-29: 8 prod rows from old harvests (2019-06 / 08 / 09 / 2021-02
+  # / 09 / 2022-03) carried the activity-log section heading literally at
+  # the start of the row body:
+  #   "September 6, 2019View shared a .Собянин еще более трусливый…"
+  # The findRowContainer scanner climbed past the row into the parent
+  # section header (sometimes also engulfing several sibling rows into
+  # one row body — see id=69379, where the body merged Vladimir's commentary
+  # with the next row's "PublicHH:MM AM shared a link.Перевел…" Khodorkovsky
+  # reshare). Importer-side _clean_text now strips the prefix, but this
+  # invariant catches an upstream regression at harvest time on any future
+  # year-month scope, before bad rows ever reach the importer.
+  - id: no_leading_section_date_in_text
+    rule: no_leading_section_date_in_text
+    min_posts_with_media: 0

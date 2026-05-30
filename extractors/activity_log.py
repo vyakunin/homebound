@@ -59,6 +59,14 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from extractors.base import fix_facebook_encoding
+from extractors.harvest_post_identity import (
+    _TRAILING_UI_RE,
+    _TRAILING_VIEW_RE,
+    _clean_text,
+    _parse_fb_id_from_url,
+    _source_id_for_post,
+    source_id_for_harvest_post,
+)
 from extractors.posts_io import write_records
 from proto.comment import Comment
 from proto.media_item import MediaItem, MediaType
@@ -71,14 +79,6 @@ logger = logging.getLogger(__name__)
 # Text cleaning helpers
 # ---------------------------------------------------------------------------
 
-# Action prefixes that Facebook Activity Log prepends to content text.
-# The format is: "<action phrase>.<content><visibility><time>View"
-# Examples: "shared a post.", "added a new photo.", "updated his status."
-_ACTION_PREFIX_RE = re.compile(
-    r'^(?:shared|added|updated|commented|wrote|checked in|was (?:with|at)|tagged|posted|replied)[^.]*\.',
-    re.IGNORECASE,
-)
-
 # "shared a post." — the full word "post" is literal text, meaning this is the
 # resharing entry (the user's share, not the original post).
 # Matches "shared a post.", "shared a .", "shared a photo." etc.
@@ -86,22 +86,6 @@ _ACTION_PREFIX_RE = re.compile(
 # Explicitly excludes "shared a link." — that means the user shared an external URL
 # (not another Facebook post), so it is a regular post with a link attachment.
 _RESHARE_PREFIX_RE = re.compile(r'^shared\s+a(?!\s+link)\b[^.]*\.', re.IGNORECASE)
-
-# Trailing UI labels: visibility + time-of-day + optional "View"
-# Matches e.g. "Public3:21\u202fAMView", "Custom5:13\u202fPMView", "Friends1:29\u202fPMView"
-_TRAILING_UI_RE = re.compile(
-    r'\s*(?:Public|Friends|Custom|Only me|Close Friends)\s*\d{1,2}:\d{2}[\u202f\s]*(?:AM|PM)?\s*(?:View)?\s*$',
-    re.IGNORECASE,
-)
-
-# Also strip a bare "View" that sometimes remains after time stripping
-_TRAILING_VIEW_RE = re.compile(r'\s*View\s*$', re.IGNORECASE)
-
-# Notification row suffixes: relative time "5h", "12m", "2d", optional "Mark as read"
-_TRAILING_NOTIF_RE = re.compile(r'\s*\d+[smhd]\s*(?:Mark\s+as\s+read)?\s*$', re.IGNORECASE)
-
-# "Unread" prefix inserted by Facebook before notification text
-_LEADING_UNREAD_RE = re.compile(r'^Unread\s*', re.IGNORECASE)
 
 
 def _clean_reshare_commentary(raw: str) -> str:
@@ -118,131 +102,6 @@ def _clean_reshare_commentary(raw: str) -> str:
     text = _TRAILING_UI_RE.sub('', raw)
     text = _TRAILING_VIEW_RE.sub('', text)
     return text.strip()
-
-
-def _clean_text(raw: str) -> str:
-    """Strip activity-log action prefix and trailing UI labels from harvested text.
-
-    The extension captures the full row text which includes:
-    - An action phrase: "shared a post.", "added a new photo.", etc.
-    - The actual content text
-    - A visibility label + time-of-day suffix: "Public3:21\u202fAMView"
-
-    Notification rows (likes, comments on your content) also prepend "Unread" and
-    append relative time + "Mark as read" — strip those too.
-    """
-    if not raw:
-        return ''
-    text = raw
-    # Strip "Unread" prefix from notification rows
-    text = _LEADING_UNREAD_RE.sub('', text)
-    # Strip action prefix (everything up to and including first period)
-    text = _ACTION_PREFIX_RE.sub('', text, count=1).lstrip()
-    # Strip trailing visibility + time UI garbage
-    text = _TRAILING_UI_RE.sub('', text)
-    text = _TRAILING_VIEW_RE.sub('', text)
-    # Strip trailing relative-time + "Mark as read" from notification rows
-    text = _TRAILING_NOTIF_RE.sub('', text)
-    return text.strip()
-
-
-# ---------------------------------------------------------------------------
-# URL / ID parsing
-# ---------------------------------------------------------------------------
-
-def _parse_fb_id_from_url(url: str) -> str | None:
-    """Extract a stable source_id from a Facebook post URL.
-
-    Handles: pfbid in path, /posts/<numeric_id>, story_fbid=, fbid=,
-    /reel/<id>, /videos/<id>, /photo/<id>.
-    Returns the ID string or None if not parseable.
-    """
-    if not url:
-        return None
-    try:
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-
-        # pfbid in query string
-        if 'pfbid' in params:
-            return params['pfbid'][0]
-
-        # story_fbid in query string
-        if 'story_fbid' in params:
-            return params['story_fbid'][0]
-
-        # fbid in query string (photo pages)
-        if 'fbid' in params:
-            return params['fbid'][0]
-
-        path = parsed.path
-        # /posts/pfbid...
-        m = re.search(r'/posts/(pfbid[A-Za-z0-9]+)', path)
-        if m:
-            return m.group(1)
-        # /posts/<numeric_id>
-        m = re.search(r'/posts/(\d+)', path)
-        if m:
-            return m.group(1)
-        # /reel/<id>
-        m = re.search(r'/reel/(\d+)', path)
-        if m:
-            return m.group(1)
-        # /videos/<id>
-        m = re.search(r'/videos/(\d+)', path)
-        if m:
-            return m.group(1)
-        # /photo/<id>
-        m = re.search(r'/photo/(\d+)', path)
-        if m:
-            return m.group(1)
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
-def _source_id_for_post(record: dict, content_text: str | None = None) -> str:
-    """Derive a content-stable source_id for a post record.
-
-    The pfbid identifier Facebook puts in /posts/pfbid…/ permalinks is regenerated
-    every session, so re-importing the same Activity Log on different days under
-    the previous fbId/pfbid scheme produced a fresh source_id and a duplicate row
-    each time. This function uses signals that survive session rotation:
-
-      1. A numeric Facebook ID parsed from the URL (e.g. /posts/12345 or fbid=12345)
-         — content-stable because it's the underlying object id, not a permalink token.
-      2. timestamp.utime + first 500 chars of cleaned text — for the common case
-         of pfbid permalinks where the extension still gave us the post epoch.
-      3. timestamp.rawText + first 500 chars — when utime parsing failed.
-      4. First 1000 chars of cleaned text — as a final fallback.
-      5. SHA-256 of the URL — only when the record has no text at all.
-
-    `content_text` may be passed by callers that already ran _clean_text() to
-    avoid re-cleaning the same string.
-    """
-    url = record.get('url') or record.get('postKey') or ''
-    parsed = _parse_fb_id_from_url(url)
-    # Only accept *numeric* IDs as stable; pfbid… is per-session.
-    if parsed and parsed.isdigit():
-        return parsed
-
-    ts = record.get('timestamp') or {}
-    utime = ts.get('utime') if isinstance(ts, dict) else None
-    raw_ts = ts.get('rawText') if isinstance(ts, dict) else None
-
-    if content_text is None:
-        content_text = _clean_text(record.get('text', '') or '')
-
-    if utime:
-        seed = f'{int(utime)}|{content_text[:500]}'
-    elif raw_ts:
-        seed = f'{raw_ts}|{content_text[:500]}'
-    elif content_text:
-        seed = content_text[:1000]
-    else:
-        seed = url
-
-    return 'al_' + hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]
 
 
 def _source_id_for_comment(record: dict) -> str:
@@ -883,7 +742,7 @@ def extract(
                 skipped_no_text += 1
                 continue
 
-            source_id = _source_id_for_post(raw, content_text=cleaned)
+            source_id = source_id_for_harvest_post(raw)
             if not source_id:
                 skipped_no_id += 1
                 continue
@@ -1191,6 +1050,46 @@ def extract(
                     other_rec = post_by_source_id[sid]
                     original_for_sid[own_sid] = (source_url, other_rec.content_text)
                     to_remove.add(sid)
+
+            # URL-based pairing: extension ``reshared_from_url`` on the user's reshare
+            # row points at the original post. When the user added commentary the row
+            # texts differ, so content-based pairing above misses — but the other-
+            # profile entry for that URL still carries the original body.
+            other_profile_by_url: dict[str, tuple[str, str]] = {}
+            for sid, record in post_by_source_id.items():
+                if sid in to_remove:
+                    continue
+                try:
+                    post_profile = urlparse(record.source_url).path.strip('/').split('/')[0]
+                except Exception:
+                    post_profile = ''
+                if post_profile and post_profile != own_profile:
+                    other_profile_by_url[_post_key_from_url(record.source_url)] = (
+                        sid, record.content_text,
+                    )
+
+            for sid, record in post_by_source_id.items():
+                if sid in to_remove or sid in original_for_sid:
+                    continue
+                if not is_reshare_by_source_id.get(sid):
+                    continue
+                try:
+                    post_profile = urlparse(record.source_url).path.strip('/').split('/')[0]
+                except Exception:
+                    post_profile = ''
+                if post_profile != own_profile:
+                    continue
+                rfu = reshared_from_url_by_source_id.get(sid, '')
+                if not rfu:
+                    continue
+                match = other_profile_by_url.get(_post_key_from_url(rfu))
+                if not match:
+                    continue
+                other_sid, other_body = match
+                if other_sid in to_remove:
+                    continue
+                original_for_sid[sid] = (rfu, other_body)
+                to_remove.add(other_sid)
 
             for sid in to_remove:
                 del post_by_source_id[sid]

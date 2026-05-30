@@ -132,6 +132,137 @@ class DriverArgs:
     month: int | None     # 1..12 when set: scope to a single month within `from_year`
     with_media: bool      # False => skip-media (default in iter)
     max_items: int        # 0 => uncapped
+    adaptive: bool        # True => after each pass, descend into capped scopes
+    max_depth: int        # 1 = year only; 2 = year→month; 3 = year→month→week (DOM filter; not wired yet)
+
+
+class StopReason(IntEnum):
+    """Per-scope harvest stop reasons returned by the SW.
+
+    Mirrors the strings the content script's runScrollHarvest emits
+    in `stoppedBecause`. Closed set; parsed once at the Python
+    boundary so the descent heuristic is just enum comparison.
+    """
+    INVALID = 0
+    SCROLL_STABLE = 1     # N stable rounds with no growth — natural stop
+    STALLED = 2           # No growth across rounds, height didn't change
+    CAP_POSTS = 3         # MAX_ITEMS reached for posts (our cap, not FB's)
+    CAP_COMMENTS = 4
+    ERROR = 5             # JS payload itself errored (no items)
+    TAB_LOAD_TIMEOUT = 6  # 30s navigation timeout before harvest started
+
+    @classmethod
+    def from_str(cls, s: str | None) -> "StopReason":
+        return _STOP_REASON_LOOKUP.get((s or "").lower(), cls.INVALID)
+
+
+_STOP_REASON_LOOKUP = {
+    "scrollstable": StopReason.SCROLL_STABLE,
+    "stalled": StopReason.STALLED,
+    "capposts": StopReason.CAP_POSTS,
+    "capcomments": StopReason.CAP_COMMENTS,
+    "error": StopReason.ERROR,
+    "tab load timeout": StopReason.TAB_LOAD_TIMEOUT,
+}
+
+
+@dataclass(frozen=True)
+class Scope:
+    """A single harvest scope. year-only OR year+month — no other URL granularity."""
+    year: int
+    month: int | None = None
+
+    @property
+    def label(self) -> str:
+        return f"{self.year}-{self.month:02d}" if self.month else str(self.year)
+
+    def js_unit(self) -> dict:
+        """Shape expected by the JS payload's UNITS array."""
+        out = {"year": self.year}
+        if self.month is not None:
+            out["month"] = self.month
+        return out
+
+    def children(self) -> list["Scope"]:
+        """Sub-scopes for adaptive descent. year → 12 months (newest-first)."""
+        if self.month is None:
+            return [Scope(year=self.year, month=m) for m in range(12, 0, -1)]
+        return []  # FB URL has no finer granularity than month
+
+
+@dataclass
+class ProgressEntry:
+    """Typed shape of one entry in the JS payload's progress[] array."""
+    scope: Scope
+    items: int
+    rounds: int
+    stop_reason: StopReason
+    error: str
+    unit_ms: int
+
+    @classmethod
+    def from_payload(cls, raw: dict) -> "ProgressEntry":
+        label = raw.get("unit") or raw.get("year") or ""
+        scope = _parse_scope_label(str(label))
+        return cls(
+            scope=scope,
+            items=int(raw.get("items") or 0),
+            rounds=int(raw.get("rounds") or 0),
+            stop_reason=StopReason.from_str(raw.get("stoppedBecause")),
+            error=str(raw.get("error") or ""),
+            unit_ms=int(raw.get("unitMs") or raw.get("yearMs") or 0),
+        )
+
+
+def _parse_scope_label(label: str) -> Scope:
+    """Reverse of Scope.label: '2018' → year only; '2018-11' → year+month."""
+    if "-" in label:
+        y, m = label.split("-", 1)
+        return Scope(year=int(y), month=int(m))
+    return Scope(year=int(label))
+
+
+# Cap-detection thresholds. Empirical observation 2026-05-28: FB's
+# year-URL hard-caps activity-log scroll at ~25-35 posts per page load.
+# A scope returning a count in this range AND stopping naturally
+# (scroll-stable / stalled, NOT capPosts) is "suspected capped" — the
+# adaptive loop descends to month-level. Scopes returning > LIKELY_CAP_MAX
+# items are accepted as authoritative (FB happily paginated). Scopes
+# returning < LIKELY_CAP_MIN are also accepted (genuinely sparse).
+LIKELY_CAP_MIN = 20
+LIKELY_CAP_MAX = 50
+
+
+def is_capped(p: ProgressEntry) -> bool:
+    """Heuristic: did FB silently cap this scope's scroll?
+
+    False positives are cheap (an unnecessary 12-month descent that
+    finds the same posts via merge dedup). False negatives are
+    expensive (missing posts). Tune conservatively.
+    """
+    if p.stop_reason not in (StopReason.SCROLL_STABLE, StopReason.STALLED):
+        return False
+    return LIKELY_CAP_MIN <= p.items <= LIKELY_CAP_MAX
+
+
+def next_pass_scopes(progress: list[ProgressEntry], max_depth: int, current_depth: int) -> list[Scope]:
+    """Pick child scopes for the next adaptive pass.
+
+    Walks the current pass's progress[]; for each entry that looks
+    capped AND has a deeper granularity available within max_depth,
+    emit its children.
+    """
+    if current_depth + 1 >= max_depth:
+        return []
+    out: list[Scope] = []
+    for p in progress:
+        if not is_capped(p):
+            continue
+        children = p.scope.children()
+        if not children:
+            continue  # already at finest URL-supported granularity
+        out.extend(children)
+    return out
 
 
 @dataclass
@@ -140,6 +271,10 @@ class RunResult:
     progress: list[dict]   # JS payload progress entries (raw)
     merged_count: int
     zip: dict | None
+
+    @property
+    def typed_progress(self) -> list[ProgressEntry]:
+        return [ProgressEntry.from_payload(p) for p in self.progress]
 
 
 def cdp_targets() -> list[CdpTarget]:
@@ -162,9 +297,11 @@ def find_fb_tab() -> CdpTarget | None:
 
 
 def create_fb_tab() -> CdpTarget:
-    body = urllib.request.urlopen(
-        f"{CDP_HTTP}/json/new?https://www.facebook.com/me/allactivity"
-    ).read()
+    req = urllib.request.Request(
+        f"{CDP_HTTP}/json/new?https://www.facebook.com/me/allactivity",
+        method="PUT",
+    )
+    body = urllib.request.urlopen(req).read()
     return CdpTarget.from_dict(json.loads(body))
 
 
@@ -209,7 +346,13 @@ def resolve_args(raw: argparse.Namespace) -> DriverArgs:
 
     now_year = dt.datetime.now().year
     if mode == Mode.ITER:
-        if raw.year is not None:
+        # Multi-year archive: --from-year/--to-year with iter defaults (skip media,
+        # one merged export dir + one media_zip at the end). Avoids a shell loop
+        # that creates fb-activity-export-* per year.
+        if raw.from_year is not None or raw.to_year is not None:
+            from_y = raw.from_year if raw.from_year is not None else (raw.year or 2004)
+            to_y = raw.to_year if raw.to_year is not None else (raw.year or now_year)
+        elif raw.year is not None:
             from_y = to_y = raw.year
         else:
             from_y = to_y = now_year
@@ -230,6 +373,13 @@ def resolve_args(raw: argparse.Namespace) -> DriverArgs:
             sys.exit(f"--month {month} out of range 1..12")
         if from_y != to_y:
             sys.exit("--month requires a single year (use --year YYYY or --mode iter)")
+    adaptive = bool(getattr(raw, "adaptive", False))
+    max_depth = int(getattr(raw, "max_depth", 2))
+    if max_depth < 1:
+        sys.exit(f"--max-depth must be >= 1 (got {max_depth})")
+    if adaptive and month is not None:
+        # Already at month granularity; deeper descent isn't URL-supported.
+        log.info("--adaptive is a no-op when --month is set (already at finest URL granularity)")
     return DriverArgs(
         mode=mode,
         phase=phase,
@@ -238,34 +388,49 @@ def resolve_args(raw: argparse.Namespace) -> DriverArgs:
         month=month,
         with_media=with_media,
         max_items=max_items,
+        adaptive=adaptive,
+        max_depth=max_depth,
     )
 
 
-def build_driver_js(args: DriverArgs) -> str:
+def build_driver_js(args: DriverArgs, scopes: list[Scope], *,
+                    skip_zip: bool, resume: bool) -> str:
     """JS payload to evaluate inside the extension's service worker.
 
     The SW has chrome.* APIs. The payload:
       - resolves the FB tab id,
-      - for each year (newest-first) navigates the tab and posts
+      - for each scope (newest-first) navigates the tab and posts
         {type:'RUN_PHASE',...} to the content script,
-      - merges per-year results into a wizard-shaped object,
+      - merges per-scope results into a wizard-shaped object,
       - persists to chrome.storage.local under fbcExport_<phase>,
-      - triggers the media_zip phase which uses chrome.downloads to
-        write the export directory.
+      - if skip_zip is false, triggers the media_zip phase which
+        writes the export directory via chrome.downloads.
 
-    Caps come through chrome.tabs.sendMessage via the `caps` field; the
-    content script's runScrollHarvest respects maxPosts / maxComments.
+    skip_zip=true is used during adaptive descent intermediate passes
+    so we only write one final export directory at the end.
+
+    resume=true skips the storage wipe and seeds `merged` from existing
+    storage — used on second-and-later adaptive passes so the SW's
+    merge function dedups across passes (year-level results stay,
+    month-level results overlay).
     """
-    if args.month is not None:
-        units = [{"year": args.from_year, "month": args.month}]
-    else:
-        units = [{"year": y} for y in range(args.to_year, args.from_year - 1, -1)]
+    units = [s.js_unit() for s in scopes]
     return _JS_TEMPLATE.format(
         phase=json.dumps(args.phase.slug),
         units=json.dumps(units),
         skip_media=str(not args.with_media).lower(),
         max_items=int(args.max_items),
+        skip_zip=str(skip_zip).lower(),
+        resume=str(resume).lower(),
+        adaptive=str(args.adaptive).lower(),
     )
+
+
+def initial_scopes(args: DriverArgs) -> list[Scope]:
+    """Top-level scopes for the first pass — month if --month set, else years newest-first."""
+    if args.month is not None:
+        return [Scope(year=args.from_year, month=args.month)]
+    return [Scope(year=y) for y in range(args.to_year, args.from_year - 1, -1)]
 
 
 # Big string template — kept as a constant so Python's f-string brace
@@ -277,6 +442,9 @@ _JS_TEMPLATE = r"""
   const UNITS = {units};
   const SKIP_MEDIA = {skip_media};
   const MAX_ITEMS = {max_items};
+  const SKIP_ZIP = {skip_zip};
+  const RESUME = {resume};
+  const ADAPTIVE = {adaptive};
   const STORAGE_KEY = PHASE === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
   const itemsKey = PHASE === 'comments' ? 'commentsWithText' : 'postsWithText';
   const idKey    = PHASE === 'comments' ? 'commentId'        : 'postKey';
@@ -285,7 +453,10 @@ _JS_TEMPLATE = r"""
   const fbTab = tabs.find((t) => (t.url || '').includes('facebook.com'));
   if (!fbTab) return {{ error: 'no facebook.com tab open' }};
 
-  await chrome.storage.local.remove([STORAGE_KEY]);
+  // In adaptive mode, subsequent passes RESUME from the previous pass's
+  // accumulated state so the SW's per-scope merge dedups across passes.
+  // First pass (or non-adaptive) wipes the slate.
+  if (!RESUME) await chrome.storage.local.remove([STORAGE_KEY]);
 
   function urlForUnit(unit) {{
     const cat = PHASE === 'comments' ? 'COMMENTSCLUSTER' : 'MANAGEPOSTSPHOTOSANDVIDEOS';
@@ -360,7 +531,15 @@ _JS_TEMPLATE = r"""
   }};
 
   const progress = [];
+  // Seed merged from storage on RESUME so this pass's results merge
+  // cleanly into the running state. Final ZIP reads chrome.storage too,
+  // so the seed is just so this run's progress[] reports cumulative
+  // mergedCount and so merge() can dedup the same item across passes.
   let merged = null;
+  if (RESUME) {{
+    const seedSnapshot = await chrome.storage.local.get([STORAGE_KEY]);
+    if (seedSnapshot && seedSnapshot[STORAGE_KEY]) merged = seedSnapshot[STORAGE_KEY];
+  }}
   for (const unit of UNITS) {{
     const tUnitStart = Date.now();
     const label = unitLabel(unit);
@@ -371,6 +550,15 @@ _JS_TEMPLATE = r"""
       await new Promise((r) => setTimeout(r, 4000));
       const opts = {{ phase: PHASE, mode: 'full', caps, diagnosticEnabled: false }};
       if (PHASE === 'comments') opts.commentsOwnPostsOnly = false;
+      // Adaptive mode runs against the known-cap FB activity-log shape
+      // (one batch then nothing) at every granularity. The default
+      // full-mode scroll wait (10 stable rounds × 1.8s) is dead time on
+      // every capped scope. Use the tight cap-aware params instead so
+      // pass 1 (year) doesn't burn 5 min per year confirming the cap.
+      // Non-adaptive runs keep the default params — iter mode targets
+      // current-year content where lazy-load may actually deliver more
+      // rows over time and shouldn't bail early.
+      if (ADAPTIVE) opts.historicalFastScroll = true;
       const res = await chrome.tabs.sendMessage(fbTab.id, {{ type: 'RUN_PHASE', ...opts }});
       if (!res || !res.ok) {{
         progress.push({{ unit: label, error: (res && res.error) || 'no response' }});
@@ -394,12 +582,14 @@ _JS_TEMPLATE = r"""
   }}
 
   let zipResult = null;
-  try {{
-    zipResult = await chrome.tabs.sendMessage(fbTab.id, {{
-      type: 'RUN_PHASE', phase: 'media_zip', skipMedia: SKIP_MEDIA,
-    }});
-  }} catch (e) {{
-    zipResult = {{ ok: false, error: String(e) }};
+  if (!SKIP_ZIP) {{
+    try {{
+      zipResult = await chrome.tabs.sendMessage(fbTab.id, {{
+        type: 'RUN_PHASE', phase: 'media_zip', skipMedia: SKIP_MEDIA,
+      }});
+    }} catch (e) {{
+      zipResult = {{ ok: false, error: String(e) }};
+    }}
   }}
 
   return {{
@@ -438,19 +628,84 @@ async def evaluate_in_sw(sw: CdpTarget, js: str) -> RunResult:
                 )
 
 
-async def run(args: DriverArgs) -> RunResult:
+async def _ensure_sw() -> tuple[CdpTarget, CdpTarget]:
     sw = find_sw_target()
     fb_tab = find_fb_tab()
     if not sw or not fb_tab:
         log.info("waking FB extension service worker…")
         sw, fb_tab = await wake_sw()
-    scope = f"{args.from_year}-{args.month:02d}" if args.month else f"{args.to_year}..{args.from_year}"
-    log.info("mode=%s phase=%s scope=%s media=%s cap=%d",
-             args.mode.slug, args.phase.slug, scope,
-             "on" if args.with_media else "off", args.max_items)
-    log.info("SW=%s FB tab=%s url=%s", sw.id[:8], fb_tab.id[:8], fb_tab.url[:80])
-    js = build_driver_js(args)
+    return sw, fb_tab
+
+
+async def run_single_pass(sw: CdpTarget, args: DriverArgs, scopes: list[Scope],
+                          *, skip_zip: bool, resume: bool) -> RunResult:
+    """Run one harvest pass over the given scopes; optionally skip the final zip.
+
+    resume=True is for adaptive descent: skip the storage wipe and seed
+    the SW's merged state from existing storage so cross-pass dedup works.
+    """
+    log.info("pass scopes=%d skip_zip=%s resume=%s", len(scopes), skip_zip, resume)
+    js = build_driver_js(args, scopes, skip_zip=skip_zip, resume=resume)
     return await evaluate_in_sw(sw, js)
+
+
+def _merge_progress(prev: list[dict], curr: list[dict]) -> list[dict]:
+    """Concatenate progress entries across adaptive passes (each pass keeps its own labels)."""
+    return list(prev) + list(curr)
+
+
+async def run(args: DriverArgs) -> RunResult:
+    sw, fb_tab = await _ensure_sw()
+    scope_repr = (
+        f"{args.from_year}-{args.month:02d}" if args.month
+        else f"{args.to_year}..{args.from_year}"
+    )
+    log.info("mode=%s phase=%s scope=%s media=%s cap=%d adaptive=%s depth=%d",
+             args.mode.slug, args.phase.slug, scope_repr,
+             "on" if args.with_media else "off", args.max_items,
+             args.adaptive, args.max_depth)
+    log.info("SW=%s FB tab=%s url=%s", sw.id[:8], fb_tab.id[:8], fb_tab.url[:80])
+
+    if not args.adaptive:
+        return await run_single_pass(sw, args, initial_scopes(args),
+                                     skip_zip=False, resume=False)
+    return await run_adaptive(sw, args)
+
+
+async def run_adaptive(sw: CdpTarget, args: DriverArgs) -> RunResult:
+    """Multi-pass: harvest, detect capped scopes, descend, repeat. Zip on last pass only.
+
+    Each pass writes its merged data into chrome.storage.local (fbcExport_<phase>);
+    the SW's merge function dedups by postKey/commentId across passes. The final
+    pass triggers media_zip which reads that accumulated storage and writes the
+    export directory.
+    """
+    all_progress: list[dict] = []
+    scopes = initial_scopes(args)
+    final_count = 0
+    for depth in range(args.max_depth):
+        is_last_pass = (depth + 1 >= args.max_depth)
+        # depth=0 starts fresh; subsequent passes resume so chrome.storage
+        # accumulates the cross-pass union (year-level dedup'd with month-level).
+        pass_result = await run_single_pass(
+            sw, args, scopes, skip_zip=not is_last_pass, resume=depth > 0,
+        )
+        all_progress = _merge_progress(all_progress, pass_result.progress)
+        final_count = pass_result.merged_count
+        if is_last_pass:
+            return RunResult(progress=all_progress, merged_count=final_count, zip=pass_result.zip)
+        children = next_pass_scopes(pass_result.typed_progress, args.max_depth, depth)
+        log.info("adaptive depth=%d → %d capped scopes → descending to %d child scopes",
+                 depth, sum(1 for p in pass_result.typed_progress if is_capped(p)),
+                 len(children))
+        if not children:
+            # Nothing capped — finalize with zip on a no-op pass.
+            zip_result = await run_single_pass(
+                sw, args, [], skip_zip=False, resume=True,
+            )
+            return RunResult(progress=all_progress, merged_count=final_count, zip=zip_result.zip)
+        scopes = children
+    return RunResult(progress=all_progress, merged_count=final_count, zip=None)
 
 
 def log_summary(args: DriverArgs, result: RunResult, elapsed_s: float) -> None:
@@ -483,14 +738,25 @@ def main() -> None:
                     help="iter mode: single year (default: current year)")
     ap.add_argument("--month", type=int, default=None,
                     help="iter mode: narrow further to a single month within --year (1..12)")
-    ap.add_argument("--from-year", type=int, default=None, help="full mode: oldest year")
-    ap.add_argument("--to-year", type=int, default=None, help="full mode: newest year")
+    ap.add_argument("--from-year", type=int, default=None,
+                    help="oldest year (full mode, or iter multi-year archive)")
+    ap.add_argument("--to-year", type=int, default=None,
+                    help="newest year (full mode, or iter multi-year archive)")
     ap.add_argument("--with-media", action="store_true",
                     help="iter mode: also enrich media (default: skip media for speed)")
     ap.add_argument("--skip-media", action="store_true",
                     help="full mode: metadata-only (no tab-enrichment)")
     ap.add_argument("--max-items", type=int, default=None,
                     help=f"override item cap (iter default: {ITER_MAX_ITEMS}, full default: 0)")
+    ap.add_argument("--adaptive", action="store_true",
+                    help="after each pass, descend into capped scopes (year→month). "
+                         f"A scope is suspected capped if it returns "
+                         f"[{LIKELY_CAP_MIN}..{LIKELY_CAP_MAX}] items AND stopped naturally "
+                         "(scrollStable/stalled). Required for full archive re-baseline "
+                         "now that FB hard-caps year-URL scroll at ~25-35 posts.")
+    ap.add_argument("--max-depth", type=int, default=2,
+                    help="max adaptive descent depth: 1=year only, 2=year→month (default), "
+                         "3=reserved for DOM-driven week filter (not wired yet)")
     args = resolve_args(ap.parse_args())
     t0 = time.monotonic()
     result = asyncio.run(run(args))

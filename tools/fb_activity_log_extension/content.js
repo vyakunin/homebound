@@ -1315,8 +1315,17 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
   }
 }
 
-function getConfig(mode) {
+function getConfig(mode, opts) {
   // Step 7: increased full-mode maxRounds from 400 to 1200 (~36 min).
+  // historicalFastScroll (2026-05-29): for adaptive descent's month-level
+  // re-harvest, FB delivers all rows in one batch then nothing — the long
+  // 10-round stable-wait at 1.8s/round dominates wall time. Drop both so
+  // each capped month scope wraps in ~2-4s instead of ~30s. Safe ONLY
+  // because the cap shape is well-characterised; do NOT enable on the
+  // current-day URL where FB still lazy-loads as you scroll.
+  if (opts && opts.historicalFastScroll) {
+    return { scrollPauseMs: 600, stableRoundsBeforeStop: 2, maxRounds: 60 };
+  }
   return mode === 'full'
     ? { scrollPauseMs: 1800, stableRoundsBeforeStop: 10, maxRounds: 1200 }
     : { scrollPauseMs: 900, stableRoundsBeforeStop: 10, maxRounds: 40 };
@@ -1336,10 +1345,40 @@ async function clickLoadMoreIfPresent() {
   return false;
 }
 
+// Aggressive scroll to bottom. FB Comet renders the activity log inside a
+// scrollable INNER container, not the window — so window.scrollTo alone often
+// fails to trigger FB's lazy-loader on historical month URLs. The harvest then
+// bails after batch 1 (the ~27-row "cap" reported 2026-05-29, which turned out
+// NOT to be an FB hard limit). Scrolling EVERY scrollable container to its
+// bottom + firing a wheel event reliably re-engages the loader. Proved live on
+// a warm (non-throttled) Chrome: a fresh reload caps at 11 date-headings, then
+// ~6 aggressive rounds load the full 24-heading month. Pure JS suffices — no
+// trusted CDP wheel needed. Harmless across modes: non-scrollable containers
+// are skipped, wheel events are inert where unused. Container count is bounded
+// to avoid layout thrash on multi-thousand-row current-month pages.
+function aggressiveScrollToBottom() {
+  try {
+    const se = document.scrollingElement || document.documentElement;
+    if (se) se.scrollTop = se.scrollHeight;
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' in window ? 'instant' : 'auto' });
+    let touched = 0;
+    const divs = document.getElementsByTagName('div');
+    for (let i = 0; i < divs.length && touched < 60; i += 1) {
+      const d = divs[i];
+      if (d.scrollHeight > d.clientHeight + 50) {
+        d.scrollTop = d.scrollHeight;
+        d.dispatchEvent(new WheelEvent('wheel', { deltaY: 1500, bubbles: true }));
+        touched += 1;
+      }
+    }
+    window.dispatchEvent(new WheelEvent('wheel', { deltaY: 1500, bubbles: true }));
+  } catch (_) { /* best-effort */ }
+}
+
 async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
   const caps = normalizeCaps(rawCaps);
   const commentsOwnPostsOnly = !!(opts.commentsOwnPostsOnly);
-  const CONFIG = getConfig(mode);
+  const CONFIG = getConfig(mode, opts);
   const logEvery = mode === 'quick' ? 3 : 5;
   const modeLabel = mode === 'full' ? 'full' : 'quick';
 
@@ -1595,7 +1634,7 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
     await clickLoadMoreIfPresent();
     if (token.cancelled) break;
 
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' in window ? 'instant' : 'auto' });
+    aggressiveScrollToBottom();
 
     await delayMsCancellable(randomPauseMs(CONFIG.scrollPauseMs, 0.42), token);
     if (token.cancelled) break;
@@ -1651,7 +1690,7 @@ async function runScrollHarvest(kind, mode, token, rawCaps, opts = {}) {
         window.scrollBy(0, -window.innerHeight);
         await delayMsCancellable(1200, token);
         window.dispatchEvent(new Event('scroll'));
-        window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' in window ? 'instant' : 'auto' });
+        aggressiveScrollToBottom();
       } catch (_) { /* best-effort */ }
     }
     if (stallMs > STALL_TIMEOUT_MS) {
@@ -2212,12 +2251,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const skipMedia = !!msg.skipMedia;
     _diagnosticEnabled = !!msg.diagnosticEnabled;
     const commentsOwnPostsOnly = !!msg.commentsOwnPostsOnly;
+    const historicalFastScroll = !!msg.historicalFastScroll;
 
     (async () => {
       try {
         const caps = msg.caps;
         if (phase === 'comments' || phase === 'posts') {
-          const data = await runScrollHarvest(phase, mode, token, caps, { commentsOwnPostsOnly });
+          const data = await runScrollHarvest(phase, mode, token, caps,
+            { commentsOwnPostsOnly, historicalFastScroll });
           const key = phase === 'comments' ? 'fbcExport_comments' : 'fbcExport_posts';
           await chrome.storage.local.set({ [key]: data });
           sendResponse({ ok: true, data });

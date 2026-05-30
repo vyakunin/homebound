@@ -90,11 +90,18 @@ py_binary(
 )
 
 py_library(
+    name = "harvest_post_identity",
+    srcs = ["harvest_post_identity.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "activity_log",
     srcs = ["activity_log.py"],
     visibility = ["//visibility:public"],
     deps = [
         ":base",
+        ":harvest_post_identity",
         ":posts_io",
         "//proto:post_record",
     ],
@@ -107,6 +114,7 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":base",
+        ":harvest_post_identity",
         ":posts_io",
         "//proto:post_record",
     ],

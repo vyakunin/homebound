@@ -10,7 +10,9 @@ import pytest
 from django.utils import timezone as dj_timezone
 
 from blog.models import Post, PostComment, PostMedia, PostReaction, PostSource, PostVisibility, Tag
-from blog.management.commands.import_posts import Command, _copy_media
+from blog.management.commands.import_posts import (
+    Command, _copy_media, _is_more_precise_than,
+)
 from proto.comment import Comment
 from proto.post_record import PostRecord, Source, Visibility
 from proto.reaction import Reaction, ReactionType
@@ -302,6 +304,86 @@ class TestImportVisibilityMapping:
         cmd._import_record(self._make_record(Visibility.VISIBILITY_PRIVATE, "vis-priv"),
                            PostSource.GOOGLE_PLUS, None, False, counts)
         assert Post.objects.get(source_id="vis-priv").visibility == PostVisibility.PRIVATE
+
+
+class TestIsMorePreciseThan:
+    def _ts(self, h, m=0, s=0):
+        return datetime(2018, 8, 27, h, m, s, tzinfo=timezone.utc)
+
+    def test_existing_none_yields_true(self):
+        assert _is_more_precise_than(self._ts(15, 30, 0), None) is True
+
+    def test_incoming_none_yields_false(self):
+        assert _is_more_precise_than(None, self._ts(15, 30, 0)) is False
+
+    def test_precise_incoming_replaces_noon_existing(self):
+        assert _is_more_precise_than(self._ts(15, 30, 0), self._ts(12, 0, 0)) is True
+
+    def test_noon_incoming_does_not_replace_precise_existing(self):
+        assert _is_more_precise_than(self._ts(12, 0, 0), self._ts(15, 30, 0)) is False
+
+    def test_both_precise_keeps_existing(self):
+        assert _is_more_precise_than(self._ts(20, 11, 5), self._ts(15, 30, 0)) is False
+
+    def test_both_noon_keeps_existing(self):
+        assert _is_more_precise_than(self._ts(12, 0, 0), self._ts(12, 0, 0)) is False
+
+    def test_different_date_replaces_existing(self):
+        a = datetime(2018, 8, 28, 12, 0, 0, tzinfo=timezone.utc)
+        b = datetime(2018, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
+        assert _is_more_precise_than(a, b) is True
+
+
+@pytest.mark.django_db
+class TestPreservePreciseTimestamp:
+    """Post-2026-05-29: harvest captures noon-UTC timestamps (no utime), which
+    must NOT overwrite prod's pre-existing precise timestamps on --update-existing."""
+
+    def test_noon_incoming_does_not_overwrite_precise_existing(self):
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        # Prod row with PRECISE timestamp from original utime.
+        precise = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_precision_test",
+            source_url="https://www.facebook.com/vyakunin/posts/pfbid0test",
+            created_at=datetime(2018, 8, 27, 20, 11, 31, tzinfo=timezone.utc),
+            content_text="prod body",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+        )
+        cmd._import_record(precise, PostSource.FACEBOOK, None, False, counts, False)
+        # Re-import with NOON-UTC approximation (no utime available)
+        approx = dataclasses.replace(
+            precise,
+            created_at=datetime(2018, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
+            content_text="updated body",
+        )
+        cmd._import_record(approx, PostSource.FACEBOOK, None, False, counts, True)
+        assert counts["updated"] == 1
+        post = Post.objects.get(source_id="fb_precision_test")
+        assert post.created_at.hour == 20 and post.created_at.minute == 11
+        assert post.content_text == "updated body"
+
+    def test_precise_incoming_replaces_noon_existing(self):
+        """Reverse case: harvest with utime should refine an existing noon-UTC row."""
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        approx = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_refine_test",
+            source_url="https://www.facebook.com/vyakunin/posts/pfbid0test2",
+            created_at=datetime(2018, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
+            content_text="initial body",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+        )
+        cmd._import_record(approx, PostSource.FACEBOOK, None, False, counts, False)
+        precise = dataclasses.replace(
+            approx,
+            created_at=datetime(2018, 8, 27, 20, 11, 31, tzinfo=timezone.utc),
+        )
+        cmd._import_record(precise, PostSource.FACEBOOK, None, False, counts, True)
+        post = Post.objects.get(source_id="fb_refine_test")
+        assert post.created_at.hour == 20 and post.created_at.minute == 11
 
 
 @pytest.mark.django_db

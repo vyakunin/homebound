@@ -358,7 +358,38 @@
         const url = this.__fbHookUrl;
         if (looksLikeGraphQL(url)) {
           this.addEventListener('load', () => {
-            try { tryParseAndForward(this.responseText, url); } catch { /* noop */ }
+            // FB sets responseType on activity-log XHRs (observed 2026-05-29:
+            // arraybuffer for activity_log_stories). responseText throws for
+            // non-text responseType; we have to dispatch by type to recover
+            // the body text. Without this, only the few XHRs with default/text
+            // responseType reach tryParseAndForward — the activity_log ones
+            // silently fall through the catch, and the timestamp cache stays
+            // empty across the entire export.
+            const xhr = this;
+            try {
+              const rt = xhr.responseType;
+              if (!rt || rt === 'text') {
+                tryParseAndForward(xhr.responseText, url);
+              } else if (rt === 'json') {
+                const text = xhr.response == null ? '' : JSON.stringify(xhr.response);
+                tryParseAndForward(text, url);
+              } else if (rt === 'arraybuffer') {
+                const buf = xhr.response;
+                if (buf && buf.byteLength) {
+                  const text = new TextDecoder('utf-8').decode(new Uint8Array(buf));
+                  tryParseAndForward(text, url);
+                }
+              } else if (rt === 'blob') {
+                const blob = xhr.response;
+                if (blob && typeof blob.text === 'function') {
+                  blob.text().then((text) => tryParseAndForward(text, url)).catch(() => {});
+                }
+              } else if (rt === 'document') {
+                const doc = xhr.response;
+                const text = doc && doc.documentElement ? doc.documentElement.outerHTML : '';
+                if (text) tryParseAndForward(text, url);
+              }
+            } catch { /* noop */ }
           });
         }
         return origSend.apply(this, args);

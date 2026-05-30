@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -174,7 +175,8 @@ class MediaItem:
 @dataclass
 class ScopeInvariant:
     id: str
-    rule: str   # one of: media_hashes_not_all_identical
+    rule: str   # one of: media_hashes_not_all_identical,
+                #         no_leading_section_date_in_text
     min_posts_with_media: int
 
 
@@ -668,13 +670,42 @@ def check_month_pin(pin: MonthPin, posts_raw: list[dict]) -> CheckOutcome:
 
 
 def check_scope_invariant(invariant: ScopeInvariant, scope: Scope, export_dir: pathlib.Path) -> CheckOutcome:
-    """Assert a scope-wide invariant. Currently supports:
+    """Assert a scope-wide invariant. Supported rules:
        - media_hashes_not_all_identical: at least one post in the scope must
          have a media hash different from the others.
+       - no_leading_section_date_in_text: no raw row text starts with the
+         "Month DD, YYYY (View)?" pattern (section-date heading + audience
+         pill bleed — caused 8 prod rows from old harvests, 2026-05-29).
     """
     posts_raw = (json.loads((export_dir / "posts.json").read_text()) or {}).get("postsWithText") or []
     manifest_raw = json.loads((export_dir / "media_manifest.json").read_text()) if (export_dir / "media_manifest.json").exists() else []
     manifest = [MediaItem.from_raw(r) for r in manifest_raw]
+
+    if invariant.rule == "no_leading_section_date_in_text":
+        bad = []
+        for r in posts_raw:
+            text = (r.get("text") or "").lstrip()
+            if re.match(
+                r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+                r"\s+\d{1,2},\s*\d{4}\s*(?:View)?",
+                text, re.IGNORECASE,
+            ):
+                bad.append(f"postKey={r.get('postKey','?')[:80]} text[:80]={text[:80]!r}")
+        if bad:
+            return CheckOutcome(
+                entry_id=f"{invariant.id}@{scope.year}-{scope.month:02d}",
+                result=CheckResult.FAIL,
+                diffs=[f"{len(bad)} row(s) leak the section-date heading into row text:"] + bad[:5],
+                post_key=None,
+                media_count=0,
+            )
+        return CheckOutcome(
+            entry_id=f"{invariant.id}@{scope.year}-{scope.month:02d}",
+            result=CheckResult.PASS,
+            diffs=[],
+            post_key=None,
+            media_count=0,
+        )
 
     if invariant.rule == "media_hashes_not_all_identical":
         per_post_hashes: dict[str, list[str]] = {}

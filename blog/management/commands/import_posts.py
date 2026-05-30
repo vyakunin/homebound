@@ -16,6 +16,36 @@ import shutil
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
+
+def _is_more_precise_than(incoming, existing) -> bool:
+    """Whether `incoming` is more precise than `existing` (or `existing` is missing).
+
+    "Noon-UTC of the date" is the extractor's fallback when no time is
+    available — characterized by hour=12, minute=0, second=0 in UTC.
+    An incoming record at that exact wall-clock loses to a non-noon
+    existing value of the same date. Other cases prefer incoming.
+    """
+    if incoming is None:
+        return False
+    if existing is None:
+        return True
+    inc_utc = incoming.astimezone(dt_timezone.utc)
+    exi_utc = existing.astimezone(dt_timezone.utc)
+    if inc_utc.date() != exi_utc.date():
+        return True  # different day — accept incoming (likely a correction)
+    is_incoming_noon = (
+        inc_utc.hour == 12 and inc_utc.minute == 0 and inc_utc.second == 0
+    )
+    is_existing_noon = (
+        exi_utc.hour == 12 and exi_utc.minute == 0 and exi_utc.second == 0
+    )
+    # Only overwrite if incoming is strictly more precise.
+    if is_incoming_noon and not is_existing_noon:
+        return False
+    if not is_incoming_noon and is_existing_noon:
+        return True
+    return False  # both same shape — no reason to churn
+
 _PROTO_EPOCH = datetime(1970, 1, 1, 0, 0, 0, tzinfo=dt_timezone.utc)
 
 from django.conf import settings
@@ -172,28 +202,29 @@ class Command(BaseCommand):
         counts,
         update_existing: bool = False,
     ):
+        existing = None
         if record.source_id:
             existing = Post.objects.filter(
                 source=source_value, source_id=record.source_id,
             ).first()
-            if existing:
-                if not update_existing:
-                    counts['skipped'] += 1
-                    return
-                if dry_run:
-                    counts['updated'] += 1
-                    return
-                self._update_post_from_record(existing, record)
-                # Replace media when the new record has media items — handles cases where
-                # a previous import captured wrong images (e.g. from post comments).
-                if record.media:
-                    existing.media.all().delete()
-                    self._import_media(existing, record.media, media_dir,
-                                       record_extra=dict(record.extra))
-                    existing.media_count = existing.media.count()
-                    existing.save(update_fields=['media_count'])
+        if existing is not None:
+            if not update_existing:
+                counts['skipped'] += 1
+                return
+            if dry_run:
                 counts['updated'] += 1
                 return
+            self._update_post_from_record(existing, record)
+            # Replace media when the new record has media items — handles cases where
+            # a previous import captured wrong images (e.g. from post comments).
+            if record.media:
+                existing.media.all().delete()
+                self._import_media(existing, record.media, media_dir,
+                                   record_extra=dict(record.extra))
+                existing.media_count = existing.media.count()
+                existing.save(update_fields=['media_count'])
+            counts['updated'] += 1
+            return
 
         if dry_run:
             counts['created'] += 1
@@ -287,7 +318,14 @@ class Command(BaseCommand):
         post.title = record.title or ''
         post.content_text = record.content_text or ''
         post.content_html = record.content_html or ''
-        post.created_at = record.created_at
+        # Only overwrite created_at when the incoming record's timestamp is
+        # MORE precise than what we already have. Post-2026-05-29 FB DOM no
+        # longer exposes utime, so the activity-log extractor falls back to
+        # noon UTC of the rawText date (e.g. "August 27, 2018" → 2018-08-27
+        # 12:00:00 UTC). That would silently overwrite prod's precise
+        # imported_at-based timestamp with the noon-UTC approximation.
+        if _is_more_precise_than(record.created_at, post.created_at):
+            post.created_at = record.created_at
         post.source_url = record.source_url or ''
         post.visibility = visibility
         post.location_name = loc.name if loc else ''
