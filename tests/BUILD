@@ -91,6 +91,7 @@ django_py_test(
     srcs = ["test_import_posts.py"],
     deps = [
         "//blog:models",
+        "//blog/management/commands:dedup_drifted_posts",
         "//blog/management/commands:import_posts",
         "//proto:post_record",
         ":conftest_lib",
@@ -201,6 +202,7 @@ py_test(
     deps = [
         "//extractors:activity_log",
         "//extractors:base",
+        "//extractors:harvest_post_identity",
         "//extractors:posts_io",
         "//proto:post_record",
         requirement("pytest"),

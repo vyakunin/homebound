@@ -108,14 +108,27 @@ def _source_id_for_post(record: dict, content_text: str | None = None) -> str:
     if content_text is None:
         content_text = _clean_text(record.get('text', '') or '')
 
+    # Disambiguate reshares by the original's id ONLY when there's no commentary.
+    # Empty-commentary reshares of different originals on the same timestamp
+    # otherwise hash identically and collide (one overwrites the other on import).
+    # We scope this to the empty-commentary case deliberately: reshared pfbids
+    # ROTATE across harvests (verified ~1/3 drift in sampling), so folding an
+    # unstable id into the 580+ reshares that DO have commentary — whose text
+    # already disambiguates them — would cause far more re-import drift than the
+    # ~11 empty-commentary collisions it would fix. With commentary present, the
+    # text carries the identity; without it, the (imperfect) reshared id is the
+    # least-bad signal and touches only a handful of rows.
+    reshared_id = _parse_fb_id_from_url(record.get('reshared_from_url') or '') or ''
+    suffix = f'|resh:{reshared_id}' if (reshared_id and not content_text.strip()) else ''
+
     if utime:
-        seed = f'{int(utime)}|{content_text[:500]}'
+        seed = f'{int(utime)}|{content_text[:500]}{suffix}'
     elif raw_ts:
-        seed = f'{raw_ts}|{content_text[:500]}'
+        seed = f'{raw_ts}|{content_text[:500]}{suffix}'
     elif content_text:
-        seed = content_text[:1000]
+        seed = f'{content_text[:1000]}{suffix}'
     else:
-        seed = url
+        seed = f'{url}{suffix}'
 
     return 'al_' + hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]
 
@@ -124,3 +137,61 @@ def source_id_for_harvest_post(record: dict) -> str:
     """Public entry point: same key ``activity_log.extract`` uses for dedup."""
     cleaned = _clean_text(record.get('text', '') or '')
     return _source_id_for_post(record, content_text=cleaned)
+
+
+_URL_IN_TEXT_RE = re.compile(r'https?://[^\s)<>"\']+')
+
+
+def _comment_url_to_post_key(comment_url: str) -> str | None:
+    """Strip the comment_id query off a comment URL to get its parent post URL.
+
+    A harvested own-post comment URL looks like
+    ``https://www.facebook.com/<name>/posts/<pfbid>?comment_id=...``; the parent
+    post key is the same URL without the comment_id / reply_comment_id params.
+    """
+    if not comment_url:
+        return None
+    try:
+        p = urlparse(comment_url)
+    except ValueError:
+        return None
+    if not p.path:
+        return None
+    return f'{p.scheme}://{p.netloc}{p.path}'.rstrip('/') or None
+
+
+def _comment_sort_key(rec: dict) -> tuple[int, str]:
+    """Order comments oldest-first. utime when present (0 sorts first only if
+    genuinely 0); fall back to a large sentinel so timestamp-less comments sort
+    after timestamped ones rather than masquerading as the earliest."""
+    ts = rec.get('timestamp') or {}
+    utime = ts.get('utime') if isinstance(ts, dict) else None
+    return (int(utime) if utime else 1 << 62, rec.get('text', '') or '')
+
+
+def first_comment_link_by_post(comment_records: list[dict]) -> dict[str, str]:
+    """Map parent-post key → first (earliest) own-comment that contains a link.
+
+    Input: comments.json ``commentsWithText`` rows from a `--phase comments`
+    (own-posts-only) harvest — each with ``url`` (carries the parent post path +
+    comment_id), ``timestamp``, ``text``. People routinely drop the post's real
+    link in their own first comment because FB downranks in-body links; this
+    surfaces that link per post so it can enrich the post body and durable key.
+
+    Returns {post_key_url: first_link}. Posts whose earliest linking comment has
+    no URL are omitted.
+    """
+    by_post: dict[str, list[dict]] = {}
+    for rec in comment_records or []:
+        post_key = _comment_url_to_post_key(rec.get('url', '') or '')
+        if post_key:
+            by_post.setdefault(post_key, []).append(rec)
+
+    out: dict[str, str] = {}
+    for post_key, recs in by_post.items():
+        for rec in sorted(recs, key=_comment_sort_key):
+            m = _URL_IN_TEXT_RE.search(rec.get('text', '') or '')
+            if m:
+                out[post_key] = m.group(0)
+                break
+    return out

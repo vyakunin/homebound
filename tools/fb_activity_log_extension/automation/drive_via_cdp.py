@@ -356,13 +356,15 @@ def resolve_args(raw: argparse.Namespace) -> DriverArgs:
             from_y = to_y = raw.year
         else:
             from_y = to_y = now_year
-        # `--with-media` flag opts in; default is skip-media for speed.
-        with_media = bool(raw.with_media)
+        # Media is ON by default (images are real content). --skip-media is the
+        # explicit opt-out, for fast text-only bug iteration. --with-media kept
+        # as an explicit no-op alias for callers that still pass it.
+        with_media = raw.with_media or not raw.skip_media
         max_items = ITER_MAX_ITEMS if raw.max_items is None else raw.max_items
     else:
         from_y = raw.from_year or 2004
         to_y = raw.to_year or now_year
-        with_media = not raw.skip_media
+        with_media = raw.with_media or not raw.skip_media
         max_items = raw.max_items if raw.max_items is not None else 0
 
     if to_y < from_y:
@@ -743,9 +745,10 @@ def main() -> None:
     ap.add_argument("--to-year", type=int, default=None,
                     help="newest year (full mode, or iter multi-year archive)")
     ap.add_argument("--with-media", action="store_true",
-                    help="iter mode: also enrich media (default: skip media for speed)")
+                    help="explicit no-op alias; media is ON by default")
     ap.add_argument("--skip-media", action="store_true",
-                    help="full mode: metadata-only (no tab-enrichment)")
+                    help="metadata-only, no media tab-enrichment — for fast "
+                         "text-only bug iteration (media is ON by default)")
     ap.add_argument("--max-items", type=int, default=None,
                     help=f"override item cap (iter default: {ITER_MAX_ITEMS}, full default: 0)")
     ap.add_argument("--adaptive", action="store_true",

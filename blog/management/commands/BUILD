@@ -14,6 +14,17 @@ py_library(
 )
 
 py_library(
+    name = "dedup_drifted_posts",
+    srcs = ["dedup_drifted_posts.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//blog:models",
+        ":import_posts",
+        requirement("Django"),
+    ],
+)
+
+py_library(
     name = "fb_reimport",
     srcs = ["fb_reimport.py"],
     visibility = ["//visibility:public"],

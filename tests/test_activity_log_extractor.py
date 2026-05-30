@@ -1897,6 +1897,74 @@ class TestSpecificPostExtractionBugs:
         )
 
 
+class TestReshareIdentityInKey:
+    """A reshare's durable key must include the reshared post's id, so two
+    reshares of DIFFERENT originals with empty/identical commentary on the same
+    timestamp don't collide into one source_id (regression: they did — one would
+    overwrite the other on import)."""
+
+    def _reshare(self, own_pfbid, original_url, commentary="", utime=1700000000):
+        return {
+            "url": f"https://www.facebook.com/vyakunin/posts/{own_pfbid}",
+            "postKey": f"https://www.facebook.com/vyakunin/posts/{own_pfbid}",
+            "text": commentary,
+            "reshareCommentary": commentary,
+            "reshared_from_url": original_url,
+            "timestamp": {"utime": utime, "rawText": None},
+        }
+
+    def test_empty_commentary_reshares_of_different_originals_are_distinct(self):
+        from extractors.harvest_post_identity import source_id_for_harvest_post
+        a = self._reshare("pfbidOWNone", "https://www.facebook.com/alice/posts/pfbidORIGAAA")
+        b = self._reshare("pfbidOWNtwo", "https://www.facebook.com/bob/posts/pfbidORIGBBB")
+        assert source_id_for_harvest_post(a) != source_id_for_harvest_post(b)
+
+    def test_same_reshare_is_stable_across_harvests(self):
+        from extractors.harvest_post_identity import source_id_for_harvest_post
+        # same original + same timestamp + same commentary => same id, even if the
+        # user's own reshare pfbid string differs between harvests.
+        a = self._reshare("pfbidOWNharvestOne", "https://www.facebook.com/alice/posts/pfbidORIGAAA")
+        b = self._reshare("pfbidOWNharvestTwo", "https://www.facebook.com/alice/posts/pfbidORIGAAA")
+        assert source_id_for_harvest_post(a) == source_id_for_harvest_post(b)
+
+
+class TestFirstCommentLinkByPost:
+    """first_comment_link_by_post maps each own post to the link in its earliest
+    own-comment (the 'link in comment 1' pattern people use to dodge FB's
+    in-body-link downranking)."""
+
+    def _c(self, post_pfbid, comment_id, text, utime):
+        return {
+            "url": f"https://www.facebook.com/vyakunin/posts/{post_pfbid}?comment_id={comment_id}",
+            "timestamp": {"utime": utime, "rawText": None},
+            "text": text,
+        }
+
+    def test_picks_earliest_comment_link_per_post(self):
+        from extractors.harvest_post_identity import first_comment_link_by_post
+        recs = [
+            self._c("pfbidAAA", "11", "later comment https://late.example/x", 2000),
+            self._c("pfbidAAA", "10", "first! читайте https://real.example/article", 1000),
+            self._c("pfbidBBB", "20", "no link here", 1500),
+        ]
+        out = first_comment_link_by_post(recs)
+        assert out["https://www.facebook.com/vyakunin/posts/pfbidAAA"] == \
+            "https://real.example/article", "must take the EARLIEST comment's link"
+        assert "https://www.facebook.com/vyakunin/posts/pfbidBBB" not in out, \
+            "post whose comments carry no link is omitted"
+
+    def test_skips_link_in_later_comment_only_when_earlier_has_none(self):
+        from extractors.harvest_post_identity import first_comment_link_by_post
+        recs = [
+            self._c("pfbidCCC", "30", "just a reaction", 1000),
+            self._c("pfbidCCC", "31", "here it is https://link.example/post", 2000),
+        ]
+        out = first_comment_link_by_post(recs)
+        # earliest has no URL, so the first comment that DOES carry one wins
+        assert out["https://www.facebook.com/vyakunin/posts/pfbidCCC"] == \
+            "https://link.example/post"
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

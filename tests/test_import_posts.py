@@ -11,7 +11,7 @@ from django.utils import timezone as dj_timezone
 
 from blog.models import Post, PostComment, PostMedia, PostReaction, PostSource, PostVisibility, Tag
 from blog.management.commands.import_posts import (
-    Command, _copy_media, _is_more_precise_than,
+    Command, _content_fingerprint, _copy_media, _is_more_precise_than,
 )
 from proto.comment import Comment
 from proto.post_record import PostRecord, Source, Visibility
@@ -398,3 +398,158 @@ class TestCopyMediaPathLength:
         rel = _copy_media(src, 42, long_name)
         assert len(rel) <= 100
         assert (tmp_path / rel).is_file()
+
+
+@pytest.mark.django_db
+class TestSourceIdDriftReconciliation:
+    """Re-import of a post whose source_id drifted across importer versions must
+    reconcile the existing row, not mint a duplicate (regression: prod accrued
+    ~221 duplicate FB rows because the source_id algorithm changed between
+    imports and (source, source_id) dedup couldn't match the old rows)."""
+
+    def _imp(self, record, counts=None):
+        cmd = Command()
+        if counts is None:
+            counts = {'created': 0, 'updated': 0, 'skipped': 0,
+                      'reconciled': 0, 'errors': 0}
+        cmd._import_record(record, PostSource.FACEBOOK, None, False, counts)
+        return counts
+
+    def _fb_record(self, source_id: str, content: str,
+                   day: tuple[int, int, int] = (2024, 11, 12)) -> PostRecord:
+        return PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id=source_id,
+            created_at=datetime(*day, 12, 0, 0, tzinfo=timezone.utc),
+            content_text=content,
+            visibility=Visibility.VISIBILITY_PUBLIC,
+        )
+
+    def test_drifted_source_id_reconciles_instead_of_duplicating(self):
+        content = "думаю, впервые в истории Песков, Трамп и Маск одновременно не соврали"
+        c1 = self._imp(self._fb_record("al_9376ef21c92e2fbc", content))
+        assert c1['created'] == 1
+        c2 = self._imp(self._fb_record("al_060213493786206d", content))
+        assert c2['reconciled'] == 1
+        assert c2['created'] == 0
+        posts = Post.objects.filter(source=PostSource.FACEBOOK)
+        assert posts.count() == 1, "drifted re-import must not create a duplicate"
+        assert posts.first().source_id == "al_060213493786206d", \
+            "fingerprint-matched row should adopt the incoming source_id"
+
+    def test_empty_content_reshares_not_collapsed(self):
+        # commentary-only reshares have empty content_text; they must NOT all
+        # fingerprint-match into one row (empty fingerprint => no match).
+        c = {'created': 0, 'updated': 0, 'skipped': 0, 'reconciled': 0, 'errors': 0}
+        self._imp(self._fb_record("al_reshareA", ""), c)
+        self._imp(self._fb_record("al_reshareB", ""), c)
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 2
+        assert c['reconciled'] == 0
+
+    def test_distinct_content_same_date_not_reconciled(self):
+        c = {'created': 0, 'updated': 0, 'skipped': 0, 'reconciled': 0, 'errors': 0}
+        self._imp(self._fb_record("al_a", "first distinct post"), c)
+        self._imp(self._fb_record("al_b", "a second, different post"), c)
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 2
+        assert c['reconciled'] == 0
+
+    def test_fingerprint_ignores_whitespace_and_case(self):
+        assert _content_fingerprint("Hello  World") == _content_fingerprint("hello world")
+        assert _content_fingerprint("") == ""
+
+
+@pytest.mark.django_db
+class TestDedupDriftedPosts:
+    """The dedup_drifted_posts command keeps one survivor per content-fingerprint
+    group and deletes the drifted-id duplicates (cleanup for rows that predate
+    the importer's fingerprint reconciliation)."""
+
+    def _mk(self, source_id, content, *, media=0, comments=0, slug=None,
+            day=(2024, 11, 12)):
+        return Post.objects.create(
+            title="t",
+            content_text=content,
+            created_at=datetime(*day, 12, 0, 0, tzinfo=timezone.utc),
+            source=PostSource.FACEBOOK,
+            source_id=source_id,
+            visibility=PostVisibility.PUBLIC,
+            slug=slug or source_id,
+            media_count=media,
+            comment_count=comments,
+        )
+
+    def test_dry_run_deletes_nothing(self):
+        import io
+        from django.core.management import call_command
+        self._mk("al_1", "same body text")
+        self._mk("al_2", "same body text")
+        call_command('dedup_drifted_posts', source='facebook', dry_run=True,
+                     stdout=io.StringIO())
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 2
+
+    def test_keeps_richest_survivor_deletes_rest(self):
+        import io
+        from django.core.management import call_command
+        self._mk("al_lo", "duplicated body", media=0, comments=1)
+        self._mk("al_rich", "duplicated body", media=3, comments=5)  # survivor
+        self._mk("al_lo2", "duplicated body", media=0, comments=0)
+        # a genuinely different post on the same date must be untouched
+        self._mk("al_other", "unrelated body")
+        call_command('dedup_drifted_posts', source='facebook', stdout=io.StringIO())
+        fb = Post.objects.filter(source=PostSource.FACEBOOK)
+        assert fb.count() == 2  # survivor of the dup group + the unrelated post
+        assert fb.filter(source_id="al_rich").exists()
+        assert not fb.filter(source_id__in=["al_lo", "al_lo2"]).exists()
+        assert fb.filter(source_id="al_other").exists()
+
+    def test_empty_body_posts_never_grouped(self):
+        import io
+        from django.core.management import call_command
+        self._mk("al_e1", "", slug="al_e1")
+        self._mk("al_e2", "", slug="al_e2")
+        call_command('dedup_drifted_posts', source='facebook', stdout=io.StringIO())
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 2
+
+    def test_same_content_different_dates_not_merged(self):
+        # regression: a recurring short post (e.g. a "#hashtag" the user reuses)
+        # with identical body on different days is NOT a drift duplicate.
+        import io
+        from django.core.management import call_command
+        self._mk("al_h1", "#саратоввперде", slug="al_h1", day=(2024, 11, 1))
+        self._mk("al_h2", "#саратоввперде", slug="al_h2", day=(2024, 11, 8))
+        self._mk("al_h3", "#саратоввперде", slug="al_h3", day=(2025, 3, 4))
+        call_command('dedup_drifted_posts', source='facebook', stdout=io.StringIO())
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 3, \
+            "identical body on different dates must survive — not a drift dup"
+
+    def _attach_media(self, post, data: bytes):
+        from django.core.files.base import ContentFile
+        from blog.models import PostMedia, MediaType
+        m = PostMedia(post=post, media_type=MediaType.IMAGE, position=0)
+        m.file.save(f"img_{post.source_id}.bin", ContentFile(data), save=True)
+
+    def test_same_text_same_date_different_images_not_merged(self, settings, tmp_path):
+        # his ask: two same-text-same-day posts with DIFFERENT photos are
+        # distinct posts, not drift dups — the image hash must keep them apart.
+        import io
+        from django.core.management import call_command
+        settings.MEDIA_ROOT = str(tmp_path)
+        p1 = self._mk("al_img1", "same caption", slug="al_img1", media=1)
+        p2 = self._mk("al_img2", "same caption", slug="al_img2", media=1)
+        self._attach_media(p1, b"AAACAT")
+        self._attach_media(p2, b"BBBDOG")  # different image bytes
+        call_command('dedup_drifted_posts', source='facebook', stdout=io.StringIO())
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 2, \
+            "same text+date but different photos must not be merged"
+
+    def test_same_text_same_date_same_image_merged(self, settings, tmp_path):
+        import io
+        from django.core.management import call_command
+        settings.MEDIA_ROOT = str(tmp_path)
+        p1 = self._mk("al_s1", "same caption", slug="al_s1", media=1)
+        p2 = self._mk("al_s2", "same caption", slug="al_s2", media=1)
+        self._attach_media(p1, b"IDENTICAL-BYTES")
+        self._attach_media(p2, b"IDENTICAL-BYTES")  # same image → true drift dup
+        call_command('dedup_drifted_posts', source='facebook', stdout=io.StringIO())
+        assert Post.objects.filter(source=PostSource.FACEBOOK).count() == 1, \
+            "same text+date+image is a drift duplicate — should merge to one"

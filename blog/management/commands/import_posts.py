@@ -17,6 +17,23 @@ from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
 
+def _content_fingerprint(content_text: str) -> str:
+    """Stable fingerprint of a post body, independent of the source_id algorithm.
+
+    The source_id derivation (``source_id_for_harvest_post``) has changed across
+    importer versions, so a re-harvest of the same post can carry a *different*
+    source_id than the row already in the DB — defeating the (source, source_id)
+    dedup and minting a duplicate. This fingerprint (normalized text only) lets
+    the importer recognize "same post, drifted id" and reconcile in place.
+
+    Whitespace-collapsed + lowercased; empty for blank bodies (callers must skip
+    fingerprint matching for empty content to avoid collapsing all commentary-
+    only reshares on a date into one row).
+    """
+    norm = ' '.join((content_text or '').split()).lower()
+    return hashlib.sha256(norm.encode('utf-8')).hexdigest() if norm else ''
+
+
 def _is_more_precise_than(incoming, existing) -> bool:
     """Whether `incoming` is more precise than `existing` (or `existing` is missing).
 
@@ -172,7 +189,7 @@ class Command(BaseCommand):
             self._import_profile_links(profile_links_path, dry_run)
 
         source_value, _ = SOURCE_MAP[source_key]
-        counts = {'created': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
+        counts = {'created': 0, 'updated': 0, 'skipped': 0, 'reconciled': 0, 'errors': 0}
         records_read = 0
 
         for line_num, record in enumerate(_read_records_safe(binpb_path, counts), 1):
@@ -189,9 +206,41 @@ class Command(BaseCommand):
             f"Read {records_read} record(s) from {binpb_path.name}. "
             f"Import complete: {counts['created']} created, "
             f"{counts['updated']} updated, "
+            f"{counts.get('reconciled', 0)} reconciled (drifted source_id), "
             f"{counts['skipped']} skipped, {counts['errors']} errors"
             + (' (dry run)' if dry_run else '')
         )
+
+    def _find_by_fingerprint(self, record: PostRecord, source_value):
+        """Find an existing same-source row whose body fingerprint matches.
+
+        Candidates are scoped to the same calendar date (created_at is indexed),
+        then compared in Python. Returns the single match, or None if zero or
+        ambiguous (>1) — ambiguity falls through to create, never guesses.
+        """
+        fp = _content_fingerprint(record.content_text)
+        if not fp:
+            return None
+        candidates = Post.objects.filter(
+            source=source_value,
+            created_at__date=record.created_at.date(),
+        )
+        matches = [p for p in candidates if _content_fingerprint(p.content_text) == fp]
+        return matches[0] if len(matches) == 1 else None
+
+    def _reconcile_source_id(self, post, record: PostRecord, source_value, dry_run) -> None:
+        """Adopt the incoming source_id onto a fingerprint-matched row so future
+        imports match by id directly — unless blank, unchanged, or it would
+        collide with a different row's source_id (the unique constraint)."""
+        new_sid = record.source_id or ''
+        if not new_sid or post.source_id == new_sid or dry_run:
+            return
+        collides = Post.objects.filter(
+            source=source_value, source_id=new_sid,
+        ).exclude(pk=post.pk).exists()
+        if not collides:
+            post.source_id = new_sid
+            post.save(update_fields=['source_id'])
 
     def _import_record(
         self,
@@ -225,6 +274,18 @@ class Command(BaseCommand):
                 existing.save(update_fields=['media_count'])
             counts['updated'] += 1
             return
+
+        # source_id miss: the row may still exist under a drifted source_id from
+        # an older importer. Reconcile by content fingerprint instead of minting
+        # a duplicate. Only for non-empty bodies (see _content_fingerprint).
+        if (record.content_text or '').strip() and record.created_at:
+            match = self._find_by_fingerprint(record, source_value)
+            if match is not None:
+                self._reconcile_source_id(match, record, source_value, dry_run)
+                if update_existing and not dry_run:
+                    self._update_post_from_record(match, record)
+                counts['reconciled'] = counts.get('reconciled', 0) + 1
+                return
 
         if dry_run:
             counts['created'] += 1
