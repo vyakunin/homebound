@@ -396,6 +396,11 @@ def _sqlite_fallback(query: str, *, top_k: int) -> list[BotHit]:
 # ── Fusion ─────────────────────────────────────────────────────────────
 
 
+# NOTE: generic rank-contribution + greedy-MMR kernels also live in
+# agent_infra/lib/hybrid_search/fusion.py (rank_contrib, mmr_select), shared by the chat
+# archives + overheard. This stays its own copy on purpose: it's tuned + domain-coupled
+# (repost dampening, year-diversity MMR, date-anchor bonuses, BotHit) and ships inside the
+# deployed Django app, so it deliberately avoids a runtime dependency on agent_infra.
 def _fuse(
     kw: list[BotHit],
     sem: list[BotHit],
