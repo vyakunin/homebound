@@ -22,6 +22,15 @@ Expand **Activity Log URLs** in the wizard, paste URLs from your address bar wit
 
 If you are **already on Activity Log** with the correct filter, the wizard skips the “Go to…” step (or offers **Start harvest** without reloading).
 
+## Full archive (whole history, with media) — one click
+
+The **Full archive** button (Setup step) walks your **entire** history **month-by-month**, newest→oldest, harvesting posts + comments and writing **one Downloads folder per month** (with media). It exists because a single whole-archive export hits Manifest V3’s ~5-minute message-channel ceiling on large accounts and the media phase never lands — so the export is **chunked per month**, keeping every step small.
+
+- **Resumable**: progress is checkpointed per completed month in `chrome.storage.local`. If you stop it (the **Stop archive** button) or Chrome sleeps the worker, just click **Full archive** again — it skips finished months and continues. Empty months are marked complete so they aren’t revisited; only failed months are retried on the next click.
+- **Scope**: defaults to 2007→now. Narrow it first via **Date range** if you only want part of your history (the button leaves any bounds you already typed).
+- **Output**: per-month folders in the shape the importer expects. The Python importer dedups across folders; `tools/merge_activity_exports.py` can consolidate them into one set.
+- **No external tools**: this replaces the developer-only Python CDP driver — everything runs inside the extension.
+
 ## Files
 
 | File | Purpose |

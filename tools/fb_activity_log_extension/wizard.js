@@ -387,6 +387,66 @@ function generateIterationUnits(fromY, fromM, toY, toM, nowY, nowM, phase = 'com
   return out;
 }
 
+// ── Full-archive native mode (resumable, per-month export) ───────────────────
+//
+// The multi-month session (runMultiMonthSession) harvests per-month but then
+// runs ONE terminal media_zip across the whole merged archive. On a large
+// history that single sendMessage runs ~30 min and dies at MV3's ~5-min IPC
+// ceiling ("message channel closed before a response was received"), so media
+// never lands. The native full-archive mode instead runs harvest + media_zip
+// PER MONTH — each media_zip IPC call stays small (one month) and well under
+// the ceiling — and checkpoints completed months to chrome.storage so a stop /
+// SW sleep / re-click resumes where it left off. This is the in-extension
+// equivalent of the Python CDP backfill loop (per-month, resumable), so a
+// shipped user can export their full FB history with media from the wizard
+// alone, no driver. Produces one export dir per non-empty month (the importer
+// dedups across dirs; tools/merge_activity_exports.py can consolidate).
+
+const ARCHIVE_PROGRESS_KEY = 'fbcExport_archive_progress';
+
+// Earliest month the one-click "Full archive" preset reaches back to. FB
+// accounts predate the 2015 floor of this maintainer's data, so default to
+// 2007 for shipped users; empty early months produce no items and are skipped
+// (no dir written), so an over-wide floor costs only fast no-op navigations.
+const ARCHIVE_DEFAULT_FROM_YEAR = 2007;
+
+// Label a single archive iteration unit. Archive mode is always month-granular
+// (FB's posts source ignores year-only URLs), so every unit has a month.
+function archiveUnitLabel(u) {
+  return `${u.year}-${String(u.month).padStart(2, '0')}`;
+}
+
+// Stable identifier for a full-archive plan (its date bounds). A checkpoint
+// from a DIFFERENT range must not be resumed against the current one, else the
+// "done" set would skip months the new range actually needs.
+function archivePlanKey(fromY, fromM, toY, toM) {
+  const p = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
+  return `${p(fromY)}-${p(fromM)}..${p(toY)}-${p(toM)}`;
+}
+
+// Filter the full month-unit list down to those NOT already completed.
+// `doneLabels` is an array (or Set) of archiveUnitLabel strings from the
+// resumable checkpoint. Preserves input order (newest → oldest).
+function remainingArchiveUnits(allUnits, doneLabels) {
+  const done = doneLabels instanceof Set ? doneLabels : new Set(doneLabels || []);
+  return (allUnits || []).filter((u) => !done.has(archiveUnitLabel(u)));
+}
+
+// Whether a per-month harvest outcome counts as "complete" for checkpoint
+// purposes. 'empty' months ARE complete (nothing there) — marking them done is
+// what lets the run converge instead of revisiting empty months forever. Only
+// 'failed' stays undone so a re-run retries it; 'stopped' is a user abort.
+function archiveUnitDone(status) {
+  return status === 'ok' || status === 'empty';
+}
+
+// Human-readable progress line for the archive run.
+function archiveProgressLine(doneCount, total, label, stage) {
+  const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+  const tail = stage ? ` — ${stage}` : '';
+  return `Full archive: ${doneCount}/${total} months done (${pct}%) — ${label}${tail}`;
+}
+
 // Merge two harvest results into one (same shape as buildScrollHarvestReturn
 // in content.js). Used when iterating month-by-month: each per-month sendPhase
 // returns a result for that month only; we merge them client-side so the
@@ -882,6 +942,191 @@ async function autoZipAndDownload() {
   }
 }
 
+async function loadArchiveCheckpoint(planKey) {
+  const r = await chrome.storage.local.get([ARCHIVE_PROGRESS_KEY]);
+  const cp = r[ARCHIVE_PROGRESS_KEY];
+  if (cp && cp.planKey === planKey && Array.isArray(cp.done)) return cp;
+  return { planKey, done: [], startedAt: Date.now() };
+}
+
+async function saveArchiveCheckpoint(cp) {
+  cp.updatedAt = Date.now();
+  await chrome.storage.local.set({ [ARCHIVE_PROGRESS_KEY]: cp });
+}
+
+// Harvest ONE month (posts and/or comments) and write its own per-month export
+// dir via media_zip. Isolating each month keeps the media_zip IPC call small
+// (the whole point — a single whole-archive media_zip dies at MV3's ~5-min
+// ceiling). Returns a status string consumed by archiveUnitDone:
+//   'ok'      — items found, per-month dir written
+//   'empty'   — no posts/comments this month, nothing written (still complete)
+//   'failed'  — a harvest/zip step errored; leave undone so a re-run retries
+//   'stopped' — user hit Stop mid-unit
+async function harvestArchiveUnit(unit, mode, skipMedia) {
+  const label = archiveUnitLabel(unit);
+  // Isolate this month: media_zip packages only what's in these keys.
+  await chrome.storage.local.remove(['fbcExport_comments', 'fbcExport_posts']);
+
+  let items = 0;
+  let failed = false;
+
+  if (mode.comments && !_multiMonthStopRequested) {
+    const stop = startProgressPolling('harvest-comments-progress', (m) =>
+      setStatus(`${label} comments: ${m}`),
+    );
+    try {
+      const urls = await getNavUrls(unit);
+      await navigateTab(urls.comments);
+      const res = await sendPhase('comments', {
+        commentsOwnPostsOnly: getWizardPrefsPayload().commentsOwnPostsOnly,
+      });
+      stop();
+      if (res?.ok) {
+        await chrome.storage.local.set({ fbcExport_comments: res.data });
+        items += res.data?.commentsWithTextCount ?? 0;
+      } else {
+        failed = true;
+      }
+    } catch (e) {
+      stop();
+      failed = true;
+      setStatus(`${label} comments: ${e} — continuing`, true);
+    }
+  }
+
+  if (mode.posts && !_multiMonthStopRequested) {
+    const stop = startProgressPolling('harvest-posts-progress', (m) =>
+      setStatus(`${label} posts: ${m}`),
+    );
+    try {
+      const urls = await getNavUrls(unit);
+      await navigateTab(urls.posts);
+      const res = await sendPhase('posts', {});
+      stop();
+      if (res?.ok) {
+        await chrome.storage.local.set({ fbcExport_posts: res.data });
+        items += res.data?.postsWithTextCount ?? 0;
+      } else {
+        failed = true;
+      }
+    } catch (e) {
+      stop();
+      failed = true;
+      setStatus(`${label} posts: ${e} — continuing`, true);
+    }
+  }
+
+  if (_multiMonthStopRequested) return 'stopped';
+  // Empty month: skip media_zip so we don't litter Downloads with empty dirs.
+  // A month with zero items is genuinely complete (nothing to export).
+  if (items === 0) return failed ? 'failed' : 'empty';
+
+  try {
+    const zipRes = await sendPhase('media_zip', { skipMedia });
+    return zipRes?.ok ? 'ok' : 'failed';
+  } catch (e) {
+    setStatus(`${label} export: ${e} — will retry on next run`, true);
+    return 'failed';
+  }
+}
+
+// Native full-archive orchestrator. Walks the full month list newest→oldest,
+// harvesting + writing one export dir per non-empty month, checkpointing each
+// completed month so the run is resumable. Sidesteps the terminal-media_zip
+// IPC death of runMultiMonthSession by keeping every media_zip to one month.
+async function runFullArchiveSession() {
+  _multiMonthStopRequested = false;
+  const mode = getHarvestMode();
+  if (!mode.comments && !mode.posts) {
+    setStatus('Select at least one item to harvest.', true);
+    return;
+  }
+  const skipMedia = document.getElementById('skip-media')?.checked || false;
+
+  const r = await getDateRange();
+  const { year: nowY, month: nowM } = nowYearMonth();
+  const units = generateMonthRange(
+    r.fromYear,
+    r.fromMonth,
+    r.toYear,
+    r.toMonth,
+    nowY,
+    nowM,
+  );
+  if (units.length === 0) {
+    setStatus('Full archive: empty month range — use "Full archive" to auto-fill, or fix the date inputs.', true);
+    return;
+  }
+
+  const planKey = archivePlanKey(r.fromYear, r.fromMonth, r.toYear, r.toMonth);
+  const cp = await loadArchiveCheckpoint(planKey);
+  const total = units.length;
+  const remaining = remainingArchiveUnits(units, cp.done);
+
+  if (remaining.length === 0) {
+    await chrome.storage.local.remove([ARCHIVE_PROGRESS_KEY]);
+    setStatus(`✓ Full archive already complete — ${total}/${total} months. Re-run "Start over" for a fresh pass.`);
+    showStep('step-done');
+    return;
+  }
+
+  showStep('step-zip');
+  // Expose Finish-now as the archive Stop affordance: its handler calls
+  // sendStop(), which sets _multiMonthStopRequested so the loop breaks after the
+  // current month (that month stays unmarked → resumes on the next click).
+  const finishBtn = document.getElementById('btn-finish-now');
+  if (finishBtn) {
+    finishBtn.classList.remove('hidden');
+    finishBtn.disabled = false;
+    finishBtn.textContent = 'Stop archive (resumable)';
+  }
+  setStatus(
+    archiveProgressLine(cp.done.length, total, archiveUnitLabel(remaining[0]), 'starting'),
+  );
+
+  for (const unit of remaining) {
+    if (_multiMonthStopRequested) break;
+    const label = archiveUnitLabel(unit);
+    setStatus(archiveProgressLine(cp.done.length, total, label, 'harvesting'));
+
+    let status;
+    try {
+      status = await harvestArchiveUnit(unit, mode, skipMedia);
+    } catch (e) {
+      setStatus(`${label}: ${e} — will retry on next run`, true);
+      continue; // leave undone for retry
+    }
+
+    if (status === 'stopped') break;
+    if (archiveUnitDone(status)) {
+      cp.done.push(label);
+      await saveArchiveCheckpoint(cp);
+    }
+    // 'failed' → leave undone; the next run revisits only the failures.
+  }
+
+  // Reset the borrowed Finish-now button (its click handler mutated text/state).
+  const fb = document.getElementById('btn-finish-now');
+  if (fb) {
+    fb.classList.add('hidden');
+    fb.disabled = true;
+    fb.textContent = 'Finish now (save what\'s collected)';
+  }
+
+  const stillLeft = remainingArchiveUnits(units, cp.done).length;
+  if (_multiMonthStopRequested) {
+    setStatus(`Stopped — ${cp.done.length}/${total} months done. Click "Full archive" again to resume.`);
+    showStep('step-intro');
+  } else if (stillLeft === 0) {
+    await chrome.storage.local.remove([ARCHIVE_PROGRESS_KEY]);
+    setStatus(`✓ Full archive complete — ${cp.done.length}/${total} months. One folder per month in Downloads.`);
+    showStep('step-done');
+  } else {
+    setStatus(`Full archive: ${cp.done.length}/${total} done, ${stillLeft} month(s) failed — click "Full archive" again to retry just those.`);
+    showStep('step-intro');
+  }
+}
+
 async function startPostsHarvest() {
   const harvestBtn = document.getElementById('btn-harvest-posts');
   const stopBtn = document.getElementById('btn-stop-posts');
@@ -1128,6 +1373,43 @@ function bindUi() {
     runMultiMonthSession().catch((e) => setStatus(String(e), true));
   });
 
+  // Native full-archive mode: one click pre-fills the date range to the whole
+  // history, then runs the resumable per-month export (each month its own dir,
+  // each media_zip small enough to dodge MV3's IPC ceiling). Replaces the
+  // Python CDP driver for shipped users.
+  const fullArchiveBtn = document.getElementById('btn-full-archive');
+  if (fullArchiveBtn) {
+    fullArchiveBtn.addEventListener('click', async () => {
+      const mode = getHarvestMode();
+      if (!mode.comments && !mode.posts) {
+        setStatus('Select at least one item to harvest.', true);
+        return;
+      }
+      const { year: nowY, month: nowM } = nowYearMonth();
+      // Pre-fill the full range so generateMonthRange yields every month and
+      // the plan key is stable across resumes. Leave existing inputs if the
+      // user already narrowed the range (treat their bounds as intentional).
+      const setIf = (id, val) => {
+        const el = document.getElementById(id);
+        if (el && (el.value === '' || el.value == null)) el.value = String(val);
+      };
+      setIf('from-year', ARCHIVE_DEFAULT_FROM_YEAR);
+      setIf('from-month', 1);
+      setIf('to-year', nowY);
+      setIf('to-month', nowM);
+      try {
+        await saveDateRangeFromInputs();
+      } catch (e) {
+        setStatus(`Failed to save date range: ${e}`, true);
+        return;
+      }
+      const r = await getDateRange();
+      const units = generateMonthRange(r.fromYear, r.fromMonth, r.toYear, r.toMonth, nowY, nowM);
+      setStatus(`Full archive: ${units.length} months, newest→oldest, one folder per month, resumable. Starting…`);
+      runFullArchiveSession().catch((e) => setStatus(String(e), true));
+    });
+  }
+
   document.getElementById('btn-back-intro').addEventListener('click', () => {
     showStep('step-intro');
     setStatus('');
@@ -1285,5 +1567,10 @@ if (typeof module !== 'undefined' && module.exports) {
     generateIterationUnits,
     isBrokenCommentsUrl,
     mergeHarvestResults,
+    archiveUnitLabel,
+    archivePlanKey,
+    remainingArchiveUnits,
+    archiveUnitDone,
+    archiveProgressLine,
   };
 }
