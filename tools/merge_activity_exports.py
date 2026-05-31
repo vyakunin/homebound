@@ -67,11 +67,29 @@ def merge_comments(dirs: list[Path]) -> list[dict]:
 
 
 def copy_media(dirs: list[Path], out: Path) -> int:
-    """Best-effort: copy media files; manifest entries merged by filename."""
+    """Copy media into one dir under content-addressed (sha256) filenames.
+
+    The extension names media per-dir-locally (base64 of a shared URL prefix +
+    a per-dir sequential counter), so `aHR0cHM6Ly93d3cu_00000.jpg` is a DIFFERENT
+    image in every export dir. Merging by bare filename collapses ~1100 files to
+    ~40. We instead rename each file to ``sha256(bytes)[:24]+ext`` — globally
+    unique AND content-addressed, so byte-identical captures of the same image
+    (e.g. a busy month re-run) dedup for free.
+
+    Each kept manifest entry's ``filename`` is rewritten to the sha name so the
+    importer (which copies by ``entry['filename']`` and links to a post by
+    ``entry['sourcePermalink']``) resolves the file. Dirs are iterated in the
+    SAME sorted order as ``merge_posts``: the first dir's post row wins the
+    source_id dedup AND its manifest entry wins here, so the winning row's
+    postKey pfbid and the kept entry's sourcePermalink pfbid stay consistent
+    (reshare pfbids rotate across harvests).
+    """
+    import hashlib
+
     media_out = out / "media"
     media_out.mkdir(parents=True, exist_ok=True)
     manifest: list[dict] = []
-    seen_files: set[str] = set()
+    sha_to_name: dict[str, str] = {}
     n_files = 0
     for d in dirs:
         mm = d / "media_manifest.json"
@@ -80,15 +98,22 @@ def copy_media(dirs: list[Path], out: Path) -> int:
             continue
         for entry in json.loads(mm.read_text()):
             fn = entry.get("filename") or ""
-            if not fn or fn in seen_files:
+            if not fn:
                 continue
             src = src_media / fn
             if not src.exists():
                 continue
-            shutil.copy2(src, media_out / fn)
-            seen_files.add(fn)
-            manifest.append(entry)
-            n_files += 1
+            sha = hashlib.sha256(src.read_bytes()).hexdigest()
+            new_name = sha_to_name.get(sha)
+            if new_name is None:
+                new_name = sha[:24] + Path(fn).suffix
+                shutil.copy2(src, media_out / new_name)
+                sha_to_name[sha] = new_name
+                n_files += 1
+            # Rewrite the entry to point at the content-addressed file. Same image
+            # bytes referenced by multiple posts keep separate manifest entries
+            # (distinct sourcePermalink) so per-post linkage survives.
+            manifest.append({**entry, "filename": new_name})
     (out / "media_manifest.json").write_text(json.dumps(manifest, indent=2))
     return n_files
 
@@ -102,6 +127,13 @@ def main() -> None:
                     help="output directory (created fresh)")
     ap.add_argument("--since", default=None,
                     help="only dirs with mtime on/after YYYY-MM-DD")
+    ap.add_argument("--max-posts-per-dir", type=int, default=0,
+                    help="skip dirs whose posts.json holds more than N posts. "
+                         "Use to exclude whole-archive (year-level / skip-media map) "
+                         "dirs from a per-month merge: their reshare pfbids may have "
+                         "rotated vs the per-month media-on captures, and a longer "
+                         "map row winning the dedup would orphan media linked by the "
+                         "per-month manifest's sourcePermalink. 0 = no limit.")
     args = ap.parse_args()
 
     since_ts = 0.0
@@ -113,6 +145,16 @@ def main() -> None:
     if since_ts:
         dirs = [d for d in dirs if d.is_dir() and d.stat().st_mtime >= since_ts]
     dirs = [d for d in dirs if d.is_dir() and (d / "posts.json").exists()]
+    if args.max_posts_per_dir:
+        kept = []
+        for d in dirs:
+            n = len(json.loads((d / "posts.json").read_text()).get("postsWithText") or [])
+            if n > args.max_posts_per_dir:
+                print(f"  skip {d.name}: {n} posts > --max-posts-per-dir "
+                      f"{args.max_posts_per_dir} (whole-archive dir)")
+            else:
+                kept.append(d)
+        dirs = kept
     if not dirs:
         sys.exit(f"no export dirs matching {args.pattern!r} under {args.downloads}")
 
