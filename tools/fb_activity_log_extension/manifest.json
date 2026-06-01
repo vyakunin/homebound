@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "FB Activity Log Export (personal)",
-  "version": "2.8.40",
-  "description": "Wizard: Activity Log comments, posts, streaming media export, GraphQL timestamp recovery, Finish-Now bail-out. Personal/local use; not affiliated with Meta.",
+  "name": "Homebound: Activity Log Exporter",
+  "version": "2.8.41",
+  "description": "Export your own Facebook activity log — posts, comments, and media — to a local ZIP. Runs entirely on your device; data is never transmitted to a third party. Not affiliated with Meta.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
