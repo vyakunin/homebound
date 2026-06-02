@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Homebound: Timeline Exporter",
   "version": "1.4.3",
-  "description": "Export your own X (formerly Twitter) profile timeline — posts and media — to a local ZIP. Runs entirely on your device; data is never transmitted to a third party. Not affiliated with X Corp.",
+  "description": "Export your own X (Twitter) profile timeline — posts and media — to a local ZIP. Runs on your device; nothing is sent anywhere.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
