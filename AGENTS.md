@@ -4,7 +4,7 @@ Homebound is a Django blog generator: it ingests your social media archives (Goo
 
 This repo contains the application code. Site-specific deployment configs, operational runbooks, and personal data live in your own private overlay repo (the maintainer's lives at `homebound-platform`). See `docs/HIGH_LEVEL_DESIGN.md`.
 
-Cursor rules: `.cursor/rules/` (symlinks to `~/.cursor/shared_rules/`). See `rules_management.mdc` for the layout.
+Cursor rules: `.claude/rules/`. See `rules_management.md` for the layout.
 
 ---
 
@@ -62,7 +62,7 @@ Follow `docs/DJANGO_BLOG_DESIGN.md` and `docs/HIGH_LEVEL_DESIGN.md`. Use a venv 
 
 ## Build System
 
-Bazel-based; see `.cursor/rules/bazel.mdc` for conventions. Package layout: `blog/`, `django_config/`, `extractors/`, `tests/`, `tools/`, `mcp_server/`.
+Bazel-based; see `.claude/rules/bazel.md` for conventions. Package layout: `blog/`, `django_config/`, `extractors/`, `tests/`, `tools/`, `mcp_server/`.
 
 - Run tests: `bazel test //tests:...`
 - Run server: `bazel run //:runserver` (port 8080)

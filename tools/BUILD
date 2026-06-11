@@ -11,15 +11,6 @@ py_binary(
 )
 
 py_binary(
-    name = "sync_rules",
-    srcs = ["sync_rules.py"],
-    main = "sync_rules.py",
-    python_version = "PY3",
-    deps = [],
-    visibility = ["//visibility:public"],
-)
-
-py_binary(
     name = "sync_extension_shared",
     srcs = ["sync_extension_shared.py"],
     main = "sync_extension_shared.py",
