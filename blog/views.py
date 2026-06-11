@@ -1,8 +1,11 @@
+import json
 import logging
 import random
 import re
+import subprocess
 from collections import Counter
 from functools import lru_cache
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
@@ -173,6 +176,64 @@ def upload_image(request):
         return JsonResponse({'error': 'Unsupported image type'}, status=400)
     path = default_storage.save(f"posts/{now().strftime('%Y/%m')}/{file.name}", file)
     return JsonResponse({'url': default_storage.url(path)})
+
+
+@login_required
+@require_POST
+def fb_post_api(request):
+    """Staff-only: publish a text post to Facebook via Playwright session."""
+    if not request.user.is_staff:
+        return JsonResponse({'error': 'Forbidden'}, status=403)
+
+    message = ''
+    if request.content_type and 'application/json' in request.content_type:
+        try:
+            payload = json.loads(request.body.decode() or '{}')
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        message = (payload.get('message') or '').strip()
+        dry_run = bool(payload.get('dry_run'))
+    else:
+        message = (request.POST.get('message') or '').strip()
+        dry_run = request.POST.get('dry_run') in ('1', 'true', 'yes')
+
+    if not message:
+        return JsonResponse({'error': 'message is required'}, status=400)
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / 'tools' / 'fb_post_playwright.py'
+    if not script.is_file():
+        return JsonResponse({'error': 'fb_post_playwright.py not found'}, status=500)
+
+    cmd = [
+        'uv', 'run', '--with', 'playwright',
+        'python', str(script),
+        '--message', message,
+        '--headless',
+    ]
+    if dry_run:
+        cmd.append('--dry-run')
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return JsonResponse({'error': 'Facebook post timed out'}, status=504)
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or exc.stdout or '').strip()
+        _log.warning('fb_post_api failed: %s', err)
+        return JsonResponse({'error': err or 'post failed'}, status=502)
+
+    try:
+        return JsonResponse(json.loads(proc.stdout))
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'ok', 'raw': proc.stdout.strip()})
 
 
 class TagView(_InfiniteScrollMixin, ListView):

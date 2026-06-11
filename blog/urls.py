@@ -11,6 +11,7 @@ urlpatterns = [
     path('post/<slug:slug>/edit/', views.PostUpdateView.as_view(), name='post_edit'),
     path('new/', views.PostCreateView.as_view(), name='post_create'),
     path('api/upload-image/', views.upload_image, name='upload_image'),
+    path('api/fb/post/', views.fb_post_api, name='fb_post_api'),
     path('api/search/semantic/', views.semantic_search_api, name='semantic_search_api'),
     path('api/bot/ask/', views.bot_ask_api, name='bot_ask_api'),
     path('bot/', views.BotWidgetView.as_view(), name='bot_widget'),
