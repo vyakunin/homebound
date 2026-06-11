@@ -14,6 +14,16 @@ py_library(
 )
 
 py_library(
+    name = "build_sft_dataset",
+    srcs = ["build_sft_dataset.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//blog:models",
+        requirement("Django"),
+    ],
+)
+
+py_library(
     name = "dedup_drifted_posts",
     srcs = ["dedup_drifted_posts.py"],
     visibility = ["//visibility:public"],

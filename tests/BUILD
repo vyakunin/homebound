@@ -100,6 +100,16 @@ django_py_test(
 )
 
 django_py_test(
+    name = "test_build_sft_dataset",
+    srcs = ["test_build_sft_dataset.py"],
+    deps = [
+        "//blog:models",
+        "//blog/management/commands:build_sft_dataset",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
     name = "test_bot",
     srcs = ["test_bot.py"],
     deps = [
