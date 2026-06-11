@@ -78,9 +78,26 @@ kill_user_chrome() {
 REFRESH=0
 if [ "${1:-}" = "--refresh" ]; then REFRESH=1; fi
 
-if already_up; then
+# Without --refresh, a live debug port means there's nothing to do. With
+# --refresh we always rebuild, even if the port is up (the whole point is to
+# resync cookies/extensions), so skip this short-circuit.
+if [ "$REFRESH" != "1" ] && already_up; then
   echo "Chrome debug port $PORT already up. Run with --refresh to rebuild the profile copy." >&2
   exit 0
+fi
+
+# A running debug Chrome holds the port + the profile lock; kill it before the
+# rebuild or rsync/launch will race the lock. Only matches the debug profile
+# (NOT the user's main Chrome, NOT mcp-chrome-profile).
+if [ "$REFRESH" = "1" ] && already_up; then
+  echo "Refresh: stopping running debug Chrome on $DEBUG_PROFILE..." >&2
+  ps -ax -o pid,command \
+    | grep -E "Google Chrome.app/Contents/MacOS/Google Chrome" \
+    | grep -F -- "--user-data-dir=$DEBUG_PROFILE" \
+    | grep -v grep \
+    | awk '{print $1}' \
+    | xargs -I{} kill -KILL {} 2>/dev/null || true
+  sleep 2
 fi
 
 if [ "$REFRESH" = "1" ] || [ ! -d "$DEBUG_PROFILE" ]; then
