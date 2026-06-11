@@ -26,18 +26,64 @@ _LEADING_SECTION_DATE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Trailing UI labels: visibility + (optional time-of-day) + optional "View".
-# FB sometimes emits the audience pill alone (no HH:MM, no View) \u2014 observed on
-# the 2026-05-28 historical re-harvest, 9 rows where prod has "foo" and
-# incoming has "fooPublic". Time portion is optional to match both shapes.
+# Activity-log visibility (audience-pill) tokens. FB concatenates these onto row
+# text with no separating whitespace, and sometimes stacks two ("PublicHidden
+# from profile"). Shared by the trailing-strip and the inter-row-seam detector.
+_VISIBILITY = (
+    r'(?:Public|Friends|Custom|Only me|Close Friends|Hidden from profile)'
+)
+
+# Trailing UI labels: visibility (one or more, optionally stacked) + optional
+# time-of-day + optional "View". FB sometimes emits the audience pill alone (no
+# HH:MM, no View) \u2014 observed on the 2026-05-28 historical re-harvest, 9 rows
+# where prod has "foo" and incoming has "fooPublic". "Hidden from profile" added
+# 2026-06-04 (e.g. "...\u043d\u0435 \u0421\u0430\u0440\u0430\u0442\u043e\u0432PublicHidden from profile3:57\u202fAM").
 _TRAILING_UI_RE = re.compile(
-    r'\s*(?:Public|Friends|Custom|Only me|Close Friends)'
+    r'\s*' + _VISIBILITY + r'(?:\s*' + _VISIBILITY + r')*'
     r'(?:\s*\d{1,2}:\d{2}[\u202f\s]*(?:AM|PM)?)?'
     r'\s*(?:View)?\s*$',
     re.IGNORECASE,
 )
 
 _TRAILING_VIEW_RE = re.compile(r'\s*View\s*$', re.IGNORECASE)
+
+# Inter-row seam: the scraper's findRowContainer fallback can over-climb and weld
+# several activity-log rows into one post's text. The seam between rows is the
+# audience-pill + (time) + (View) + the NEXT row's action verb, e.g.
+# "...\u0448\u0442\u0430\u0431\u0430Public8:29\u202fAM shared a link.\u041f\u0435\u0440\u0435\u0432\u0451\u043b \u0435\u0449\u0451 10\u043a...". A legitimate
+# single post body never contains this visibility\u2192action chrome mid-text. After
+# trailing/leading cleaning, any remaining seam means the row is a multi-row
+# concatenation that can't be reliably attributed to its single post URL \u2014 the
+# extractor drops such rows (2026-06-04).
+_INTER_ROW_SEAM_RE = re.compile(
+    _VISIBILITY + r'(?:\s*' + _VISIBILITY + r')*'
+    r'(?:\s*\d{1,2}:\d{2}[\u202f\s]*(?:AM|PM)?)?'
+    r'\s*(?:View)?'
+    r'\s*(?:shared|added|updated|commented|wrote|checked in|was|tagged|posted|replied)\b',
+    re.IGNORECASE,
+)
+
+# Whole-page activity-log chrome captured as a "post" (nav header + date list),
+# e.g. "Your posts, photos and videosAllArchiveTrashChange Audience...". Not a
+# post at all \u2014 drop.
+_PAGE_HEADER_CHROME_RE = re.compile(
+    r'Your posts,? photos and videosAll|AllArchiveTrashChange Audience',
+    re.IGNORECASE,
+)
+
+
+def has_row_chrome_contamination(cleaned_text: str) -> bool:
+    """True if cleaned text still carries activity-log UI chrome that marks it as
+    scraper over-capture (a multi-row concatenation or a page-header dump) rather
+    than a single post. Callers drop these rows instead of importing garbage.
+    Run AFTER ``_clean_text`` so genuine single-row trailing welds are already
+    stripped and don't trip the seam detector."""
+    if not cleaned_text:
+        return False
+    return bool(
+        _PAGE_HEADER_CHROME_RE.search(cleaned_text)
+        or _INTER_ROW_SEAM_RE.search(cleaned_text)
+    )
 
 _TRAILING_NOTIF_RE = re.compile(r'\s*\d+[smhd]\s*(?:Mark\s+as\s+read)?\s*$', re.IGNORECASE)
 

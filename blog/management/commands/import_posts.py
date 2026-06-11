@@ -351,6 +351,7 @@ class Command(BaseCommand):
 
         loc = record.location
         reshared = record.reshared_from
+        reply = record.reply_parent
 
         post = Post(
             title=record.title or '',
@@ -367,6 +368,10 @@ class Command(BaseCommand):
             reshared_from_author=reshared.author if reshared else '',
             reshared_from_url=reshared.url if reshared else '',
             reshared_content_text=reshared.content_text if reshared else '',
+            reply_to_author=reply.author if reply else '',
+            reply_to_url=reply.url if reply else '',
+            reply_to_text=reply.content_text if reply else '',
+            reply_to_source_id=reply.source_id if reply else '',
         )
         post.save()
         return post
@@ -404,6 +409,18 @@ class Command(BaseCommand):
                 post.reshared_from_url = reshared.url
             if reshared.content_text:
                 post.reshared_content_text = reshared.content_text
+        # Reply-parent fields merge per-field, same rule as reshared above:
+        # an empty value from one pipeline must not blank another's contribution.
+        reply = record.reply_parent
+        if reply:
+            if reply.author:
+                post.reply_to_author = reply.author
+            if reply.url:
+                post.reply_to_url = reply.url
+            if reply.content_text:
+                post.reply_to_text = reply.content_text
+            if reply.source_id:
+                post.reply_to_source_id = reply.source_id
         hint = 0
         if record.extra:
             try:

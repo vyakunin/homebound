@@ -14,7 +14,7 @@ from blog.management.commands.import_posts import (
     Command, _content_fingerprint, _copy_media, _is_more_precise_than,
 )
 from proto.comment import Comment
-from proto.post_record import PostRecord, Source, Visibility
+from proto.post_record import PostRecord, ReplyParent, Source, Visibility
 from proto.reaction import Reaction, ReactionType
 from proto.reshared_from import ResharedFrom
 
@@ -262,6 +262,116 @@ class TestImportRoundTrip:
         assert post.reshared_from_url == "https://www.facebook.com/original"
         assert post.reshared_from_author == "Original"
         assert post.reshared_content_text == "full body"
+
+    def test_import_reply_parent_on_create(self):
+        """reply_parent maps onto reply_to_* fields on a fresh create."""
+        cmd = Command()
+        counts = {"created": 0, "skipped": 0, "errors": 0}
+        record = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_reply_create_1",
+            created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            content_text="My reply on someone else's post.",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+            reply_parent=ReplyParent(
+                author="Parent Author",
+                url="https://www.facebook.com/parent/posts/1",
+                content_text="The post being replied to.",
+                source_id="parent-post-1",
+            ),
+        )
+        cmd._import_record(record, PostSource.FACEBOOK, None, False, counts)
+        post = Post.objects.get(source_id="fb_reply_create_1")
+        assert post.reply_to_author == "Parent Author"
+        assert post.reply_to_url == "https://www.facebook.com/parent/posts/1"
+        assert post.reply_to_text == "The post being replied to."
+        assert post.reply_to_source_id == "parent-post-1"
+
+    def test_update_existing_refreshes_reply_parent_fields(self):
+        """--update-existing overwrites reply_to_* when re-importing the same id."""
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        r1 = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_reply_update_1",
+            created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            content_text="my reply",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+            reply_parent=ReplyParent(
+                author="Old", url="https://x.com/old/status/1",
+                content_text="old parent", source_id="old-1",
+            ),
+        )
+        cmd._import_record(r1, PostSource.FACEBOOK, None, False, counts, False)
+        r2 = dataclasses.replace(
+            r1,
+            reply_parent=ReplyParent(
+                author="New", url="https://x.com/new/status/2",
+                content_text="new parent", source_id="new-2",
+            ),
+        )
+        cmd._import_record(r2, PostSource.FACEBOOK, None, False, counts, True)
+        post = Post.objects.get(source_id="fb_reply_update_1")
+        assert post.reply_to_author == "New"
+        assert post.reply_to_url == "https://x.com/new/status/2"
+        assert post.reply_to_text == "new parent"
+        assert post.reply_to_source_id == "new-2"
+
+    def test_update_existing_merges_reply_parent_per_field(self):
+        """A partial reply_parent (author+url only) overwrites those fields but
+        preserves an existing content_text from a prior fuller import."""
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        r1 = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_reply_merge_1",
+            created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            content_text="my reply",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+            reply_parent=ReplyParent(
+                author="OldAuthor", url="https://x.com/old/status/1",
+                content_text="full parent body", source_id="p-1",
+            ),
+        )
+        cmd._import_record(r1, PostSource.FACEBOOK, None, False, counts, False)
+        r2 = dataclasses.replace(
+            r1,
+            reply_parent=ReplyParent(
+                author="NewAuthor", url="https://x.com/new/status/2",
+                content_text="", source_id="",
+            ),
+        )
+        cmd._import_record(r2, PostSource.FACEBOOK, None, False, counts, True)
+        post = Post.objects.get(source_id="fb_reply_merge_1")
+        assert post.reply_to_author == "NewAuthor"
+        assert post.reply_to_url == "https://x.com/new/status/2"
+        assert post.reply_to_text == "full parent body"  # preserved
+        assert post.reply_to_source_id == "p-1"  # preserved
+
+    def test_update_existing_preserves_reply_parent_when_record_empty(self):
+        """--update-existing must not blank reply_to_* when the new record
+        carries no reply_parent (different pipeline writing the same row)."""
+        cmd = Command()
+        counts = {"created": 0, "updated": 0, "skipped": 0, "errors": 0}
+        r1 = PostRecord(
+            source=Source.SOURCE_FACEBOOK,
+            source_id="fb_reply_preserve_1",
+            created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            content_text="my reply",
+            visibility=Visibility.VISIBILITY_PUBLIC,
+            reply_parent=ReplyParent(
+                author="Original", url="https://x.com/orig/status/1",
+                content_text="original parent body", source_id="orig-1",
+            ),
+        )
+        cmd._import_record(r1, PostSource.FACEBOOK, None, False, counts, False)
+        r2 = dataclasses.replace(r1, reply_parent=None)
+        cmd._import_record(r2, PostSource.FACEBOOK, None, False, counts, True)
+        post = Post.objects.get(source_id="fb_reply_preserve_1")
+        assert post.reply_to_author == "Original"
+        assert post.reply_to_url == "https://x.com/orig/status/1"
+        assert post.reply_to_text == "original parent body"
+        assert post.reply_to_source_id == "orig-1"
 
     def test_tag_shared_across_posts(self):
         """When two posts have the same tag, only one Tag object is created."""

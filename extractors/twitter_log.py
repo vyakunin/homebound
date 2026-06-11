@@ -36,7 +36,7 @@ from extractors.base import copy_media_to_dated_dir
 from extractors.posts_io import write_records
 from proto.comment import Comment
 from proto.media_item import MediaItem, MediaType
-from proto.post_record import PostRecord, Source, Visibility
+from proto.post_record import PostRecord, ReplyParent, Source, Visibility
 from proto.reshared_from import ResharedFrom
 
 logger = logging.getLogger(__name__)
@@ -270,6 +270,7 @@ def extract(
         skipped_retweet = 0
         skipped_foreign = 0
         skipped_non_self_reply = 0
+        kept_reply_with_parent = 0
         media_attached = 0
 
         for raw, collected_at in all_posts:
@@ -308,6 +309,7 @@ def extract(
                 # exports). isReply + replyToHandle are set from the DOM
                 # "Replying to @X" span.
                 reply_screen_name = _normalize_handle(raw.get('replyToHandle'))
+            reply_parent = None
             if (
                 resolved_owner
                 and reply_screen_name
@@ -315,8 +317,32 @@ def extract(
                 and not is_retweet
                 and not raw.get('quotedTweet')
             ):
-                skipped_non_self_reply += 1
-                continue
+                # Plain reply into someone else's thread. Historically dropped
+                # (reads as a context-free one-liner in the blog feed). When the
+                # scraper captured the parent tweet's text (page_hook GraphQL
+                # `inReplyTo.text`, v1.5+), keep it instead as a (parent → his
+                # reply) pair — the high-value conversational SFT signal. Parent
+                # context rides in reply_parent, so the blog UI can still exclude
+                # it by visibility while the dataset uses it.
+                parent_text = (in_reply_to.get('text') or '').strip()
+                if parent_text:
+                    parent_source_id = (
+                        in_reply_to.get('statusId')
+                        or in_reply_to.get('id')
+                        or ''
+                    )
+                    reply_parent = ReplyParent(
+                        # reply_screen_name is normalised without '@'; match the
+                        # reshared_from convention where parent authors carry it.
+                        author=f'@{reply_screen_name}',
+                        url=in_reply_to.get('url') or '',
+                        content_text=parent_text,
+                        source_id=str(parent_source_id),
+                    )
+                    kept_reply_with_parent += 1
+                else:
+                    skipped_non_self_reply += 1
+                    continue
 
             # Build resharedFrom proto for retweets
             reshared_from = None
@@ -374,6 +400,8 @@ def extract(
                 record.created_at = created_at_dt
             if reshared_from is not None:
                 record.reshared_from = reshared_from
+            if reply_parent is not None:
+                record.reply_parent = reply_parent
 
             # Extra metadata
             like_count = raw.get('likeCount', 0)
@@ -466,6 +494,7 @@ def extract(
             'skipped_retweet': skipped_retweet,
             'skipped_foreign': skipped_foreign,
             'skipped_non_self_reply': skipped_non_self_reply,
+            'kept_reply_with_parent': kept_reply_with_parent,
             'owner_handle': resolved_owner,
         }
 
@@ -488,6 +517,7 @@ def extract(
         'skipped_retweet': skipped_retweet,
         'skipped_foreign': skipped_foreign,
         'skipped_non_self_reply': skipped_non_self_reply,
+        'kept_reply_with_parent': kept_reply_with_parent,
         'owner_handle': resolved_owner,
     }
 

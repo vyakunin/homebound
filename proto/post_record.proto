@@ -42,4 +42,18 @@ message PostRecord {
   repeated Comment comments = 14;
   repeated string tags = 15;
   map<string, string> extra = 16;
+  // Parent context for a reply (FB comment on another's post, X plain reply).
+  // Distinct from reshared_from: a reply is not a reshare — conflating them
+  // muddies both the blog UI and the SFT dataset.
+  ReplyParent reply_parent = 17;
+}
+
+// The post/tweet/comment-thread parent that this record is a reply to.
+// All fields optional; carries the parent's *content*, not just an id/url, so
+// the (parent → his reply) pair is usable as a training example.
+message ReplyParent {
+  string author = 1;
+  string url = 2;
+  string content_text = 3;
+  string source_id = 4;
 }

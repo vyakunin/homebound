@@ -86,6 +86,7 @@ class Command(BaseCommand):
             f"skipped retweets: {summary['skipped_retweet']}  "
             f"skipped foreign: {summary.get('skipped_foreign', 0)}  "
             f"skipped non-self replies: {summary.get('skipped_non_self_reply', 0)}  "
+            f"kept replies w/ parent: {summary.get('kept_reply_with_parent', 0)}  "
             f"owner: @{summary.get('owner_handle') or '?'}"
         )
 

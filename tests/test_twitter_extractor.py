@@ -715,6 +715,132 @@ class TestReplyToSelfFilter:
         assert result['records'] == 1
 
 
+class TestReplyParentCapture:
+    """When the scraper captured the parent tweet text (inReplyTo.text, v1.5+),
+    a reply into someone else's thread is KEPT as a (parent -> his reply) pair
+    with reply_parent populated, instead of being dropped."""
+
+    def _make_posts(self, entries: list[dict], owner: str = 'me') -> dict:
+        return {
+            'phase': 'replies',
+            'collectedAt': '2024-06-01T12:00:00Z',
+            'postsWithText': entries,
+            'postsWithTextCount': len(entries),
+            'mediaCandidates': [],
+            'ownerHandle': owner,
+        }
+
+    def _entry(self, tweet_id: str, text: str, handle: str = 'me', **extra) -> dict:
+        e = {
+            'tweetId': tweet_id,
+            'fbId': tweet_id,
+            'url': f'https://x.com/{handle}/status/{tweet_id}',
+            'timestamp': {'iso': '2024-05-20T10:00:00Z', 'utime': None, 'rawText': None},
+            'text': text,
+            'authorHandle': handle,
+        }
+        e.update(extra)
+        return e
+
+    def test_reply_with_parent_text_kept_as_reply_parent(self, tmp_path):
+        tweets = {
+            'phase': 'tweets',
+            'collectedAt': '2024-06-01T12:00:00Z',
+            'postsWithText': [self._entry('100', 'own original')],
+            'ownerHandle': 'me',
+        }
+        replies = self._make_posts([
+            self._entry(
+                '200', 'completely agree, well put',
+                inReplyTo={
+                    'statusId': '999',
+                    'screenName': 'stranger',
+                    'userId': '42',
+                    'url': 'https://x.com/stranger/status/999',
+                    'text': 'the original hot take everyone is replying to',
+                },
+                isReply=True,
+            ),
+        ])
+        zip_path = tmp_path / 'test.zip'
+        zip_path.write_bytes(make_zip(posts=tweets, comments=replies))
+
+        result = extract(zip_path, tmp_path / 'out')
+        # Not dropped — kept and counted separately from the legacy skip path.
+        assert result['skipped_non_self_reply'] == 0
+        assert result['kept_reply_with_parent'] == 1
+        assert result['records'] == 2
+
+        records = {r.source_id: r for r in read_records(tmp_path / 'out' / 'posts.binpb')}
+        reply = records['200']
+        assert reply.content_text == 'completely agree, well put'
+        assert reply.reply_parent.content_text == 'the original hot take everyone is replying to'
+        assert reply.reply_parent.author == '@stranger'
+        assert reply.reply_parent.url == 'https://x.com/stranger/status/999'
+        assert reply.reply_parent.source_id == '999'
+        # The parent is NOT a reshare — reshared_from stays empty.
+        assert reply.reshared_from.content_text == ''
+
+    def test_reply_without_parent_text_still_skipped(self, tmp_path):
+        """No parent text (pre-v1.5 export / GraphQL miss) -> legacy drop behaviour."""
+        tweets = {
+            'phase': 'tweets',
+            'collectedAt': '2024-06-01T12:00:00Z',
+            'postsWithText': [self._entry('100', 'own original')],
+            'ownerHandle': 'me',
+        }
+        replies = self._make_posts([
+            self._entry(
+                '200', 'context-free one-liner',
+                inReplyTo={
+                    'statusId': '999',
+                    'screenName': 'stranger',
+                    'url': 'https://x.com/stranger/status/999',
+                    # no 'text'
+                },
+                isReply=True,
+            ),
+        ])
+        zip_path = tmp_path / 'test.zip'
+        zip_path.write_bytes(make_zip(posts=tweets, comments=replies))
+
+        result = extract(zip_path, tmp_path / 'out')
+        assert result['skipped_non_self_reply'] == 1
+        assert result['kept_reply_with_parent'] == 0
+        assert result['records'] == 1
+        assert {r.source_id for r in read_records(tmp_path / 'out' / 'posts.binpb')} == {'100'}
+
+    def test_self_thread_reply_does_not_get_reply_parent(self, tmp_path):
+        """A reply to the owner's own tweet is a self-thread continuation, not a
+        (parent -> reply) pair — reply_parent must stay empty even if text rides along."""
+        tweets = {
+            'phase': 'tweets',
+            'collectedAt': '2024-06-01T12:00:00Z',
+            'postsWithText': [self._entry('100', 'start of thread')],
+            'ownerHandle': 'me',
+        }
+        replies = self._make_posts([
+            self._entry(
+                '200', 'continuation',
+                inReplyTo={
+                    'statusId': '100',
+                    'screenName': 'me',
+                    'url': 'https://x.com/me/status/100',
+                    'text': 'start of thread',
+                },
+                isReply=True,
+            ),
+        ])
+        zip_path = tmp_path / 'test.zip'
+        zip_path.write_bytes(make_zip(posts=tweets, comments=replies))
+
+        result = extract(zip_path, tmp_path / 'out')
+        assert result['kept_reply_with_parent'] == 0
+        assert result['records'] == 2
+        records = {r.source_id: r for r in read_records(tmp_path / 'out' / 'posts.binpb')}
+        assert records['200'].reply_parent.content_text == ''
+
+
 class TestQuoteTweetWithRetweet:
     """A retweet that also has a quotedTweet should NOT be skipped."""
 

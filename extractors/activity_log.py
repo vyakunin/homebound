@@ -65,12 +65,13 @@ from extractors.harvest_post_identity import (
     _clean_text,
     _parse_fb_id_from_url,
     _source_id_for_post,
+    has_row_chrome_contamination,
     source_id_for_harvest_post,
 )
 from extractors.posts_io import write_records
 from proto.comment import Comment
 from proto.media_item import MediaItem, MediaType
-from proto.post_record import PostRecord, Source, Visibility
+from proto.post_record import PostRecord, ReplyParent, Source, Visibility
 from proto.reshared_from import ResharedFrom
 
 logger = logging.getLogger(__name__)
@@ -725,6 +726,7 @@ def extract(
         skipped_no_text = 0
         media_attached = 0
         posts_skipped_external = 0
+        skipped_chrome = 0
 
         for raw in posts_data:
             post_key = raw.get('postKey', '') or raw.get('url', '')
@@ -740,6 +742,14 @@ def extract(
 
             if not cleaned:
                 skipped_no_text += 1
+                continue
+
+            # Scraper over-capture: findRowContainer occasionally welds several
+            # activity-log rows (or a page-header dump) into one row's text. Such
+            # records can't be attributed to their single post URL — drop rather
+            # than import the welded garbage. See harvest_post_identity.
+            if has_row_chrome_contamination(cleaned):
+                skipped_chrome += 1
                 continue
 
             source_id = source_id_for_harvest_post(raw)
@@ -963,6 +973,7 @@ def extract(
         # ---------- Attach comments to posts ----------
         comment_matched = 0
         comment_skipped_external = 0
+        kept_external_comment_with_parent = 0
 
         for raw in comments_data:
             comment_id = raw.get('commentId', '')
@@ -971,7 +982,7 @@ def extract(
             raw_text = raw.get('text', '')
             cleaned = _clean_text(raw_text)
 
-            if not cleaned:
+            if not cleaned or has_row_chrome_contamination(cleaned):
                 continue
 
             # Find parent post by stripping comment params from the comment URL
@@ -979,6 +990,35 @@ def extract(
             parent_key = _post_key_from_url(parent_url)
             sid = post_key_to_source_id.get(parent_key)
             if not sid:
+                # His comment on someone else's post: the parent isn't in his own
+                # harvest, so today we drop it. But when the scraper captured the
+                # parent's author/text (the comment-in-context enrichment), emit
+                # the comment as a standalone reply Post carrying reply_parent —
+                # PRIVATE so the public blog feed excludes it, while the bot/SFT
+                # use it as a (parent → his reply) training pair. Guarded on
+                # parentText so pre-enrichment exports keep current behaviour.
+                # (2026-06-04; mirrors twitter_log's reply_parent path.)
+                parent_text = _clean_text(raw.get('parentText') or '').strip()
+                if parent_text and not has_row_chrome_contamination(parent_text):
+                    comment_sid = _source_id_for_comment(raw)
+                    reply_rec = PostRecord(
+                        source=Source.SOURCE_FACEBOOK,
+                        source_id=comment_sid,
+                        source_url=url,
+                        content_text=fix_facebook_encoding(cleaned),
+                        visibility=Visibility.VISIBILITY_PRIVATE,
+                    )
+                    reply_rec.reply_parent = ReplyParent(
+                        author=(raw.get('parentAuthor') or '').strip(),
+                        url=(raw.get('parentUrl') or parent_url or '').strip(),
+                        content_text=fix_facebook_encoding(parent_text),
+                    )
+                    epoch = _parse_timestamp(raw.get('timestamp'), collected_at_comments)
+                    if epoch:
+                        reply_rec.created_at = _unix_to_proto_timestamp(epoch)
+                    post_by_source_id[comment_sid] = reply_rec
+                    kept_external_comment_with_parent += 1
+                    continue
                 comment_skipped_external += 1
                 continue
 
@@ -1267,9 +1307,11 @@ def extract(
             'posts_with_comments': posts_with_comments,
             'comments_matched': comment_matched,
             'comments_skipped_external': comment_skipped_external,
+            'kept_external_comment_with_parent': kept_external_comment_with_parent,
             'media_attached': media_attached,
             'skipped_no_text': skipped_no_text,
             'skipped_no_id': skipped_no_id,
+            'skipped_chrome': skipped_chrome,
             'profile_links': len(profile_links),
         }
         return summary
@@ -1304,7 +1346,9 @@ def main() -> None:
     print(f"With comments:    {summary['posts_with_comments']}")
     print(f"Comments matched: {summary['comments_matched']}")
     print(f"Comments skipped (external): {summary['comments_skipped_external']}")
+    print(f"Ext comments kept w/ parent: {summary['kept_external_comment_with_parent']}")
     print(f"Media attached:   {summary['media_attached']}")
+    print(f"Skipped (UI chrome / multi-row weld): {summary['skipped_chrome']}")
     print(f"Profile links:    {summary['profile_links']}")
     print(f"Skipped (no text): {summary['skipped_no_text']}")
     print(f"Skipped (no ID):   {summary['skipped_no_id']}")

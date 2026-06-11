@@ -117,6 +117,14 @@ class Post(models.Model):
     reshared_from_url = models.URLField(max_length=1000, blank=True)
     reshared_content_text = models.TextField(blank=True)
 
+    # Reply context — the parent post/tweet this record is a reply to.
+    # Distinct from reshared_from (reshare ≠ reply). Same blank-string
+    # conventions as the reshared_from_* fields above.
+    reply_to_author = models.CharField(max_length=300, blank=True)
+    reply_to_url = models.URLField(max_length=1000, blank=True)
+    reply_to_text = models.TextField(blank=True)
+    reply_to_source_id = models.CharField(max_length=500, blank=True)
+
     # Denormalized counts (updated on import, not live)
     reaction_count = models.IntegerField(default=0)
     comment_count = models.IntegerField(default=0)

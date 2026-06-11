@@ -17,6 +17,7 @@ from extractors.activity_log import (
     _strip_comment_params,
     extract,
 )
+from extractors.harvest_post_identity import has_row_chrome_contamination
 from extractors.base import fix_facebook_encoding
 from extractors.posts_io import read_records, write_records
 from proto.post_record import PostRecord, Source, Visibility
@@ -214,6 +215,59 @@ class TestCleanText:
         # A date mention inside the body (not at start) must stay.
         raw = "Body text mentioning September 17, 2019 in the middle"
         assert _clean_text(raw) == "Body text mentioning September 17, 2019 in the middle"
+
+    def test_strips_hidden_from_profile_trailing_visibility(self):
+        # 2026-06-04: a genuine single-row trailing weld that stacks two audience
+        # pills ("PublicHidden from profile") + time. Must clean, not drop.
+        raw = "В этой новости прекрасно практически все. Жаль, не СаратовPublicHidden from profile3:57 AM"
+        assert _clean_text(raw) == "В этой новости прекрасно практически все. Жаль, не Саратов"
+
+
+# ---------------------------------------------------------------------------
+# 2b. has_row_chrome_contamination: drop scraper over-capture (multi-row welds,
+#     page-header dumps). Run AFTER _clean_text. Regression: 2026-06-04 SFT audit.
+# ---------------------------------------------------------------------------
+
+class TestRowChromeContamination:
+    def test_multirow_weld_shared_link_is_flagged(self):
+        # findRowContainer over-climbed and welded two rows; the seam is the
+        # audience-pill + time + next row's "shared a link." action.
+        raw = ("Собянин еще более трусливый, чем Медведев. Упыри ограбили штаб ФБК"
+               "Public8:29 AM shared a link.Перевёл ещё 10к ФБК, и вас прошу.")
+        assert has_row_chrome_contamination(_clean_text(raw))
+
+    def test_multirow_weld_view_shared_prefix_is_flagged(self):
+        raw = ("поехалиPublic7:47 PMView shared a link."
+               "Современные номера отеля Antelope Inn сети Best Western.")
+        assert has_row_chrome_contamination(_clean_text(raw))
+
+    def test_multirow_weld_updated_status_is_flagged(self):
+        raw = ("первый пост про что-то важноеPublic9:32 AM updated his status."
+               "а это уже второй, совсем другой пост")
+        assert has_row_chrome_contamination(_clean_text(raw))
+
+    def test_page_header_dump_is_flagged(self):
+        raw = ("Your posts, photos and videosAllArchiveTrashChange Audience"
+               "December 31, 2017December 27, 2017December 25, 2017")
+        assert has_row_chrome_contamination(_clean_text(raw))
+
+    def test_clean_single_post_is_not_flagged(self):
+        assert not has_row_chrome_contamination(
+            _clean_text("Просто обычный пост про жизнь. Всё хорошо, едем дальше.")
+        )
+
+    def test_genuine_trailing_weld_kept_after_clean(self):
+        # The "Hidden from profile" trailing case cleans to a single post → NOT
+        # flagged (must be kept, not dropped as a false multi-row).
+        raw = "В этой новости прекрасно практически все. Жаль, не СаратовPublicHidden from profile3:57 AM"
+        assert not has_row_chrome_contamination(_clean_text(raw))
+
+    def test_prose_mentioning_visibility_word_not_flagged(self):
+        # A legit post that merely uses the word "public" in prose (no time/action
+        # weld) must not be dropped.
+        assert not has_row_chrome_contamination(
+            _clean_text("Я сделал пост public, чтобы все видели. Потом передумал.")
+        )
 
 
 class TestCleanReshareCommentary:
@@ -469,6 +523,55 @@ class TestExternalCommentSkipped:
         all_comment_ids = {c.source_id for r in records for c in r.comments}
         # 300003333333 is on theberlinermag's post (external)
         assert "300003333333" not in all_comment_ids
+
+
+# ---------------------------------------------------------------------------
+# 8b. Comment-in-context: his comment on someone else's post becomes a reply
+#     Post (with reply_parent) WHEN the scraper captured the parent text.
+#     Regression: 2026-06-04 ("283 reply pairs too few — we don't scrape my
+#     comments in context"). Guarded on parentText so pre-enrichment exports
+#     keep dropping external comments.
+# ---------------------------------------------------------------------------
+
+class TestExternalCommentInContext:
+    def _extract(self, tmp_path, comments) -> tuple[list[PostRecord], dict]:
+        posts = load_fixture("sample_activity_log_posts.json")
+        zip_path = tmp_path / "t.zip"
+        zip_path.write_bytes(make_zip(posts, comments))
+        summary = extract(zip_path, tmp_path / "out", dry_run=False)
+        return list(read_records(tmp_path / "out" / "posts.binpb")), summary
+
+    def test_external_comment_with_parent_becomes_reply_post(self, tmp_path):
+        comments = {"commentsWithText": [{
+            "commentId": "555000111", "fbId": "555000111", "replyCommentId": None,
+            "text": "commented on Mike Tamm's post.Не согласен, вот почему.Public2:15 PMView",
+            "parentText": "Оригинальный пост, на который он отвечает.",
+            "parentAuthor": "Mike Tamm",
+            "parentUrl": "https://www.facebook.com/mike.tamm.9/posts/999000",
+            "timestamp": {"utime": 1700002000},
+            "url": "https://www.facebook.com/mike.tamm.9/posts/999000?comment_id=555000111",
+        }]}
+        records, summary = self._extract(tmp_path, comments)
+        reply = next(r for r in records if r.content_text == "Не согласен, вот почему.")
+        assert reply.visibility == Visibility.VISIBILITY_PRIVATE
+        assert reply.reply_parent.author == "Mike Tamm"
+        assert reply.reply_parent.content_text == "Оригинальный пост, на который он отвечает."
+        assert reply.reply_parent.url == "https://www.facebook.com/mike.tamm.9/posts/999000"
+        assert summary["kept_external_comment_with_parent"] == 1
+
+    def test_external_comment_without_parent_still_skipped(self, tmp_path):
+        # Pre-enrichment export (no parentText) must keep the current behaviour:
+        # the external comment is dropped, NOT emitted as a reply Post.
+        comments = {"commentsWithText": [{
+            "commentId": "555000222", "fbId": "555000222", "replyCommentId": None,
+            "text": "commented on Mike Tamm's post.Просто реплика без контекста.Public2:15 PMView",
+            "timestamp": {"utime": 1700002000},
+            "url": "https://www.facebook.com/mike.tamm.9/posts/999001?comment_id=555000222",
+        }]}
+        records, summary = self._extract(tmp_path, comments)
+        assert not any(r.content_text == "Просто реплика без контекста." for r in records)
+        assert summary["kept_external_comment_with_parent"] == 0
+        assert summary["comments_skipped_external"] >= 1
 
 
 # ---------------------------------------------------------------------------
