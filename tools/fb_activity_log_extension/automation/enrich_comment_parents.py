@@ -43,6 +43,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -182,6 +183,48 @@ def _newest_export() -> Path | None:
     return Path(cands[0]) if cands else None
 
 
+def _run_golden(path: Path, args) -> int:
+    """Validate extraction against a golden YAML (independent ground truth).
+
+    Each entry: permalink, kind, parent_author, parent_text_contains,
+    reply_text_contains. Opens each permalink, runs the same extraction the
+    enrichment uses, asserts. Exit 0 iff no FAIL. No writes.
+    """
+    import yaml  # lazy: only the golden path needs it
+
+    golden = yaml.safe_load(path.read_text())
+    entries = golden.get("entries", [])
+    fails = passes = 0
+    for e in entries:
+        url = e["permalink"]
+        tid, wsurl = _open_tab(url)
+        ws = create_connection(wsurl, suppress_origin=True, timeout=30)
+        try:
+            res = _navigate_and_extract(ws, url, _cid_of(url), args.owner, args.settle)
+        finally:
+            ws.close()
+            _close_tab(tid)
+        checks = {
+            "kind": res.get("kind") == e.get("kind"),
+            "parent_author": (e.get("parent_author") or "") in (res.get("parentAuthor") or ""),
+            "parent_text": (e.get("parent_text_contains") or "") in (res.get("parentText") or ""),
+            "reply_text": (e.get("reply_text_contains") or "") in (res.get("replyText") or ""),
+        }
+        ok = all(checks.values())
+        cid = _cid_of(url)
+        if ok:
+            print(f"  PASS {cid}: {res.get('kind')} parent={res.get('parentAuthor')!r}")
+            passes += 1
+        else:
+            bad = [k for k, v in checks.items() if not v]
+            print(f"  FAIL {cid}: failed {bad} | got kind={res.get('kind')!r} "
+                  f"author={res.get('parentAuthor')!r} ptext={(res.get('parentText') or '')[:40]!r} "
+                  f"reply={(res.get('replyText') or '')[:40]!r} err={res.get('err')}")
+            fails += 1
+    print(f"\nresult: {passes} pass, {fails} fail")
+    return 1 if fails else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", help="single permalink URL; print extraction, no writes")
@@ -203,7 +246,11 @@ def main() -> int:
             "rows (parent is a clean comment article) are always emitted."
         ),
     )
+    ap.add_argument("--golden", help="validate extraction against a golden YAML, no writes")
     args = ap.parse_args()
+
+    if args.golden:
+        return _run_golden(Path(args.golden).expanduser(), args)
 
     if args.probe:
         tid, wsurl = _open_tab(args.probe)
@@ -228,21 +275,28 @@ def main() -> int:
     records = data.get("commentsWithText") or []
     print(f"export: {export_dir.name}  comments: {len(records)}", file=sys.stderr)
 
-    # External comments only (parent on someone else's post -> becomes a reply pair).
+    # Candidates: reply-to-comment rows on ANY post (his own OR external) — the
+    # parent there is a clean COMMENT, which the extractor turns into a (parent
+    # -> his reply) pair regardless of whose post it's on. comment-on-post rows
+    # are descoped (unreliable parent extraction) unless --include-post-parents.
+    # Pre-filter on the action verb in the harvested text (and replyCommentId for
+    # nested replies) so we don't fetch every top-level own-post comment.
+    reply_action_re = re.compile(r"replied to .+? comment", re.IGNORECASE)
     todo = []
     for rec in records:
         url = rec.get("url", "")
         if not url or not _cid_of(url):
             continue
-        owner = _owner_handle(url)
-        if owner == args.own_profile:
-            continue  # own-post comment: attached to his post, not a reply pair
         if rec.get("parentText"):
             continue  # already enriched (resumable)
+        text = rec.get("text", "") or ""
+        is_reply = bool(reply_action_re.search(text)) or bool(rec.get("replyCommentId"))
+        if not is_reply and not args.include_post_parents:
+            continue
         todo.append(rec)
     if args.max:
         todo = todo[: args.max]
-    print(f"external comments to enrich: {len(todo)}", file=sys.stderr)
+    print(f"reply-to-comment candidates to enrich: {len(todo)}", file=sys.stderr)
     if not todo:
         return 0
 

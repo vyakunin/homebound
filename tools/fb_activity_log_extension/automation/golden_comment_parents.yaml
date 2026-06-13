@@ -1,0 +1,29 @@
+# Golden set for FB comment parent-enrichment (enrich_comment_parents.py).
+#
+# Ground truth read INDEPENDENTLY from the rendered permalink comment thread
+# (the parent comment article / post body a human sees), not from any cached
+# scrape. Validate:
+#   uv run --no-project --with websocket-client --with pyyaml \
+#     enrich_comment_parents.py --golden automation/golden_comment_parents.yaml
+# It opens each permalink, runs the extraction, and asserts kind + parent_author
+# + parent_text_contains + reply_text_contains. When extraction disagrees, fix
+# the extension/script — not this file.
+#
+# Captured 2026-06-13 (account vyakunin / "Vladimir Yakunin"). Note pfbid in the
+# permalink can drift per session; re-capture if a fetch 404s.
+
+entries:
+  # reply-to-comment on HIS OWN post — the new own-post pair case.
+  - permalink: "https://www.facebook.com/vyakunin/posts/pfbid0cnLfcM2r1nuMXq3FNpdit6UxZt9gm2v2u6qqpkG1VEKPA5fiVGbPn6veHVEZ3G5rl?comment_id=1899818014030798"
+    kind: reply_to_comment
+    parent_author: "Ines Saroman"
+    parent_text_contains: "The melon part doesn't work"
+    reply_text_contains: "уточню у моего британца"
+
+  # comment-on-post on someone ELSE's post (parent = the post body). Extraction
+  # of this kind is best-effort; included to track when it works.
+  - permalink: "https://www.facebook.com/mike.tamm.9/posts/pfbid0g6zAsrPHf6sTFFnZw4PQkCtLphXbSc6wDP8hFkz8RBHKGLwj4PiKmKwfGPRUfFmJl?comment_id=1258575436443136"
+    kind: comment_on_post
+    parent_author: "Mike Tamm"
+    parent_text_contains: "Five million people were seized"
+    reply_text_contains: "А неверно, что угоняют"

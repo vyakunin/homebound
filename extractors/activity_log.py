@@ -973,7 +973,7 @@ def extract(
         # ---------- Attach comments to posts ----------
         comment_matched = 0
         comment_skipped_external = 0
-        kept_external_comment_with_parent = 0
+        kept_reply_with_parent = 0
 
         for raw in comments_data:
             comment_id = raw.get('commentId', '')
@@ -989,40 +989,46 @@ def extract(
             if not cleaned or has_row_chrome_contamination(cleaned):
                 continue
 
-            # Find parent post by stripping comment params from the comment URL
             parent_url = _strip_comment_params(url)
+
+            # Reply-to-comment pair (his reply on ANY post — his own OR someone
+            # else's). When the parent-enrichment pass supplied a clean parent
+            # COMMENT (parentText), emit a standalone PRIVATE reply Post carrying
+            # reply_parent — the (parent → his reply) SFT signal. This fires
+            # BEFORE the own-post lookup because the parent here is the COMMENT he
+            # replied to, not the post; so it captures his replies to others'
+            # comments on his own posts (the bulk of FB conversational volume),
+            # not just comments on external posts. PRIVATE so the public blog feed
+            # excludes it, while the bot/SFT use the pair. Guarded on parentText
+            # so un-enriched exports keep prior behaviour.
+            parent_text = _clean_text(raw.get('parentText') or '').strip()
+            if parent_text and not has_row_chrome_contamination(parent_text):
+                comment_sid = _source_id_for_comment(raw)
+                reply_rec = PostRecord(
+                    source=Source.SOURCE_FACEBOOK,
+                    source_id=comment_sid,
+                    source_url=url,
+                    content_text=fix_facebook_encoding(cleaned),
+                    visibility=Visibility.VISIBILITY_PRIVATE,
+                )
+                reply_rec.reply_parent = ReplyParent(
+                    author=(raw.get('parentAuthor') or '').strip(),
+                    url=(raw.get('parentUrl') or parent_url or '').strip(),
+                    content_text=fix_facebook_encoding(parent_text),
+                )
+                epoch = _parse_timestamp(raw.get('timestamp'), collected_at_comments)
+                if epoch:
+                    reply_rec.created_at = _unix_to_proto_timestamp(epoch)
+                post_by_source_id[comment_sid] = reply_rec
+                kept_reply_with_parent += 1
+                continue
+
+            # No clean parent comment: attach to his own post if it's in the
+            # harvest (blog comment display), else it's an un-pairable comment on
+            # someone else's post → drop.
             parent_key = _post_key_from_url(parent_url)
             sid = post_key_to_source_id.get(parent_key)
             if not sid:
-                # His comment on someone else's post: the parent isn't in his own
-                # harvest, so today we drop it. But when the scraper captured the
-                # parent's author/text (the comment-in-context enrichment), emit
-                # the comment as a standalone reply Post carrying reply_parent —
-                # PRIVATE so the public blog feed excludes it, while the bot/SFT
-                # use it as a (parent → his reply) training pair. Guarded on
-                # parentText so pre-enrichment exports keep current behaviour.
-                # (2026-06-04; mirrors twitter_log's reply_parent path.)
-                parent_text = _clean_text(raw.get('parentText') or '').strip()
-                if parent_text and not has_row_chrome_contamination(parent_text):
-                    comment_sid = _source_id_for_comment(raw)
-                    reply_rec = PostRecord(
-                        source=Source.SOURCE_FACEBOOK,
-                        source_id=comment_sid,
-                        source_url=url,
-                        content_text=fix_facebook_encoding(cleaned),
-                        visibility=Visibility.VISIBILITY_PRIVATE,
-                    )
-                    reply_rec.reply_parent = ReplyParent(
-                        author=(raw.get('parentAuthor') or '').strip(),
-                        url=(raw.get('parentUrl') or parent_url or '').strip(),
-                        content_text=fix_facebook_encoding(parent_text),
-                    )
-                    epoch = _parse_timestamp(raw.get('timestamp'), collected_at_comments)
-                    if epoch:
-                        reply_rec.created_at = _unix_to_proto_timestamp(epoch)
-                    post_by_source_id[comment_sid] = reply_rec
-                    kept_external_comment_with_parent += 1
-                    continue
                 comment_skipped_external += 1
                 continue
 
@@ -1311,7 +1317,7 @@ def extract(
             'posts_with_comments': posts_with_comments,
             'comments_matched': comment_matched,
             'comments_skipped_external': comment_skipped_external,
-            'kept_external_comment_with_parent': kept_external_comment_with_parent,
+            'kept_reply_with_parent': kept_reply_with_parent,
             'media_attached': media_attached,
             'skipped_no_text': skipped_no_text,
             'skipped_no_id': skipped_no_id,
@@ -1350,7 +1356,7 @@ def main() -> None:
     print(f"With comments:    {summary['posts_with_comments']}")
     print(f"Comments matched: {summary['comments_matched']}")
     print(f"Comments skipped (external): {summary['comments_skipped_external']}")
-    print(f"Ext comments kept w/ parent: {summary['kept_external_comment_with_parent']}")
+    print(f"Ext comments kept w/ parent: {summary['kept_reply_with_parent']}")
     print(f"Media attached:   {summary['media_attached']}")
     print(f"Skipped (UI chrome / multi-row weld): {summary['skipped_chrome']}")
     print(f"Profile links:    {summary['profile_links']}")

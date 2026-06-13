@@ -557,7 +557,7 @@ class TestExternalCommentInContext:
         assert reply.reply_parent.author == "Mike Tamm"
         assert reply.reply_parent.content_text == "Оригинальный пост, на который он отвечает."
         assert reply.reply_parent.url == "https://www.facebook.com/mike.tamm.9/posts/999000"
-        assert summary["kept_external_comment_with_parent"] == 1
+        assert summary["kept_reply_with_parent"] == 1
 
     def test_external_comment_without_parent_still_skipped(self, tmp_path):
         # Pre-enrichment export (no parentText) must keep the current behaviour:
@@ -570,8 +570,35 @@ class TestExternalCommentInContext:
         }]}
         records, summary = self._extract(tmp_path, comments)
         assert not any(r.content_text == "Просто реплика без контекста." for r in records)
-        assert summary["kept_external_comment_with_parent"] == 0
+        assert summary["kept_reply_with_parent"] == 0
         assert summary["comments_skipped_external"] >= 1
+
+    def test_own_post_reply_to_comment_becomes_reply_post(self, tmp_path):
+        # His reply to someone's comment on HIS OWN post: the parent is the
+        # COMMENT (parentText present), so it pairs even though the parent POST
+        # is in his harvest. Regression 2026-06-13: own-post replies are the bulk
+        # of FB conversational volume; previously they were attached as comments
+        # on his post, never paired. The reply-pair emission now fires before the
+        # own-post lookup.
+        comments = {"commentsWithText": [{
+            "commentId": "777000111", "fbId": "777000111", "replyCommentId": "777000000",
+            "text": "replied to Ines Saroman's comment.Согласен полностью.Public2:15 PMView",
+            "replyText": "Согласен полностью.",
+            "parentText": "А по-моему всё наоборот.",
+            "parentAuthor": "Ines Saroman",
+            "parentUrl": "https://www.facebook.com/vyakunin/posts/17000000001",
+            "timestamp": {"utime": 1700002000},
+            "url": "https://www.facebook.com/vyakunin/posts/17000000001?comment_id=777000111&reply_comment_id=777000000",
+        }]}
+        records, summary = self._extract(tmp_path, comments)
+        reply = next(r for r in records if r.content_text == "Согласен полностью.")
+        assert reply.visibility == Visibility.VISIBILITY_PRIVATE
+        assert reply.reply_parent.author == "Ines Saroman"
+        assert reply.reply_parent.content_text == "А по-моему всё наоборот."
+        assert summary["kept_reply_with_parent"] == 1
+        # It must NOT also be attached as a comment on his own post.
+        own = next(r for r in records if r.source_url.endswith("/posts/17000000001"))
+        assert "777000111" not in {c.source_id for c in own.comments}
 
 
 # ---------------------------------------------------------------------------
