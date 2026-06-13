@@ -65,7 +65,11 @@ else
 fi
 
 # Load the unpacked extensions over CDP + ensure FB/X login tabs exist + verify.
-X_EXT="$X_EXT" FB_EXT="$FB_EXT" uv run --quiet --with websocket-client python3 - <<'PY'
+# --no-project: this script lives under homebound/, whose pyproject pulls in lxml
+# (via personal-blog) which fails to build without libxml2/libxslt dev headers on
+# this box. We only need websocket-client, so resolve in isolation, ignoring the
+# surrounding project. (2026-06-13: bare `uv run` here aborted on the lxml build.)
+X_EXT="$X_EXT" FB_EXT="$FB_EXT" uv run --quiet --no-project --with websocket-client python3 - <<'PY'
 import json, os, urllib.request, urllib.parse, time
 from websocket import create_connection
 
