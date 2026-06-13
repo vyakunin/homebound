@@ -863,14 +863,23 @@ async function runScrollHarvest(phase, mode, token, rawCaps) {
     }
     if (gql.inReplyToId && !entry.inReplyTo) {
       const rSlug = gql.inReplyToScreenName || null;
+      // Resolve parent text (same as the per-tweet pass above) so this
+      // backfill path also carries inReplyTo.text for twitter_log.py.
+      const parentText = gql.inReplyToText || _fullTextById.get(String(gql.inReplyToId)) || null;
       entry.inReplyTo = {
         statusId: gql.inReplyToId,
         screenName: rSlug,
         userId: gql.inReplyToUserId || null,
         url: rSlug ? `https://x.com/${rSlug}/status/${gql.inReplyToId}` : null,
+        text: parentText,
       };
       entry.isReply = true;
       if (rSlug && !entry.replyToHandle) entry.replyToHandle = rSlug;
+    } else if (gql.inReplyToId && entry.inReplyTo && !entry.inReplyTo.text) {
+      // Per-tweet pass set inReplyTo before the parent tweet's text was seen;
+      // backfill the text now that the full id->text map is complete.
+      const parentText = gql.inReplyToText || _fullTextById.get(String(gql.inReplyToId)) || null;
+      if (parentText) entry.inReplyTo.text = parentText;
     }
   }
 

@@ -1,0 +1,26 @@
+# Golden set for X reply-parent capture (page_hook.js -> inReplyTo.text).
+#
+# Ground truth is read INDEPENDENTLY from the rendered conversation thread DOM
+# (open x.com/<owner>/status/<reply_id>, the parent tweet renders above his
+# reply) — NOT from the GraphQL the scraper itself parses. So a match proves the
+# scraper recovered the same parent a human sees, not that it round-tripped its
+# own source.
+#
+# Validate with automation/validate_reply_capture.py: it runs a capped 'replies'
+# harvest through the (reloaded) extension SW and asserts each captured reply's
+# inReplyTo matches parent_screen_name + parent_text_contains. Entries whose
+# reply_id didn't surface in the capped scroll batch are reported SKIPPED, not
+# failed. When extraction disagrees with the golden, fix the extension.
+#
+# Captured 2026-06-13 (account @vyakunin, display name "Elon Musk").
+
+owner: vyakunin
+entries:
+  - reply_id: "1592567704036446208"
+    reply_text_contains: "всё-таки, горло"
+    parent_screen_name: "mpltnv"
+    parent_text_contains: "Диагностировали гнойную ангину"
+  - reply_id: "1592405390922510336"
+    reply_text_contains: "умирает от второго"
+    parent_screen_name: "AAVELENET"
+    parent_text_contains: "я правильно понимаю, что среднестатистический мужчина"
