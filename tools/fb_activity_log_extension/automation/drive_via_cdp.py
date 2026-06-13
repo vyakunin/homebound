@@ -36,19 +36,36 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import logging
+import os
 import sys
 import time
 import urllib.request
 from dataclasses import dataclass
 from enum import IntEnum
+from pathlib import Path
 
 import websockets
 
 
 CDP_HTTP = "http://localhost:9222"
-FB_EXT_ID = "hlnkajaedobaajimkaeoagiljpailioh"
+
+
+def _unpacked_ext_id(ext_dir: Path) -> str:
+    """Chrome derives an unpacked extension's id from the SHA-256 of its
+    absolute load path: first 32 hex digits mapped 0-f -> a-p. The extension
+    dir moved (homebound/tools/...) so a hardcoded id goes stale; compute it
+    from this driver's own location instead. Env FB_EXT_ID overrides."""
+    h = hashlib.sha256(str(ext_dir.resolve()).encode()).hexdigest()[:32]
+    return "".join(chr(97 + int(c, 16)) for c in h)
+
+
+# The extension dir is this file's grandparent (automation/ -> ext root).
+FB_EXT_ID = os.environ.get("FB_EXT_ID") or _unpacked_ext_id(
+    Path(__file__).resolve().parent.parent
+)
 
 # Iteration mode cap. The content script's scroll-stable detection waits
 # 25 consecutive rounds (~150s) for new items before stopping; that's the

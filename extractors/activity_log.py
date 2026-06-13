@@ -979,7 +979,11 @@ def extract(
             comment_id = raw.get('commentId', '')
             reply_comment_id = raw.get('replyCommentId')
             url = raw.get('url', '')
-            raw_text = raw.get('text', '')
+            # Prefer the clean reply text the parent-enrichment pass read off the
+            # permalink (enrich_comment_parents.py); the activity-log inline text
+            # can carry a leading @mention or welded-row chrome. Falls back to the
+            # harvested `text` for un-enriched exports.
+            raw_text = raw.get('replyText') or raw.get('text', '')
             cleaned = _clean_text(raw_text)
 
             if not cleaned or has_row_chrome_contamination(cleaned):

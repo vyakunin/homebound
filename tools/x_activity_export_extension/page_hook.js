@@ -29,6 +29,21 @@
   }
 
   /**
+   * Prefer the untruncated note_tweet (long-form >280) body over the
+   * legacy.full_text, which X truncates with an ellipsis for long tweets.
+   */
+  function nodeFullText(node, legacy) {
+    const note =
+      node.note_tweet &&
+      node.note_tweet.note_tweet_results &&
+      node.note_tweet.note_tweet_results.result &&
+      node.note_tweet.note_tweet_results.result.text;
+    if (note) return String(note);
+    if (legacy && legacy.full_text) return String(legacy.full_text);
+    return '';
+  }
+
+  /**
    * Walk an arbitrary JSON tree and collect tweet-meta entries for every tweet
    * result node that is either a quote tweet or a reply. Each entry is
    *   {
@@ -36,13 +51,17 @@
    *     // quote fields (only when quoted_status_id_str is set)
    *     quotedId?, quotedUrl?, quotedHandle?, quotedAuthor?, quotedText?,
    *     // reply fields (only when in_reply_to_status_id_str is set)
-   *     inReplyToId?, inReplyToScreenName?, inReplyToUserId?
+   *     inReplyToId?, inReplyToScreenName?, inReplyToUserId?, inReplyToText?
    *   }
    * Keyed by the outer tweet's rest_id so the content script can look it up
-   * by the DOM-observed tweet ID.
+   * by the DOM-observed tweet ID. Also returns `texts` — a rest_id -> full_text
+   * map for EVERY tweet node seen (not just quotes/replies), so the parent
+   * tweet a reply points at can be resolved by id even when it arrives in a
+   * different GraphQL response than the reply itself.
    */
   function collectTweetMeta(root) {
     const out = [];
+    const textById = new Map();
     const seen = new WeakSet();
     const stack = [root];
     while (stack.length) {
@@ -57,6 +76,10 @@
       const legacy = node.legacy;
       const restId = node.rest_id;
       if (restId && legacy && typeof legacy === 'object') {
+        // Record this tweet's own text by id (covers plain parent tweets that
+        // are neither quotes nor replies, so a later reply can resolve them).
+        const ownText = nodeFullText(node, legacy);
+        if (ownText) textById.set(String(restId), ownText);
         const hasQuote = !!legacy.quoted_status_id_str;
         const hasReply = !!legacy.in_reply_to_status_id_str;
         if (hasQuote || hasReply) {
@@ -69,7 +92,8 @@
             const q = node.quoted_status_result && node.quoted_status_result.result;
             if (q) {
               const qLegacy = q.legacy || {};
-              if (qLegacy.full_text) entry.quotedText = qLegacy.full_text;
+              const qText = nodeFullText(q, qLegacy);
+              if (qText) entry.quotedText = qText;
               const userLegacy =
                 (q.core && q.core.user_results && q.core.user_results.result && q.core.user_results.result.legacy) ||
                 (q.core && q.core.user_result && q.core.user_result.result && q.core.user_result.result.legacy) ||
@@ -106,13 +130,26 @@
         if (v && typeof v === 'object') stack.push(v);
       }
     }
-    return out;
+    // Resolve each reply's parent text from the same response when present
+    // (conversation modules include the in-reply-to tweet). Cross-response
+    // parents are resolved content-script-side from the TWEET_TEXT map.
+    for (const e of out) {
+      if (e.inReplyToId && !e.inReplyToText) {
+        const t = textById.get(e.inReplyToId);
+        if (t) e.inReplyToText = t;
+      }
+    }
+    return { entries: out, texts: textById };
   }
 
-  function forward(entries) {
-    if (!entries || !entries.length) return;
+  function forward(entries, texts) {
     try {
-      window.postMessage({ __xExport: true, type: 'TWEET_META', entries }, '*');
+      if (entries && entries.length) {
+        window.postMessage({ __xExport: true, type: 'TWEET_META', entries }, '*');
+      }
+      if (texts && texts.size) {
+        window.postMessage({ __xExport: true, type: 'TWEET_TEXT', texts: [...texts] }, '*');
+      }
     } catch { /* noop */ }
   }
 
@@ -120,7 +157,8 @@
     if (!text) return;
     let json;
     try { json = JSON.parse(text); } catch { return; }
-    forward(collectTweetMeta(json));
+    const { entries, texts } = collectTweetMeta(json);
+    forward(entries, texts);
   }
 
   // ── fetch hook ─────────────────────────────────────────────────────────────

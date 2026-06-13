@@ -24,11 +24,23 @@ let _currentToken = { cancelled: false };
 //     inReplyToId?, inReplyToScreenName?, inReplyToUserId?,
 //   }
 const _tweetMetaByTweetId = new Map();
+// rest_id -> full_text for every tweet node page_hook saw, so a reply can
+// resolve its in-reply-to parent's text even when the parent tweet arrived in
+// a different GraphQL response than the reply (v1.5: reply-parent capture).
+const _fullTextById = new Map();
 
 window.addEventListener('message', (ev) => {
   if (ev.source !== window) return;
   const d = ev.data;
-  if (!d || d.__xExport !== true || d.type !== 'TWEET_META') return;
+  if (!d || d.__xExport !== true) return;
+  if (d.type === 'TWEET_TEXT') {
+    const pairs = Array.isArray(d.texts) ? d.texts : [];
+    for (const [id, text] of pairs) {
+      if (id && text && !_fullTextById.has(String(id))) _fullTextById.set(String(id), text);
+    }
+    return;
+  }
+  if (d.type !== 'TWEET_META') return;
   const entries = Array.isArray(d.entries) ? d.entries : [];
   for (const e of entries) {
     if (!e || !e.parentId) continue;
@@ -594,11 +606,17 @@ function extractTweetsFromDom(tweetByKey, mediaCandidates, caps, profileLinkMap,
       const meta = _tweetMetaByTweetId.get(tweetId);
       if (meta && meta.inReplyToId) {
         const rSlug = meta.inReplyToScreenName || null;
+        // Parent text: inline from page_hook (same-response conversation
+        // module) or backfilled from the cross-response id->text map. This is
+        // what twitter_log.py needs to emit a (parent -> his reply) pair
+        // instead of dropping the reply as skipped_non_self_reply.
+        const parentText = meta.inReplyToText || _fullTextById.get(String(meta.inReplyToId)) || null;
         entry.inReplyTo = {
           statusId: meta.inReplyToId,
           screenName: rSlug,
           userId: meta.inReplyToUserId || null,
           url: rSlug ? `https://x.com/${rSlug}/status/${meta.inReplyToId}` : null,
+          text: parentText,
         };
         entry.isReply = true;
         if (rSlug && !entry.replyToHandle) entry.replyToHandle = rSlug;
