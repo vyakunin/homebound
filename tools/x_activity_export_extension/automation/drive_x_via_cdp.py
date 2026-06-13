@@ -114,7 +114,12 @@ def _eval_phase(ws, st, phase: str, nav_url: str | None, skip_media: bool, max_i
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--owner", default="vyakunin")
-    ap.add_argument("--max", type=int, default=0, help="maxTweets per phase (0 = unbounded until scroll-stable)")
+    ap.add_argument("--phase", default="both", choices=["both", "tweets", "replies"],
+                    help="which phase(s) to harvest. 'replies' = the reply-pair phase only "
+                         "(fastest path to the SFT pairs; persona tweets already in the corpus).")
+    ap.add_argument("--max", type=int, default=0,
+                    help="maxTweets per phase (0 = unbounded until scroll-stable). Keep each "
+                         "phase under MV3's ~5-min SW IPC ceiling; ~400 is a safe single-shot.")
     ap.add_argument("--skip-media", action="store_true", help="skip media fetch (text-only; faster)")
     args = ap.parse_args()
 
@@ -126,11 +131,16 @@ def main() -> int:
     print(f"[x-driver] owner={args.owner} max={args.max or 'unbounded'} skip_media={args.skip_media}", file=sys.stderr)
 
     t0 = time.time()
-    tw = _eval_phase(ws, st, "tweets", f"https://x.com/{args.owner}", args.skip_media, args.max)
-    print(f"[x-driver] tweets: {tw}", file=sys.stderr)
-    rp = _eval_phase(ws, st, "replies", f"https://x.com/{args.owner}/with_replies", args.skip_media, args.max)
-    print(f"[x-driver] replies: {rp}", file=sys.stderr)
-    # media_zip writes the export dir/zip from chrome.storage (no navigation)
+    tw = rp = {}
+    if args.phase in ("both", "tweets"):
+        tw = _eval_phase(ws, st, "tweets", f"https://x.com/{args.owner}", args.skip_media, args.max)
+        print(f"[x-driver] tweets: {tw}", file=sys.stderr)
+    if args.phase in ("both", "replies"):
+        rp = _eval_phase(ws, st, "replies", f"https://x.com/{args.owner}/with_replies", args.skip_media, args.max)
+        print(f"[x-driver] replies: {rp}", file=sys.stderr)
+    # media_zip writes the export dir/zip from chrome.storage (no navigation).
+    # It reads whatever the harvest phases stored, so a replies-only run still
+    # writes a valid export carrying the reply records.
     zp = _eval_phase(ws, st, "media_zip", None, args.skip_media, 0)
     print(f"[x-driver] export: {zp}", file=sys.stderr)
     ws.close()
