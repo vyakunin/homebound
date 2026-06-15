@@ -27,3 +27,18 @@ entries:
     parent_author: "Mike Tamm"
     parent_text_contains: "Five million people were seized"
     reply_text_contains: "А неверно, что угоняют"
+
+  # self-reply (reply_comment_id points to HIS OWN comment) on someone else's
+  # post. Captured 2026-06-15. Regression for 3 bugs found live that day:
+  #   1. kind was misclassified comment_on_post (aria said "Comment by", not
+  #      "Reply by"); reply_comment_id in the URL is the authoritative signal.
+  #   2. parentAuthor leaked the title's "(N)" unread badge ("(1) Michael Genin").
+  #   3. replyText kept trailing chrome ("6y Like Reply Edited") — clean() now
+  #      collapses whitespace before the dotAll-unaware trailing regex.
+  # A self-reply's parent resolves UP to the first non-self ancestor — here the
+  # post — so the pair is (Michael Genin's post -> his reply), not a self-pair.
+  - permalink: "https://www.facebook.com/misha.genin/posts/pfbid0FAHFjah1E5PTNja7FHbs4c2GhyiZgk2BG9x7uBkUgfwFKxGUURBrUHNRS45fHPt5l?comment_id=10220757606987974&reply_comment_id=10220757675909697"
+    kind: reply_to_comment
+    parent_author: "Michael Genin"
+    parent_text_contains: "сверхпрочной стали"
+    reply_text_contains: "пристегнут ремнями вдали от ее краев"
