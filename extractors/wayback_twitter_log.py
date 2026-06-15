@@ -32,7 +32,7 @@ from wayback.exceptions import MementoPlaybackError, WaybackException
 
 from extractors.posts_io import write_records
 from proto.media_item import MediaItem, MediaType
-from proto.post_record import PostRecord, Source, Visibility
+from proto.post_record import PostRecord, ReplyParent, Source, Visibility
 from proto.reshared_from import ResharedFrom
 
 logger = logging.getLogger(__name__)
@@ -236,7 +236,7 @@ def _parse_old_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expecte
             quote_tweet_url = href
 
     # Extract reply context (in_reply_to). Old Twitter exposes this as data attrs on div.tweet.
-    reply_to_url, reply_to_author = _extract_old_reply_context(main_tweet)
+    reply_to_url, reply_to_author, reply_to_text = _extract_old_reply_context(main_tweet)
 
     return {
         'tweetId': tweet_id,
@@ -248,11 +248,12 @@ def _parse_old_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expecte
         'quote_tweet_url': quote_tweet_url,
         'reply_to_url': reply_to_url,
         'reply_to_author': reply_to_author,
+        'reply_to_text': reply_to_text,
     }
 
 
-def _extract_old_reply_context(main_tweet) -> tuple[str, str]:
-    """Extract (reply_to_url, reply_to_author) from old-style Twitter HTML.
+def _extract_old_reply_context(main_tweet) -> tuple[str, str, str]:
+    """Extract (reply_to_url, reply_to_author, reply_to_text) from old-style HTML.
 
     Old Twitter (2019-era) tweet permalink pages render the parent (and other
     thread ancestors) as additional ``div.tweet`` elements with class
@@ -263,6 +264,10 @@ def _extract_old_reply_context(main_tweet) -> tuple[str, str]:
     the closest ``div.tweet.ancestor`` preceding it (the DIRECT parent — last
     in document order before the focused tweet). Fall back to the conversation-
     root ancestor (matched by ``data-tweet-id == data-conversation-id``).
+
+    ``reply_to_text`` is the parent tweet's body (``p.tweet-text`` inside the
+    ancestor div) — the (parent → his reply) pair that makes the reply usable as
+    an SFT example. Empty when the parent ancestor isn't in the snapshot.
     """
     if main_tweet.get('data-is-reply-to', '') != 'true':
         # Some archived snapshots omit data-is-reply-to but still have a different
@@ -270,7 +275,7 @@ def _extract_old_reply_context(main_tweet) -> tuple[str, str]:
         conv = main_tweet.get('data-conversation-id', '')
         tid = main_tweet.get('data-tweet-id', '')
         if not (conv and tid and conv != tid):
-            return '', ''
+            return '', '', ''
 
     soup = main_tweet.find_parent() or main_tweet
     while soup.parent is not None:
@@ -280,7 +285,7 @@ def _extract_old_reply_context(main_tweet) -> tuple[str, str]:
         if d is not main_tweet and 'ancestor' in (d.get('class') or [])
     ]
     if not ancestors:
-        return '', ''
+        return '', '', ''
 
     # Direct parent = the ancestor closest to the focused tweet in document order
     # (last ancestor before the target). Without explicit edges we approximate
@@ -320,12 +325,17 @@ def _extract_old_reply_context(main_tweet) -> tuple[str, str]:
     parent_id = direct_parent.get('data-tweet-id', '')
     parent_handle = direct_parent.get('data-screen-name', '')
     if not parent_id:
-        return '', ''
+        return '', '', ''
+    parent_text_elem = direct_parent.find('p', class_='tweet-text')
+    parent_text = (
+        html.unescape(parent_text_elem.get_text(strip=True))
+        if parent_text_elem else ''
+    )
     if parent_handle:
         url = f'https://twitter.com/{parent_handle}/status/{parent_id}'
     else:
         url = f'https://twitter.com/i/status/{parent_id}'
-    return url, parent_handle
+    return url, parent_handle, parent_text
 
 
 def _parse_modern_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expected_tweet_id: str | None = None) -> dict | None:
@@ -404,7 +414,7 @@ def _parse_modern_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expe
     # Extract reply context: the article immediately preceding target_article in
     # document order is the parent in a conversation chain. The "Replying to @x"
     # block (if present) gives the parent author without needing the parent article.
-    reply_to_url, reply_to_author = _extract_modern_reply_context(target_article, articles)
+    reply_to_url, reply_to_author, reply_to_text = _extract_modern_reply_context(target_article, articles)
 
     return {
         'tweetId': tweet_id,
@@ -416,16 +426,21 @@ def _parse_modern_twitter_html(soup: BeautifulSoup, archive_timestamp: str, expe
         'quote_tweet_url': '',  # Modern HTML QT detection would need more work
         'reply_to_url': reply_to_url,
         'reply_to_author': reply_to_author,
+        'reply_to_text': reply_to_text,
     }
 
 
-def _extract_modern_reply_context(target_article, all_articles) -> tuple[str, str]:
-    """Extract (reply_to_url, reply_to_author) from modern Twitter HTML.
+def _extract_modern_reply_context(target_article, all_articles) -> tuple[str, str, str]:
+    """Extract (reply_to_url, reply_to_author, reply_to_text) from modern HTML.
 
     Strategy: the article(s) before target_article in document order form the
     conversation chain. The article immediately preceding target_article is the
     direct parent. Falls back to scanning for a "Replying to @user" block when
     the parent tweet article is not in the snapshot.
+
+    ``reply_to_text`` is the parent article's ``tweetText`` body — the SFT pair.
+    Empty when only the "Replying to @x" hint is available (parent article not
+    in the snapshot).
     """
     target_idx = None
     for i, article in enumerate(all_articles):
@@ -448,13 +463,18 @@ def _extract_modern_reply_context(target_article, all_articles) -> tuple[str, st
 
     if not parent_url:
         return _modern_replying_to_hint(target_article)
-    return parent_url, parent_author
+    parent_text_elem = parent.find('div', {'data-testid': 'tweetText'})
+    parent_text = (
+        html.unescape(parent_text_elem.get_text(strip=True))
+        if parent_text_elem else ''
+    )
+    return parent_url, parent_author, parent_text
 
 
-def _modern_replying_to_hint(target_article) -> tuple[str, str]:
+def _modern_replying_to_hint(target_article) -> tuple[str, str, str]:
     """When the parent article isn't in the snapshot, infer reply target from
     the "Replying to @user" block inside target_article. Returns the parent
-    author's handle (no status ID — parent tweet URL is unknown).
+    author's handle (no status ID — parent tweet URL is unknown, no parent text).
     """
     for div in target_article.find_all('div'):
         text = div.get_text(strip=True)
@@ -464,9 +484,9 @@ def _modern_replying_to_hint(target_article) -> tuple[str, str]:
                 href = anchor.get('href', '').lstrip('/')
                 handle = href.split('/', 1)[0]
                 if handle:
-                    return f'https://twitter.com/{handle}', handle
+                    return f'https://twitter.com/{handle}', handle, ''
             break
-    return '', ''
+    return '', '', ''
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +536,7 @@ def _build_records_from_cdx(
             'tweets_found': len(best_per_tweet),
             'tweets_with_content': 0,
             'skipped_invalid': 0,
+            'reply_pairs': 0,  # no HTML fetched → no parent text recoverable
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -529,6 +550,7 @@ def _build_records_from_cdx(
         'tweets_found': len(best_per_tweet),
         'tweets_with_content': 0,
         'skipped_invalid': 0,
+        'reply_pairs': 0,  # no HTML fetched → no parent text recoverable
     }
 
 
@@ -580,6 +602,7 @@ def _fetch_and_build_records(
     best_per_tweet: dict[str, dict],
     client: WaybackClient,
     html_cache_dir: Path | None = None,
+    owner_handle: str = '',
 ) -> tuple[list[PostRecord], int, int, int]:
     """Fetch archived pages and build PostRecords with content.
 
@@ -680,21 +703,39 @@ def _fetch_and_build_records(
 
             # Quote tweet wins over reply-context (a quoted tweet is explicit
             # content reuse; a reply is conversational metadata). When this tweet
-            # has neither, reshared_from stays empty.
+            # has neither, both stay empty.
             qt_url = parsed.get('quote_tweet_url', '')
             reply_url = parsed.get('reply_to_url', '')
             reply_author = parsed.get('reply_to_author', '')
+            reply_text = parsed.get('reply_to_text', '')
             if qt_url:
                 record.reshared_from = ResharedFrom(
                     url=qt_url,
                     author=_extract_handle_from_status_url(qt_url),
                 )
             elif reply_url:
-                record.reshared_from = ResharedFrom(
-                    url=reply_url,
-                    author=reply_author or _extract_handle_from_status_url(reply_url),
+                # A reply is NOT a reshare — carry parent context in reply_parent
+                # (the proto's own note). reply_parent.content_text is the parent
+                # tweet body recovered from the archived thread page; when present
+                # this is the high-value (parent → his reply) SFT pair, mirroring
+                # the live X path (twitter_log.py). A reply to the owner's OWN
+                # tweet is a self-thread continuation, not a parent→reply pair —
+                # skip reply_parent for those (matches twitter_log).
+                norm_reply_author = _normalize_handle(reply_author)
+                is_self_reply = (
+                    owner_handle and norm_reply_author
+                    and norm_reply_author == owner_handle
                 )
-                record.extra['reply_context'] = 'true'
+                if not is_self_reply:
+                    record.reply_parent = ReplyParent(
+                        author=f'@{norm_reply_author}' if norm_reply_author else '',
+                        url=reply_url,
+                        content_text=reply_text,
+                        source_id=_extract_tweet_id(reply_url) or '',
+                    )
+                    record.extra['reply_context'] = 'true'
+                    if reply_text:
+                        record.extra['reply_parent_text'] = 'true'
 
         post_by_source_id[tweet_id] = record
 
@@ -768,12 +809,17 @@ def extract(
             logger.info('Using HTML cache at %s — cached pages skip the network', html_cache_dir)
         logger.info('Fetching archived pages via wayback package (2 req/s)...')
         records, snapshots_fetched, tweets_with_content, skipped = _fetch_and_build_records(
-            best_per_tweet, client, html_cache_dir=html_cache_dir,
+            best_per_tweet, client, html_cache_dir=html_cache_dir, owner_handle=handle,
         )
 
+    reply_pairs = sum(
+        1 for r in records
+        if r.reply_parent and r.reply_parent.content_text
+    )
     logger.info(
-        'Extraction done: %d records (%d with content), %d fetched, %d skipped',
-        len(records), tweets_with_content, snapshots_fetched, skipped,
+        'Extraction done: %d records (%d with content), %d fetched, %d skipped, '
+        '%d reply→parent SFT pairs (parent text recovered)',
+        len(records), tweets_with_content, snapshots_fetched, skipped, reply_pairs,
     )
 
     if dry_run:
@@ -783,6 +829,7 @@ def extract(
             'tweets_found': len(best_per_tweet),
             'tweets_with_content': tweets_with_content,
             'skipped_invalid': skipped,
+            'reply_pairs': reply_pairs,
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -796,6 +843,7 @@ def extract(
         'tweets_found': len(best_per_tweet),
         'tweets_with_content': tweets_with_content,
         'skipped_invalid': skipped,
+        'reply_pairs': reply_pairs,
     }
 
 

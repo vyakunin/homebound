@@ -11,6 +11,7 @@ import pytest
 from extractors.wayback_twitter_log import (
     _extract_handle_from_status_url,
     _extract_tweet_id,
+    _fetch_and_build_records,
     _normalize_handle,
     _parse_archived_tweet,
     _parse_cdx_timestamp,
@@ -273,6 +274,8 @@ class TestParseOldTwitterHtml:
         assert parsed is not None
         assert parsed['reply_to_url'] == 'https://twitter.com/otheruser/status/700'
         assert parsed['reply_to_author'] == 'otheruser'
+        # The parent body is the SFT pair — captured from the ancestor div.
+        assert parsed['reply_to_text'] == 'parent post'
         assert parsed['quote_tweet_url'] == ''
 
     def test_reply_context_picks_direct_parent_in_deep_thread(self):
@@ -285,11 +288,14 @@ class TestParseOldTwitterHtml:
         assert parsed is not None
         assert parsed['reply_to_url'] == 'https://twitter.com/middleuser/status/711'
         assert parsed['reply_to_author'] == 'middleuser'
+        # Parent text must be the DIRECT parent's body, not the thread root's.
+        assert parsed['reply_to_text'] == 'middle reply'
 
     def test_non_reply_has_empty_reply_context(self):
         parsed = _parse_archived_tweet(_OLD_TWITTER_SINGLE, '20190903000000')
         assert parsed['reply_to_url'] == ''
         assert parsed['reply_to_author'] == ''
+        assert parsed['reply_to_text'] == ''
 
     def test_real_archived_reply_2019(self):
         """Regression test against an actual archived 2019 reply page.
@@ -309,6 +315,8 @@ class TestParseOldTwitterHtml:
         assert 'касамару' in parsed['text']
         assert parsed['reply_to_author'] == 'mich261213'
         assert parsed['reply_to_url'] == 'https://twitter.com/mich261213/status/1169657491640266753'
+        # Parent body recovered from the real archived ancestor div — the SFT pair.
+        assert parsed['reply_to_text'].startswith('4 года колоний за несомненное НИЧТО')
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +438,8 @@ class TestParseModernTwitterHtml:
         assert parsed is not None
         assert parsed['reply_to_url'] == 'https://twitter.com/otheruser/status/900'
         assert parsed['reply_to_author'] == 'otheruser'
+        # Parent body recovered from the preceding article — the SFT pair.
+        assert parsed['reply_to_text'] == 'Parent tweet text'
 
     def test_reply_context_replying_to_hint(self):
         """When the parent article isn't in the snapshot, fall back to "Replying to" hint."""
@@ -441,12 +451,15 @@ class TestParseModernTwitterHtml:
         # No parent status ID is recoverable — author-only URL is returned.
         assert parsed['reply_to_url'] == 'https://twitter.com/otheruser'
         assert parsed['reply_to_author'] == 'otheruser'
+        # Parent article absent → no parent text (hint gives author only).
+        assert parsed['reply_to_text'] == ''
 
     def test_first_article_no_reply_context(self):
         """Target is the first article — no preceding parent, no Replying hint."""
         parsed = _parse_archived_tweet(_MODERN_SINGLE, '20220515103000')
         assert parsed['reply_to_url'] == ''
         assert parsed['reply_to_author'] == ''
+        assert parsed['reply_to_text'] == ''
 
     def test_real_archived_modern_reply_2022(self):
         """Regression test against a real archived 2022 modern reply page.
@@ -466,3 +479,73 @@ class TestParseModernTwitterHtml:
         assert parsed['text'] == 'why?'
         assert parsed['reply_to_author'] == 'apmassaro3'
         assert parsed['reply_to_url'] == 'https://twitter.com/apmassaro3/status/1567763015675658241'
+        # Parent body recovered from the real preceding article — the SFT pair.
+        assert parsed['reply_to_text'] == 'Russia tourist ban. Let’s go'
+
+
+# ---------------------------------------------------------------------------
+# Record assembly: reply → reply_parent (SFT pair) + self-reply guard
+# Uses html_cache_dir so _fetch_and_build_records reads fixture HTML from disk
+# and never touches the network (cache-first path); the client is unused.
+# ---------------------------------------------------------------------------
+
+# vyakunin (701) replies to otheruser (700, "parent post") — an SFT pair.
+_OLD_REPLY_TO_OTHER = _OLD_TWITTER_REPLY_WITH_ANCESTOR
+
+# vyakunin (801) replies to his OWN tweet (800) — self-thread continuation,
+# NOT a parent→reply pair.
+_OLD_SELF_REPLY = '''
+<html><body>
+<div class="tweet ancestor permalink-ancestor-tweet"
+     data-tweet-id="800" data-screen-name="vyakunin" data-conversation-id="800">
+  <p class="tweet-text">my first tweet in the thread</p>
+</div>
+<div class="tweet permalink-tweet"
+     data-tweet-id="801" data-screen-name="vyakunin"
+     data-conversation-id="800" data-is-reply-to="true">
+  <p class="tweet-text">continuing my own thought</p>
+  <a class="tweet-timestamp"><span data-time="1567531000"></span></a>
+</div>
+</body></html>
+'''
+
+
+class TestReplyParentAssembly:
+    """The reply → reply_parent mapping in _fetch_and_build_records (a reply is
+    NOT a reshare) + the self-reply guard. Network is bypassed via html cache."""
+
+    def _build_one(self, tmp_path, tweet_id, html_str, owner_handle='vyakunin'):
+        (tmp_path / f'{tweet_id}.html').write_text(html_str, encoding='utf-8')
+        best = {tweet_id: {
+            'timestamp': '20190903000000',
+            'url': f'https://twitter.com/{owner_handle}/status/{tweet_id}',
+        }}
+        records, *_ = _fetch_and_build_records(
+            best, client=None, html_cache_dir=tmp_path, owner_handle=owner_handle,
+        )
+        return records
+
+    def test_reply_to_other_sets_reply_parent_with_text(self, tmp_path):
+        records = self._build_one(tmp_path, '701', _OLD_REPLY_TO_OTHER)
+        assert len(records) == 1
+        rec = records[0]
+        # Reply context rides in reply_parent, NOT reshared_from.
+        assert not (rec.reshared_from and rec.reshared_from.url)
+        assert rec.reply_parent is not None
+        assert rec.reply_parent.content_text == 'parent post'
+        assert rec.reply_parent.author == '@otheruser'
+        assert rec.reply_parent.url == 'https://twitter.com/otheruser/status/700'
+        assert rec.reply_parent.source_id == '700'
+        assert rec.extra.get('reply_context') == 'true'
+        assert rec.extra.get('reply_parent_text') == 'true'
+        # His own reply text stays the record body.
+        assert rec.content_text == 'добро пожаловать в клуб'
+
+    def test_self_reply_gets_no_reply_parent(self, tmp_path):
+        records = self._build_one(tmp_path, '801', _OLD_SELF_REPLY)
+        assert len(records) == 1
+        rec = records[0]
+        # Reply to the owner's own tweet → continuation, not a parent→reply pair.
+        assert not (rec.reply_parent and rec.reply_parent.content_text)
+        assert rec.extra.get('reply_context') != 'true'
+        assert rec.content_text == 'continuing my own thought'
