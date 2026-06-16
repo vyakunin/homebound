@@ -12,11 +12,12 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from blog.models import Post, PostSource, PostVisibility
+from blog.models import Post, PostComment, PostSource, PostVisibility
 from blog.management.commands.build_sft_dataset import (
     _detect_lang,
     _is_degenerate,
     _is_dirty,
+    _is_self_author,
     _persona_example,
     _reply_example,
     _reply_example_from_reply_to,
@@ -34,6 +35,23 @@ def _make_post(**kw) -> Post:
     )
     defaults.update(kw)
     return Post.objects.create(**defaults)
+
+
+def _add_comments(post: Post, thread: list[tuple[str, str]]) -> None:
+    """Append a flat comment thread as ``[(author_name, text), ...]`` in order.
+
+    created_at is monotonic from the post time so the builder's time-ordering is
+    deterministic regardless of insert order.
+    """
+    base = post.created_at
+    for i, (author, text) in enumerate(thread):
+        PostComment.objects.create(
+            post=post,
+            author_name=author,
+            text=text,
+            created_at=base.replace(minute=(base.minute + i + 1) % 60),
+            source_id=f"{post.source_id}-c{i}",
+        )
 
 
 def test_detect_lang_cyrillic_vs_latin():
@@ -310,4 +328,115 @@ def test_command_drops_chrome_contaminated_reply_response(tmp_path):
         "build_sft_dataset", "--objective", "reply",
         "--sources", "twitter", "--out", str(out),
     )
+    assert out.read_text(encoding="utf-8").strip() == ""
+
+
+# --- Google+ third reply source: comment-thread mining ---
+
+
+def test_is_self_author_matches_vladimir_only():
+    assert _is_self_author("Vladimir Yakunin")
+    assert _is_self_author("  vladimir yakunin ")  # case/space-insensitive
+    assert _is_self_author("Владимир Якунин")
+    assert not _is_self_author("Роман Якунин")     # a different Якунин
+    assert not _is_self_author("Sergey Samoylenko")
+    assert not _is_self_author("")
+
+
+@pytest.mark.django_db
+def test_comment_thread_pairs_his_reply_with_preceding_nonself(tmp_path):
+    # On his own G+ post: someone comments, he replies in-thread → one pair
+    # (their comment → his reply). The post body itself is a persona example.
+    post = _make_post(
+        source=PostSource.GOOGLE_PLUS, source_id="gp-1",
+        content_text="A reflection on the day.",
+    )
+    _add_comments(post, [
+        ("Sergey Samoylenko", "Interesting point, but what about X?"),
+        ("Vladimir Yakunin", "Good question — X is handled by Y, here's why."),
+    ])
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply",
+                 "--sources", "google_plus", "--out", str(out))
+    lines = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    rec = lines[0]
+    assert rec["meta"]["objective"] == "reply"
+    assert rec["meta"]["parent_kind"] == "comment_thread"
+    assert rec["messages"][1]["content"].startswith("Sergey Samoylenko:")
+    assert "what about X?" in rec["messages"][1]["content"]
+    assert rec["messages"][-1]["content"].startswith("Good question")
+
+
+@pytest.mark.django_db
+def test_comment_thread_skips_consecutive_self_continuations(tmp_path):
+    # A->self->self: only the FIRST self-comment pairs (against A); the second is
+    # a continuation of his own thought, not a reply → no second pair.
+    post = _make_post(
+        source=PostSource.GOOGLE_PLUS, source_id="gp-2", content_text="Post body here.",
+    )
+    _add_comments(post, [
+        ("Egor Pasko", "Have you considered the counterargument here?"),
+        ("Vladimir Yakunin", "Yes, and the first half of my answer is this."),
+        ("Vladimir Yakunin", "And here is the second half continuing the thought."),
+    ])
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply",
+                 "--sources", "google_plus", "--out", str(out))
+    lines = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["messages"][-1]["content"].startswith("Yes, and the first half")
+
+
+@pytest.mark.django_db
+def test_comment_thread_skips_leading_self_comment(tmp_path):
+    # Thread opening with his own comment has no external parent → no pair.
+    post = _make_post(
+        source=PostSource.GOOGLE_PLUS, source_id="gp-3", content_text="Another post.",
+    )
+    _add_comments(post, [
+        ("Vladimir Yakunin", "Adding a note to my own post before anyone replies."),
+        ("Olga Ольга", "Nice addition, thanks for sharing this one."),
+    ])
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply",
+                 "--sources", "google_plus", "--out", str(out))
+    assert out.read_text(encoding="utf-8").strip() == ""
+
+
+@pytest.mark.django_db
+def test_comment_thread_multiple_exchanges_yield_each_pair(tmp_path):
+    # A->self->B->self yields two pairs, each parented on the preceding non-self.
+    post = _make_post(
+        source=PostSource.GOOGLE_PLUS, source_id="gp-4", content_text="Discussion post.",
+    )
+    _add_comments(post, [
+        ("Ivan Korotkov", "First interlocutor raises the opening question."),
+        ("Vladimir Yakunin", "My answer to the first interlocutor goes here."),
+        ("Sergey Alyaev", "Second interlocutor pushes back on a different angle."),
+        ("Vladimir Yakunin", "My distinct answer to the second interlocutor here."),
+    ])
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply",
+                 "--sources", "google_plus", "--out", str(out))
+    lines = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2
+    parents = sorted(rec["messages"][1]["content"] for rec in lines)
+    assert parents[0].startswith("Ivan Korotkov:")
+    assert parents[1].startswith("Sergey Alyaev:")
+
+
+@pytest.mark.django_db
+def test_comment_thread_drops_short_reply_under_min_len(tmp_path):
+    # His in-thread reply below min-len is dropped (parent is fine).
+    post = _make_post(
+        source=PostSource.GOOGLE_PLUS, source_id="gp-5", content_text="Body text here.",
+    )
+    _add_comments(post, [
+        ("Max Ushakov", "A perfectly reasonable parent comment to reply to."),
+        ("Vladimir Yakunin", "ok"),
+    ])
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply", "--min-len", "10",
+                 "--sources", "google_plus", "--out", str(out))
     assert out.read_text(encoding="utf-8").strip() == ""
