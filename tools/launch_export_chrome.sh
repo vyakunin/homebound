@@ -47,12 +47,19 @@ done
 
 if ! port_up; then
   echo "Launching CDP Chrome on 127.0.0.1:$PORT (DISPLAY=$DISPLAY)..." >&2
+  # --disable-gpu: same xrdp GPU-process crash fix as launch_chrome_cdp.sh. On the
+  # minipc's :10 X server the GPU process becomes unusable under sustained
+  # automation load and Chrome FATALs ("GPU process isn't usable. Goodbye."
+  # error_code=1002) — it killed a long FB enrichment run mid-flight (2026-06-16).
+  # GPU accel is useless for a CDP-driven export Chrome. Opt out: CHROME_ENABLE_GPU=1.
+  GPU_FLAG="--disable-gpu"; [ "${CHROME_ENABLE_GPU:-}" = "1" ] && GPU_FLAG=""
   setsid nohup "$CHROME" \
     --remote-debugging-port="$PORT" \
     --remote-debugging-address=127.0.0.1 \
     --user-data-dir="$PROFILE" \
     --password-store=basic \
     --ozone-platform=x11 \
+    $GPU_FLAG \
     --no-first-run \
     --no-default-browser-check \
     --restore-last-session \

@@ -36,3 +36,6 @@ tools/fb_activity_log_extension/package-lock.json
 # homebound-platform repo. See .cursor/rules/public_repo_hygiene.mdc.
 .cursor/rules/*.local.mdc
 *.local.md
+
+# FB comment-enrichment run logs (contain scraped comment text — never commit)
+tools/fb_activity_log_extension/automation/logs/
