@@ -75,6 +75,16 @@ OWNER_DEFAULT = "Vladimir Yakunin"
 # vs top-level, group/reel/photo layouts, locale).
 JS_HELPERS = r"""
     function deBadge(s){ return (s||'').replace(/^\s*\(\d+\)\s*/,'').replace(/\s+/g,' ').trim(); }
+    function authorOf(a){
+      // The AUTHOR of a comment/reply article = the name right after
+      // "Comment by"/"Reply by", stopped at " to <X>'s …", a time token, or end.
+      // Must NOT match a name that only appears in another node's "to <X>'s …"
+      // tail — e.g. "Reply by Ines to Andrey's reply" is authored by Ines, not
+      // Andrey (the 2026-06-17 nested-thread false-match).
+      var al = (a && a.getAttribute && a.getAttribute('aria-label')) || '';
+      var m = al.match(/^(?:Comment|Reply) by (.+?)(?:\s+to\s+|\s+\d|\s*$)/i);
+      return m ? deBadge(m[1]).trim() : '';
+    }
     function clean(art, author){
       // Collapse whitespace FIRST so the trailing-chrome regexes (which use .*$,
       // dotAll-unaware) can't be defeated by the newlines FB puts between "6y",
@@ -88,10 +98,13 @@ JS_HELPERS = r"""
       // Trailing comment chrome: "<N><unit> Like Reply [Edited] [<reactN>]",
       // the unit-less "Like Reply", status / See-more. Repeat in case a reaction
       // count trails it ("... 6y Like Reply Edited 3").
+      // "Hide" is the moderation affordance FB renders on others' comments — it
+      // trails the time/Like/Reply chrome ("3y Like Reply Hide", 2026-06-17 leak),
+      // so it must be stripped alongside Edited.
       for (var i=0;i<2;i++){
-        t = t.replace(/\s*\d+\s*(?:y|w|d|h|m|s)\s*Like\s*Reply(?:\s*Edited)?(?:\s*\d+)?\s*$/i,'');
-        t = t.replace(/\s*Like\s*Reply(?:\s*Edited)?(?:\s*\d+)?\s*$/i,'');
-        t = t.replace(/\s*(?:Edited|See more|Active now|Online status indicator\w*)\s*$/i,'');
+        t = t.replace(/\s*\d+\s*(?:y|w|d|h|m|s)\s*Like\s*Reply(?:\s*Edited)?(?:\s*Hide)?(?:\s*\d+)?\s*$/i,'');
+        t = t.replace(/\s*Like\s*Reply(?:\s*Edited)?(?:\s*Hide)?(?:\s*\d+)?\s*$/i,'');
+        t = t.replace(/\s*(?:Edited|Hide|See more|Active now|Online status indicator\w*)\s*$/i,'');
       }
       return t.trim();
     }
@@ -127,12 +140,19 @@ JS_HELPERS = r"""
         if(!parent){ var anc=mine.parentElement; while(anc){ if(anc.matches&&anc.matches('div[role="article"][aria-label]')&&isComment(anc)){parent=anc;break;} anc=anc.parentElement; } }
       }
       if(!parent && ariaReply){
-        var pa=ariaReply[1].trim();
-        parent = arts.filter(function(a){var al=a.getAttribute('aria-label')||'';return /^Comment by /i.test(al)&&al.indexOf(pa)>=0;})[0]||null;
+        var pa=deBadge(ariaReply[1]).toLowerCase();
+        var mi=arts.indexOf(mine);
+        // Parent authored by `pa`, closest ABOVE mine in DOM order. Accept BOTH
+        // "Comment by pa" AND "Reply by pa" — a reply-to-a-reply's parent is
+        // itself a reply (2026-06-17 nested case: his "Reply … to Andrey
+        // Matveev's reply" whose parent node is "Reply by Andrey Matveev …").
+        // Match on AUTHOR, never a name that only appears in a "to <pa>'s …" tail.
+        for(var j=mi-1;j>=0;j--){ if(authorOf(arts[j]).toLowerCase()===pa){ parent=arts[j]; break; } }
+        if(!parent) parent = arts.filter(function(a){ return a!==mine && authorOf(a).toLowerCase()===pa; })[0]||null;
       }
       if(!parent && (replyCid||ariaReply)){
-        var mi=arts.indexOf(mine);
-        for(var j=mi-1;j>=0;j--){var al=arts[j].getAttribute('aria-label')||'';if(/^Comment by /i.test(al)&&al.indexOf(owner)<0){parent=arts[j];break;}}
+        var mi2=arts.indexOf(mine);
+        for(var k=mi2-1;k>=0;k--){var au=authorOf(arts[k]);if(au&&au.toLowerCase()!==deBadge(owner).toLowerCase()){parent=arts[k];break;}}
       }
       if(parent){
         var pal=parent.getAttribute('aria-label')||'';
@@ -153,25 +173,59 @@ JS_HELPERS = r"""
 # FB does NOT reliably label nested replies "Reply by … to …'s comment" (the
 # 2026-06-15 misclassified-as-comment_on_post bug).
 EXTRACT_JS = r"""
-(function(cid, replyCid, owner){
+(function(cid, replyCid, owner, myText){
   try {
     %s
     var arts = [].slice.call(document.querySelectorAll('div[role="article"][aria-label]'));
     function hasCid(a){ return !!a.querySelector('a[href*="comment_id='+cid+'"]'); }
-    var mine = arts.filter(function(a){
-      var al=a.getAttribute('aria-label')||'';
-      return al.indexOf(owner)>=0 && hasCid(a);
-    })[0] || arts.filter(hasCid)[0];
-    if(!mine) return JSON.stringify({err:'his-comment-not-found', arts:arts.length});
+    function ownerComment(a){ return authorOf(a).toLowerCase()===deBadge(owner).toLowerCase(); }
+    var mine = arts.filter(function(a){ return ownerComment(a) && hasCid(a); })[0]
+            || arts.filter(hasCid)[0];
+    // Permalink/modal layouts frequently DON'T render the target comment_id as an
+    // anchor (verified 2026-06-17: his comment present with a correct aria-label
+    // but zero target-cid anchors). Fall back to locating his comment by author
+    // aria-label + the known reply body (passed from comments.json's text field).
+    var matchedBy = mine ? 'cid' : null;
+    if(!mine){
+      function norm(s){ return (s||'').replace(/\s+/g,' ').trim().toLowerCase(); }
+      function toks(s){ return (norm(s).match(/[\p{L}\p{N}]+/gu) || []).filter(function(x){return x.length>2;}); }
+      var want=norm(myText);
+      var wtok=toks(myText);
+      var ownerArts=arts.filter(ownerComment);
+      if(want){
+        var best=null,bestScore=0;
+        ownerArts.forEach(function(a){
+          var ct=norm(clean(a, owner)); if(!ct) return;
+          var score=0;
+          if(ct===want) score=4;
+          else if(ct.indexOf(want)>=0) score=3;            // body ⊂ live (live has chrome)
+          else if(want.indexOf(ct)>=0 && ct.length>=3) score=3; // live ⊂ body (See-more trunc)
+          else if(wtok.length){                             // token overlap (Unicode-safe)
+            var ctt=toks(ct);
+            if(ctt.length){
+              var setw={}; wtok.forEach(function(x){setw[x]=1;});
+              var hit=ctt.filter(function(x){return setw[x];}).length;
+              if(hit/ctt.length>=0.7) score=2;
+            }
+          }
+          if(score>bestScore){bestScore=score;best=a;}
+        });
+        if(best && bestScore>=2){ mine=best; matchedBy='text'; }
+      }
+      if(!mine && ownerArts.length===1){ mine=ownerArts[0]; matchedBy='sole-owner'; }
+    }
+    if(!mine) return JSON.stringify({err:'his-comment-not-found', arts:arts.length, ownerArts:arts.filter(ownerComment).length});
     var aria = mine.getAttribute('aria-label') || '';
     var replyText = clean(mine, owner);
-    var ariaReply = aria.match(/^Reply by .+? to (.+?)'s comment/i);
+    // "Reply by X to Y's comment" AND "Reply by X to Y's reply" (nested) are both
+    // replies — the original /'s comment/ regex missed the reply-to-reply case.
+    var ariaReply = aria.match(/^Reply by .+? to (.+?)'s (?:comment|reply)/i);
     var isReply = !!replyCid || !!ariaReply;
     var kind = isReply ? 'reply_to_comment' : 'comment_on_post';
     var p = isReply ? parentOf(arts, mine, owner, replyCid, ariaReply) : parentFromPost(owner);
-    return JSON.stringify({kind:kind, parentAuthor:p.author, parentText:p.text, replyText:replyText, aria:aria});
+    return JSON.stringify({kind:kind, parentAuthor:p.author, parentText:p.text, replyText:replyText, aria:aria, matchedBy:matchedBy});
   } catch(e){ return JSON.stringify({err:String(e)}); }
-})(%s, %s, %s)
+})(%s, %s, %s, %s)
 """
 
 # Bare-row recovery: NO comment_id known. Find every comment article authored by
@@ -189,8 +243,9 @@ EXTRACT_ALL_JS = r"""
     }
     var arts = [].slice.call(document.querySelectorAll('div[role="article"][aria-label]'));
     var mine = arts.filter(function(a){
-      var al=a.getAttribute('aria-label')||'';
-      return /^(Comment|Reply) by /i.test(al) && al.indexOf(owner)>=0;
+      // AUTHOR is the owner — not a name merely appearing in a "to <owner>'s …"
+      // tail (the nested-thread false-match, same as EXTRACT_JS).
+      return authorOf(a).toLowerCase()===deBadge(owner).toLowerCase();
     });
     var out=[]; var seen={};
     mine.forEach(function(m){
@@ -202,7 +257,7 @@ EXTRACT_ALL_JS = r"""
       if(!replyText || seen[key]) return;
       seen[key]=1;
       var aria=m.getAttribute('aria-label')||'';
-      var ariaReply=aria.match(/^Reply by .+? to (.+?)'s comment/i);
+      var ariaReply=aria.match(/^Reply by .+? to (.+?)'s (?:comment|reply)/i);
       var isReply = !!ids.replyCid || !!ariaReply;
       var p = isReply ? parentOf(arts, m, owner, ids.replyCid||null, ariaReply) : parentFromPost(owner);
       out.push({commentId:ids.cid||null, replyCommentId:ids.replyCid||null,
@@ -239,15 +294,6 @@ def _close_tab(tid: str) -> None:
         pass
 
 
-def _find_or_open_fb_tab() -> tuple[str, str, bool]:
-    pages = json.loads(urllib.request.urlopen(f"{CDP}/json", timeout=8).read())
-    for p in pages:
-        if p.get("type") == "page" and "facebook.com" in p.get("url", ""):
-            return p["id"], p["webSocketDebuggerUrl"], False
-    tid, ws = _open_tab("https://www.facebook.com/")
-    return tid, ws, True
-
-
 def _fresh_ws():
     """Open a fresh FB tab + CDP WS. Used to recover from a stale-socket timeout
     mid-run (the 2026-06-15 enrich crash: a single ws.recv() timeout killed the
@@ -256,6 +302,24 @@ def _fresh_ws():
     conn = create_connection(ws, suppress_origin=True, timeout=30)
     time.sleep(2)
     return tid, conn
+
+
+def _recycle_tab(old_tid, old_ws):
+    """Close the current tab+ws and open a fresh FB tab. Reclaims the renderer's
+    heap, which grows unbounded across thousands of in-tab Page.navigate calls —
+    FB's SPA leaks detached DOM + JS heap on every navigation, so a single tab
+    driven over the full ~7.6k-comment corpus balloons the renderer to multi-GB
+    and eventually OOMs/hangs. Recycling every N nav (see --recycle-every) caps
+    peak renderer memory at one page's worth. Also the fix for the old reconnect
+    leak: _fresh_ws() opened a new tab but never closed the dead one, so stale FB
+    tabs piled up across a long run. Returns (tid, ws)."""
+    try:
+        old_ws.close()
+    except Exception:
+        pass
+    if old_tid:
+        _close_tab(old_tid)
+    return _fresh_ws()
 
 
 def _eval(ws, expr: str) -> dict:
@@ -276,9 +340,29 @@ def _navigate(ws, url: str, settle: float) -> None:
     time.sleep(settle)
 
 
-def _navigate_and_extract(ws, url: str, cid: str, owner: str, settle: float) -> dict:
+# comments.json `text` is "<Owner> commented on/replied to <target>. <BODY> [Public
+# 4:53 PM View]". The BODY is what matches the live comment DOM — strip the action
+# sentence (up to the first period after the target) and the trailing privacy/time
+# /View chrome, so the JS finder can fall back to body-matching when FB omits the
+# target comment_id anchor (the 2026-06-17 modal-layout bug).
+_ACTION_RE = re.compile(r"^.*?\b(?:commented on|replied to)\b[^.]*\.\s*", re.IGNORECASE)
+_TRAIL_RE = re.compile(r"\s*(?:Public|Friends|Only me|Custom|Shared with)\b.*?\bView\s*$", re.IGNORECASE)
+
+
+def _body_of(text: str) -> str:
+    if not text:
+        return ""
+    t = _ACTION_RE.sub("", text, count=1)
+    t = _TRAIL_RE.sub("", t)
+    return t.strip()
+
+
+def _navigate_and_extract(ws, url: str, cid: str, owner: str, settle: float, my_text: str = "") -> dict:
     _navigate(ws, url, settle)
-    expr = EXTRACT_JS % (JS_HELPERS, json.dumps(cid), json.dumps(_reply_cid_of(url)), json.dumps(owner))
+    expr = EXTRACT_JS % (
+        JS_HELPERS, json.dumps(cid), json.dumps(_reply_cid_of(url)),
+        json.dumps(owner), json.dumps(my_text or ""),
+    )
     return _eval(ws, expr)
 
 
@@ -333,7 +417,11 @@ def _run_golden(path: Path, args) -> int:
         tid, wsurl = _open_tab(url)
         ws = create_connection(wsurl, suppress_origin=True, timeout=30)
         try:
-            res = _navigate_and_extract(ws, url, _cid_of(url), args.owner, args.settle)
+            # Pass the expected reply text as the body hint so golden exercises the
+            # same author+body fallback the enrich run uses when the cid anchor is
+            # absent (modal layout). `my_text` (optional) overrides reply_text_contains.
+            res = _navigate_and_extract(ws, url, _cid_of(url), args.owner, args.settle,
+                                        e.get("my_text") or e.get("reply_text_contains") or "")
         finally:
             ws.close()
             _close_tab(tid)
@@ -358,9 +446,10 @@ def _run_golden(path: Path, args) -> int:
     return 1 if fails else 0
 
 
-def _enrich_existing(data, records, args, ws) -> tuple[int, int]:
+def _enrich_existing(data, records, args, tid, ws) -> tuple[int, int, str, object]:
     """Enrich already-captured comment records with parent context. Returns
-    (enriched, pairs)."""
+    (enriched, pairs, tid, ws) — tid/ws may have been recycled, so the caller
+    must close the RETURNED pair, not the one it passed in."""
     reply_action_re = re.compile(r"replied to .+? comment", re.IGNORECASE)
     todo = []
     for rec in records:
@@ -385,14 +474,11 @@ def _enrich_existing(data, records, args, ws) -> tuple[int, int]:
         url = rec["url"]
         cid = _cid_of(url)
         try:
-            res = _navigate_and_extract(ws, url, cid, args.owner, args.settle)
+            res = _navigate_and_extract(ws, url, cid, args.owner, args.settle,
+                                        _body_of(rec.get("text") or ""))
         except Exception as exc:  # noqa: BLE001 — stale-socket recovery
             print(f"  [{i}/{len(todo)}] ws-reconnect after {type(exc).__name__}", file=sys.stderr)
-            try:
-                ws.close()
-            except Exception:
-                pass
-            _, ws = _fresh_ws()
+            tid, ws = _recycle_tab(tid, ws)  # closes the dead tab (no leak)
             time.sleep(args.delay)
             continue
         if res.get("err"):
@@ -415,13 +501,17 @@ def _enrich_existing(data, records, args, ws) -> tuple[int, int]:
         time.sleep(args.delay)
         if not args.dry_run and i % 10 == 0:
             (args._comments_path).write_text(json.dumps(data, ensure_ascii=False))
-    return enriched, pairs
+        if args.recycle_every and i % args.recycle_every == 0 and i < len(todo):
+            print(f"  [{i}/{len(todo)}] recycling tab (memory cap)", file=sys.stderr)
+            tid, ws = _recycle_tab(tid, ws)
+    return enriched, pairs, tid, ws
 
 
-def _recover_bare(data, records, args, ws) -> tuple[int, int]:
+def _recover_bare(data, records, args, tid, ws) -> tuple[int, int, str, object]:
     """Recover the dropped bare comment rows from uniqueUrls. Opens each post URL
     not already a captured comment, finds the owner's comment(s) by aria-label,
-    appends recovered records. Returns (recovered_comments, pairs)."""
+    appends recovered records. Returns (recovered_comments, pairs, tid, ws) —
+    tid/ws may have been recycled; caller closes the RETURNED pair."""
     captured_posts = set()
     for rec in records:
         u = rec.get("url", "")
@@ -451,11 +541,7 @@ def _recover_bare(data, records, args, ws) -> tuple[int, int]:
             res = _navigate_and_extract_all(ws, url, args.owner, args.settle)
         except Exception as exc:  # noqa: BLE001 — stale-socket recovery
             print(f"  [{i}/{len(cand)}] ws-reconnect after {type(exc).__name__}", file=sys.stderr)
-            try:
-                ws.close()
-            except Exception:
-                pass
-            _, ws = _fresh_ws()
+            tid, ws = _recycle_tab(tid, ws)  # closes the dead tab (no leak)
             time.sleep(args.delay)
             continue
         if res.get("err"):
@@ -499,7 +585,10 @@ def _recover_bare(data, records, args, ws) -> tuple[int, int]:
             data["commentsWithText"] = records
             data["commentsWithTextCount"] = len(records)
             (args._comments_path).write_text(json.dumps(data, ensure_ascii=False))
-    return recovered, pairs
+        if args.recycle_every and i % args.recycle_every == 0 and i < len(cand):
+            print(f"  [{i}/{len(cand)}] recycling tab (memory cap)", file=sys.stderr)
+            tid, ws = _recycle_tab(tid, ws)
+    return recovered, pairs, tid, ws
 
 
 def _parse_fbid(url: str) -> str:
@@ -510,6 +599,7 @@ def _parse_fbid(url: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", help="single permalink URL; print extraction, no writes")
+    ap.add_argument("--my-text", default="", help="with --probe: the known reply body hint (mimics comments.json text → body fallback)")
     ap.add_argument("--probe-all", help="single post URL; print ALL owner comments on it (bare-row extraction)")
     ap.add_argument("--export-dir", help="export dir (default newest fb-activity-export-* in ~/Downloads)")
     ap.add_argument("--owner", default=OWNER_DEFAULT, help="the user's FB display name")
@@ -517,6 +607,15 @@ def main() -> int:
     ap.add_argument("--max", type=int, default=0, help="cap number of comments/posts processed (0 = all)")
     ap.add_argument("--delay", type=float, default=2.0, help="seconds between fetches (rate limit)")
     ap.add_argument("--settle", type=float, default=8.0, help="seconds to wait after navigate before extracting")
+    ap.add_argument(
+        "--recycle-every",
+        type=int,
+        default=50,
+        help=(
+            "Close + reopen the CDP tab every N navigations to cap FB-SPA "
+            "renderer heap growth (0 = never recycle). Default 50."
+        ),
+    )
     ap.add_argument("--dry-run", action="store_true", help="extract but do not write comments.json")
     ap.add_argument(
         "--recover-bare",
@@ -547,7 +646,8 @@ def main() -> int:
         tid, wsurl = _open_tab(args.probe)
         ws = create_connection(wsurl, suppress_origin=True, timeout=30)
         try:
-            res = _navigate_and_extract(ws, args.probe, _cid_of(args.probe), args.owner, args.settle)
+            res = _navigate_and_extract(ws, args.probe, _cid_of(args.probe), args.owner,
+                                        args.settle, _body_of(args.my_text) if args.my_text else "")
         finally:
             ws.close()
             _close_tab(tid)
@@ -578,22 +678,26 @@ def main() -> int:
     records = data.get("commentsWithText") or []
     print(f"export: {export_dir.name}  comments: {len(records)}", file=sys.stderr)
 
-    tid, wsurl, opened = _find_or_open_fb_tab()
-    ws = create_connection(wsurl, suppress_origin=True, timeout=30)
+    # Always drive a dedicated tab we own (login is per-profile cookies, not
+    # per-tab, so a fresh tab is equally authenticated) — never hijack/close the
+    # user's existing FB tab, and always own the tab we recycle/close.
+    tid, ws = _fresh_ws()
     enriched = pairs = recovered = rec_pairs = 0
     try:
-        enriched, pairs = _enrich_existing(data, records, args, ws)
+        enriched, pairs, tid, ws = _enrich_existing(data, records, args, tid, ws)
         if args.recover_bare:
-            recovered, rec_pairs = _recover_bare(data, records, args, ws)
+            recovered, rec_pairs, tid, ws = _recover_bare(data, records, args, tid, ws)
             data["commentsWithText"] = records
             data["commentsWithTextCount"] = len(records)
             data["commentsWithNonEmptyTextCount"] = sum(
                 1 for r in records if (r.get("text") or "")
             )
     finally:
-        ws.close()
-        if opened:
-            _close_tab(tid)
+        try:
+            ws.close()
+        except Exception:
+            pass
+        _close_tab(tid)
 
     if not args.dry_run:
         comments_path.write_text(json.dumps(data, ensure_ascii=False))

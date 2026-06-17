@@ -42,3 +42,17 @@ entries:
     parent_author: "Michael Genin"
     parent_text_contains: "сверхпрочной стали"
     reply_text_contains: "пристегнут ремнями вдали от ее краев"
+
+  # reply-to-comment where FB renders the permalink as a MODAL that does NOT emit
+  # the target comment_id as an anchor (verified 2026-06-17: his comment present
+  # with a correct "Reply by Vladimir Yakunin to …'s comment" aria-label but zero
+  # target-cid anchors in the dialog — the 4647-record pending tail). The finder
+  # falls back to matching his comment by author aria-label + the known reply body
+  # (comments.json text → _body_of). Regression for the 2026-06-17 fix; the parent
+  # "Hide" moderation-chrome strip is also exercised here.
+  - permalink: "https://www.facebook.com/photo/?fbid=7578867062128646&set=a.104013769614050&comment_id=773715467816952&reply_comment_id=1273293783393600"
+    kind: reply_to_comment
+    parent_author: "Anna Chubinska"
+    parent_text_contains: "Тот редкий случай, когда Вова улыбается на фото"
+    reply_text_contains: "я скорее всего не осознавал, что Иван задумал"
+    my_text: "Vladimir Yakunin replied to Anna Chubinska's comment. Anna Chubinska я скорее всего не осознавал, что Иван задумал Public 8:25 AM View"
