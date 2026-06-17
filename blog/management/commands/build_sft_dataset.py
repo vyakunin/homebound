@@ -91,9 +91,28 @@ _CHROME_RE = re.compile(
 )
 
 
+# A FB activity-log row whose body is ONLY the action line — an empty-text
+# comment/reaction (e.g. a wordless photo comment) where enrichment captured just
+# "<Name> commented on <X>'s photo." + optional audience/time pill, with no actual
+# words from him. Anchored start-to-end so a real comment that merely *mentions*
+# "commented on" mid-sentence is never dropped. (2026-06-17: 22 such turns leaked
+# into the v3 build as both persona and reply examples.)
+_ACTION_LINE_ONLY_RE = re.compile(
+    r"^(?:Vladimir Yakunin|Владимир Якунин)\s+"
+    r"(?:commented on|replied to|shared|reacted to|likes?)\b"
+    r"[^.]{0,70}?\b(?:post|photo|video|comment|link|status)\b\.?"
+    r"(?:\s*(?:Private group|Public|Friends|Only me)?\s*\d{0,2}:?\d{0,2}\s*(?:AM|PM)?)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def _is_dirty(text: str) -> bool:
-    """True if the text carries leaked FB activity-log UI chrome (see _CHROME_RE)."""
-    return bool(_CHROME_RE.search(text))
+    """True if the text carries leaked FB activity-log UI chrome — either welded
+    chrome (``_CHROME_RE``) or a body that is only the action line
+    (``_ACTION_LINE_ONLY_RE``)."""
+    return bool(_CHROME_RE.search(text)) or bool(
+        _ACTION_LINE_ONLY_RE.match(text.strip())
+    )
 
 
 def _is_degenerate(text: str) -> bool:

@@ -286,6 +286,24 @@ def test_is_dirty_keeps_legit_prose_with_incidental_tokens():
     assert not _is_dirty("me: hlikponser 11:13 PM puffypearls: im soooo bored")
 
 
+def test_is_dirty_flags_action_line_only_bodies():
+    # Empty-text FB comments/reactions whose body is ONLY the activity-log action
+    # line — no words from him. (2026-06-17: 22 leaked into the v3 build.)
+    assert _is_dirty("Vladimir Yakunin commented on Evgeny Alexeev's photo.")
+    assert _is_dirty("Vladimir Yakunin replied to Игорь Поночевный's comment.")
+    assert _is_dirty("Vladimir Yakunin commented on his own post.")
+    assert _is_dirty("Vladimir Yakunin commented on Kate Fim's post. Private group 5:36 AM")
+
+
+def test_is_dirty_keeps_real_comment_mentioning_action_verb():
+    # A genuine comment that merely mentions "commented on" mid-sentence must
+    # survive — the action-line detector is anchored start-to-end.
+    assert not _is_dirty(
+        "I commented on this earlier but want to add: the post about X was great"
+    )
+    assert not _is_dirty("Я уже писал об этом посте — отличная статья, спасибо!")
+
+
 def test_is_degenerate_flags_no_signal_turns():
     assert _is_degenerate("И")
     assert _is_degenerate(":)")
