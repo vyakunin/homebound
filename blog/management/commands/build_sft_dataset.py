@@ -31,16 +31,27 @@ Usage:
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 import sys
-from dataclasses import dataclass, field
-from datetime import datetime
+from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
 from blog.models import Post, PostSource, PostVisibility
+
+# Shared low-level helpers live in blog.sft_common so the grounded-QA generator
+# (blog.sft_grounded) can reuse them without importing this management command.
+# Re-exported here so existing call sites and tests keep importing them from
+# blog.management.commands.build_sft_dataset.
+from blog.sft_common import (  # noqa: F401 — re-exported for callers/tests
+    SftExample,
+    _base_meta,
+    _detect_lang,
+    _is_degenerate,
+    _is_dirty,
+    _is_placeholder_parent,
+    _iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,103 +73,6 @@ REPLY_SYSTEM = (
     "You are Vladimir Yakunin. Respond in your own voice and style to the "
     "post below."
 )
-
-# Placeholder bodies the FB extractor stores when the reshared original could
-# not be fetched. As a reply "parent" they carry no signal — drop them.
-_PLACEHOLDER_PARENT_MARKERS = ("not available", "not found")
-
-
-def _is_placeholder_parent(text: str) -> bool:
-    low = text.strip().lower()
-    return any(m in low for m in _PLACEHOLDER_PARENT_MARKERS)
-
-
-# Leaked Facebook activity-log UI chrome that the extractor's _clean_text can
-# miss when a row's visibility/time/action metadata is welded onto the body with
-# no separating whitespace (e.g. "…не СаратовPublicHidden from profile3:57 AM",
-# "поехалиPublic7:47 PMView shared a link.…", or an entire activity-log page
-# header "Your posts, photos and videosAllArchiveTrashChange Audience…").
-#
-# These signatures are deliberately narrow — the visibility/page-header tokens
-# welded directly to a clock-time or nav strip. Legit prose that merely contains
-# "shared a link." or a standalone timestamp is NOT matched (verified against the
-# 2026-06-04 audit's false positives: real political posts + quoted dialog).
-_CHROME_RE = re.compile(
-    r"(?:Public|Friends|Only me|Hidden from profile)\d{1,2}:\d{2}"   # visibility+time weld
-    r"|\d{1,2}:\d{2} ?\s?(?:AM|PM)View\b"                        # time + "View" weld
-    r"|Your posts, photos and videosAll"                             # activity-log page header
-    r"|AllArchiveTrashChange Audience"                               # activity-log nav strip
-)
-
-
-# A FB activity-log row whose body is ONLY the action line — an empty-text
-# comment/reaction (e.g. a wordless photo comment) where enrichment captured just
-# "<Name> commented on <X>'s photo." + optional audience/time pill, with no actual
-# words from him. Anchored start-to-end so a real comment that merely *mentions*
-# "commented on" mid-sentence is never dropped. (2026-06-17: 22 such turns leaked
-# into the v3 build as both persona and reply examples.)
-_ACTION_LINE_ONLY_RE = re.compile(
-    r"^(?:Vladimir Yakunin|Владимир Якунин)\s+"
-    r"(?:commented on|replied to|shared|reacted to|likes?)\b"
-    r"[^.]{0,70}?\b(?:post|photo|video|comment|link|status)\b\.?"
-    r"(?:\s*(?:Private group|Public|Friends|Only me)?\s*\d{0,2}:?\d{0,2}\s*(?:AM|PM)?)?\s*$",
-    re.IGNORECASE,
-)
-
-
-def _is_dirty(text: str) -> bool:
-    """True if the text carries leaked FB activity-log UI chrome — either welded
-    chrome (``_CHROME_RE``) or a body that is only the action line
-    (``_ACTION_LINE_ONLY_RE``)."""
-    return bool(_CHROME_RE.search(text)) or bool(
-        _ACTION_LINE_ONLY_RE.match(text.strip())
-    )
-
-
-def _is_degenerate(text: str) -> bool:
-    """True if the turn carries no trainable voice signal — fewer than 3 stripped
-    characters (``И``, ``Л``, ``:)``) or no alphabetic content at all (``\\``)."""
-    stripped = text.strip()
-    return len(stripped) < 3 or not any(c.isalpha() for c in stripped)
-
-
-def _detect_lang(text: str) -> str:
-    """Cheap RU/EN hint for downstream weighting — Cyrillic-ratio heuristic."""
-    letters = [c for c in text if c.isalpha()]
-    if not letters:
-        return "und"
-    cyr = sum(1 for c in letters if "Ѐ" <= c <= "ӿ")
-    return "ru" if cyr / len(letters) >= 0.3 else "en"
-
-
-@dataclass
-class SftExample:
-    """One JSONL record. ``messages`` is a JSON-serialization boundary, so the
-    list-of-dicts shape is intentional here (see code_style: dict at JSON edge)."""
-
-    messages: list[dict]
-    meta: dict = field(default_factory=dict)
-
-    def to_json_line(self) -> str:
-        return json.dumps(
-            {"messages": self.messages, "meta": self.meta},
-            ensure_ascii=False,
-        )
-
-
-def _iso(dt: datetime | None) -> str:
-    return dt.isoformat() if dt else ""
-
-
-def _base_meta(post: Post, objective: str) -> dict:
-    return {
-        "objective": objective,
-        "source": PostSource(post.source).name.lower(),
-        "source_id": post.source_id,
-        "slug": post.slug,
-        "created_at": _iso(post.created_at),
-        "visibility": PostVisibility(post.visibility).name.lower(),
-    }
 
 
 def _persona_example(post: Post) -> SftExample:
@@ -395,9 +309,15 @@ def _iter_comment_reply_pairs(
 class Command(BaseCommand):
     help = "Build a model-agnostic SFT JSONL dataset (persona + post→reply) from the corpus."
 
+    # Default persona = the slim FT system prompt (homebound-platform repo). It is
+    # the LOCKED train==serve string: the same file the bot loads at serve time,
+    # so the grounded-QA `user` turn matches prod byte-for-byte.
+    DEFAULT_PERSONA_FILE = "~/cursor_projects/homebound-platform/personas/bot_persona_ft.md"
+
     def add_arguments(self, parser):
         parser.add_argument(
-            "--objective", choices=["persona", "reply", "both"], default="both",
+            "--objective", choices=["persona", "reply", "both", "none"], default="both",
+            help="DB-only generators to run. 'none' = grounded-QA only (with --grounded-qa).",
         )
         parser.add_argument(
             "--sources", default="all",
@@ -424,6 +344,41 @@ class Command(BaseCommand):
         )
         parser.add_argument("--limit", type=int, default=0, help="Cap total examples (0 = no cap).")
 
+        # ── Grounded-QA objective (train==serve format bridge; paid Q-gen) ──
+        g = parser.add_argument_group("grounded-qa")
+        g.add_argument(
+            "--grounded-qa", action="store_true", default=False,
+            help="Also generate grounded-QA examples (visitor question + prod "
+                 "retrieval block → answer span). Needs a DB with embeddings, a "
+                 "Voyage key (retrieval) and a Together key (Q-gen). PAID.",
+        )
+        g.add_argument(
+            "--grounded-qa-limit", type=int, default=0,
+            help="Cap oracle posts sampled for grounded-QA (0 = all public posts). "
+                 "Each oracle yields ~1-3 examples.",
+        )
+        g.add_argument(
+            "--grounded-min-len", type=int, default=40,
+            help="Min oracle-post length to qualify for grounded-QA (default 40).",
+        )
+        g.add_argument("--grounded-top-k", type=int, default=10, help="Retrieval block size.")
+        g.add_argument(
+            "--grounded-seed", type=int, default=1234,
+            help="RNG seed for oracle-position variation.",
+        )
+        g.add_argument(
+            "--qgen-model", default=None,
+            help="Together model id for Q-gen (default: Qwen3-235B serverless).",
+        )
+        g.add_argument(
+            "--qgen-key", default="~/tokens/together_api_key",
+            help="Path to the Together API key file.",
+        )
+        g.add_argument(
+            "--persona-file", default=None,
+            help="Path to the persona system prompt (default: the FT persona, homebound-platform).",
+        )
+
     def handle(self, *args, **opts):
         sources = _resolve_sources(opts["sources"])
         objective = opts["objective"]
@@ -440,12 +395,15 @@ class Command(BaseCommand):
             generators.append(
                 ("reply", _iter_comment_reply_pairs(sources, public_only, min_len, stats))
             )
+        if opts["grounded_qa"]:
+            generators.append(self._grounded_generator(opts, sources, stats))
 
-        counts = {"persona": 0, "reply": 0, "dropped_dup": 0}
+        counts = {"persona": 0, "reply": 0, "grounded_qa": 0, "dropped_dup": 0}
         # Dedup per-objective: a reply reuses the post's content_text as its
         # response, which also appears as a persona example — those are distinct
         # training signals (the reply carries parent context), so a shared key
-        # set would wrongly collapse them.
+        # set would wrongly collapse them. Grounded-QA dedups on question+answer
+        # (the same span can faithfully answer two distinct questions).
         seen_by_obj: dict[str, set[str]] = {}
         fh = sys.stdout if out_path == "-" else open(out_path, "w", encoding="utf-8")
         try:
@@ -453,14 +411,17 @@ class Command(BaseCommand):
                 seen = seen_by_obj.setdefault(name, set())
                 for ex in gen:
                     if opts["dedup"]:
-                        key = ex.messages[-1]["content"]
+                        if name == "grounded_qa":
+                            key = ex.messages[1]["content"] + "\x00" + ex.messages[-1]["content"]
+                        else:
+                            key = ex.messages[-1]["content"]
                         if key in seen:
                             counts["dropped_dup"] += 1
                             continue
                         seen.add(key)
                     fh.write(ex.to_json_line() + "\n")
                     counts[name] += 1
-                    total = counts["persona"] + counts["reply"]
+                    total = counts["persona"] + counts["reply"] + counts["grounded_qa"]
                     if opts["limit"] and total >= opts["limit"]:
                         break
         finally:
@@ -468,9 +429,71 @@ class Command(BaseCommand):
                 fh.close()
 
         dest = "stdout" if out_path == "-" else out_path
+        n_written = counts["persona"] + counts["reply"] + counts["grounded_qa"]
+        grounded_note = self._grounded_stats_note(stats) if opts["grounded_qa"] else ""
         self.stdout.write(
-            f"Wrote {counts['persona'] + counts['reply']} example(s) to {dest}: "
-            f"{counts['persona']} persona, {counts['reply']} reply "
+            f"Wrote {n_written} example(s) to {dest}: "
+            f"{counts['persona']} persona, {counts['reply']} reply, "
+            f"{counts['grounded_qa']} grounded_qa{grounded_note} "
             f"({counts['dropped_dup']} duplicate(s), "
             f"{stats['dropped_dirty']} dirty/degenerate dropped)."
+        )
+
+    # ── grounded-QA wiring ────────────────────────────────────────────────
+
+    def _load_persona(self, path: str | None) -> str:
+        from blog.bot import _strip_authoring_comments
+
+        p = Path(path or self.DEFAULT_PERSONA_FILE).expanduser()
+        if not p.is_file():
+            raise CommandError(f"--persona-file not found: {p}")
+        return _strip_authoring_comments(p.read_text(encoding="utf-8"))
+
+    def _grounded_generator(self, opts, sources, stats):
+        """Build the ('grounded_qa', generator) entry: load persona, open the
+        Together client, sample oracle posts, wire the prod retriever in-process."""
+        from blog import sft_grounded, sft_qgen
+        from blog.models import PostVisibility
+
+        persona = self._load_persona(opts["persona_file"])
+        client = sft_qgen.make_together_client(opts["qgen_key"])
+        model = opts["qgen_model"] or sft_qgen.DEFAULT_QGEN_MODEL
+
+        def qgen_fn(post):
+            return sft_qgen.generate_qa(
+                post.content_text, client=client, model=model,
+                source=PostSource(post.source).name.lower(),
+                date=_iso(post.created_at)[:10],
+            )
+
+        # Oracles = the author's own PUBLIC posts (the only thing the bot serves /
+        # the retriever can surface). Random order so a capped sample is
+        # representative across years/sources, not the oldest N.
+        qs = (
+            Post.objects.filter(source__in=sources, visibility=PostVisibility.PUBLIC)
+            .exclude(content_text="")
+            .order_by("?")
+        )
+        if opts["grounded_qa_limit"]:
+            qs = qs[: opts["grounded_qa_limit"]]
+        posts = list(qs)
+        stats["grounded_oracle_pool"] = len(posts)
+        gen = sft_grounded.iter_grounded_qa(
+            posts,
+            qgen_fn=qgen_fn,
+            persona_system=persona,
+            stats=stats,
+            top_k=opts["grounded_top_k"],
+            min_len=opts["grounded_min_len"],
+            seed=opts["grounded_seed"],
+        )
+        return ("grounded_qa", gen)
+
+    @staticmethod
+    def _grounded_stats_note(stats: dict) -> str:
+        return (
+            f" [oracles={stats.get('grounded_oracle_pool', 0)}, "
+            f"no_q={stats.get('grounded_no_questions', 0)}, "
+            f"bad_target={stats.get('grounded_bad_target', 0)}, "
+            f"oracle_injected={stats.get('grounded_oracle_injected', 0)}]"
         )
