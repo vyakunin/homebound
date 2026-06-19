@@ -153,6 +153,14 @@ def is_available() -> bool:
 # ── Persona ───────────────────────────────────────────────────────────
 
 
+def _strip_authoring_comments(text: str) -> str:
+    """Drop HTML ``<!-- ... -->`` author/changelog comments from a persona file.
+    They're useful when hand-editing the .md but are pure dead weight (and can be
+    stale/misleading, e.g. naming a different model) once tokenized into the
+    system prompt on every request."""
+    return re.sub(r"<!--.*?-->\s*", "", text, flags=re.S).lstrip()
+
+
 def _persona_text(lang: Literal["ru", "en"] = "ru") -> str:
     """Load the language-specific persona file. Falls back to the legacy
     single-persona path if the lang-specific one isn't configured."""
@@ -174,7 +182,7 @@ def _persona_text(lang: Literal["ru", "en"] = "ru") -> str:
         path = Path(raw)
         if path.is_file():
             try:
-                return path.read_text(encoding="utf-8")
+                return _strip_authoring_comments(path.read_text(encoding="utf-8"))
             except OSError:
                 continue
     return FALLBACK_PERSONA
