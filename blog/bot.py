@@ -488,7 +488,7 @@ def _topic_timeline_summary(hits: list[BotHit]) -> str:
         return ""
     return (
         f"*Year coverage of on-topic retrieved posts: "
-        f"{', '.join(years)}. Use this to gauge whether Vladimir's "
+        f"{', '.join(years)}. Use this to gauge whether your "
         f"engagement with the topic is recent, sustained, or a one-off.*\n"
     )
 
@@ -498,17 +498,20 @@ def _render_hit(idx: int, h: BotHit) -> str:
 
     Three shapes, picked by which of (repost_author, repost_excerpt) is set:
 
-    1. Vladimir's own post (no repost_author) →
-         SOURCE: Vladimir wrote this himself.
+    SOURCE lines address the model in the second person ("you") so it never
+    sees itself referred to as "Vladimir" in the third person:
+
+    1. Your own post (no repost_author) →
+         SOURCE: you wrote this yourself.
 
     2. Pure repost (repost_author set, no separate excerpt — snippet IS
        the reshared text) →
-         SOURCE: Vladimir reshared this from <author>. The text below is
-         <author>'s words, NOT Vladimir's…
+         SOURCE: you reshared this from <author>. The text below is
+         <author>'s words, NOT yours…
 
-    3. Repost + Vladimir's own commentary (both content_text and
+    3. Repost + your own commentary (both content_text and
        reshared_content_text non-empty) →
-         SOURCE: Vladimir's own commentary, attached to a repost from
+         SOURCE: your own commentary, attached to a repost from
          <author>. Two labelled sections follow.
 
     Persona's "Handling retrieved content" section explains how to use
@@ -521,20 +524,20 @@ def _render_hit(idx: int, h: BotHit) -> str:
         lines.append(f"**{h.title}**")
 
     if not h.repost_author:
-        lines.append("SOURCE: Vladimir wrote this himself.")
+        lines.append("SOURCE: you wrote this yourself.")
         lines.append("---")
         lines.append(h.snippet)
     elif h.repost_excerpt:
-        # Vladimir wrote commentary AND the reshared body is separately
+        # You wrote commentary AND the reshared body is separately
         # captured. Two labelled sections.
         lines.append(
-            f"SOURCE: Vladimir's own commentary, attached to a repost "
+            f"SOURCE: your own commentary, attached to a repost "
             f"from {h.repost_author}."
         )
         lines.append("---")
-        lines.append(f"*Vladimir's commentary:*\n{h.snippet}")
+        lines.append(f"*Your commentary:*\n{h.snippet}")
         lines.append(
-            f"\n*Reposted from {h.repost_author} (NOT Vladimir's words):*\n"
+            f"\n*Reposted from {h.repost_author} (NOT your words):*\n"
             f"{h.repost_excerpt}"
         )
     else:
@@ -542,10 +545,10 @@ def _render_hit(idx: int, h: BotHit) -> str:
         # @-handles inside the text are flagged so the model knows the
         # reshared author may themselves be quoting/tagging someone else.
         lines.append(
-            f"SOURCE: Vladimir reshared this from {h.repost_author}. "
-            f"The text below is {h.repost_author}'s words, NOT Vladimir's. "
+            f"SOURCE: you reshared this from {h.repost_author}. "
+            f"The text below is {h.repost_author}'s words, NOT yours. "
             f"If it contains an @-handle (e.g. @rap_anacondaz = Russian band "
-            f"Anacondaz), that's a third party Vladimir is indirectly "
+            f"Anacondaz), that's a third party you're indirectly "
             f"endorsing by resharing. Do NOT quote this text in the first "
             f"person."
         )
