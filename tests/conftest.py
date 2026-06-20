@@ -1,6 +1,28 @@
 """pytest-django fixtures shared across all Django tests."""
 import datetime
+from pathlib import Path
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_token_files(monkeypatch, tmp_path):
+    """Block ``~/tokens/*`` provider-key file fallbacks for every test.
+
+    Several key resolvers — ``blog.bot._openrouter_key`` /
+    ``blog.bot._api_key`` (Anthropic), ``blog.embeddings._voyage_key`` — read
+    an env var first, then fall back to ``~/tokens/homebound_*_key``. On an
+    operator box those files exist, so a test that "disables" a provider by
+    clearing only the env var still sees it available: the bot's RU path then
+    makes LIVE billable OpenRouter calls, and ``is_available()`` flips
+    search-mode/embedding behavior. Those tests "passed" only under bazel's
+    sandbox ``$HOME`` (no ``tokens/`` dir).
+
+    Point ``$HOME`` at an empty tmp dir so only an explicitly-set ``*_API_KEY``
+    env var makes a provider visible. A test that wants a provider enabled sets
+    its env var itself (and stubs the HTTP client). See
+    ``~/.claude/rules/clean_baseline.md`` (sandbox-green hiding live calls)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
 
 @pytest.fixture

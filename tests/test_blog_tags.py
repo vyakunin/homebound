@@ -75,5 +75,10 @@ class TestFbReshareEmbedInRenderedPage:
         r = Client().get(f'/post/{post.slug}/')
         assert r.status_code == 200
         body = r.content.decode('utf-8')
-        assert 'plugins/post.php' not in body
+        # Assert on the actual Embedded-Post iframe URL form (host + query),
+        # NOT a bare 'plugins/post.php' substring — the latter also appears in
+        # the FB-iframe-resize script's explanatory comment, so the broad match
+        # tripped on the comment whenever that script asset is present (it
+        # "passed" only under bazel, whose sandbox lacks the asset).
+        assert 'www.facebook.com/plugins/post.php' not in body
         assert 'gplus-reshare-note' in body
