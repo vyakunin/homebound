@@ -37,6 +37,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
+from blog import sft_resilience
 from blog.models import Post, PostSource, PostVisibility
 
 # Shared low-level helpers live in blog.sft_common so the grounded-QA generator
@@ -64,24 +65,53 @@ SOURCE_SLUGS: dict[str, PostSource] = {
     "blog": PostSource.BLOG,
 }
 
-# Single, fixed instructions. For style SFT a constant instruction mapped onto
-# many distinct outputs is the intended shape — it teaches the voice
-# distribution, not a fake Q→A correspondence.
-PERSONA_SYSTEM = "You are Vladimir Yakunin. Write in your own voice and style."
-PERSONA_USER = "Write a post."
-REPLY_SYSTEM = (
-    "You are Vladimir Yakunin. Respond in your own voice and style to the "
-    "post below."
+# Persona/reply system prompts. DEFAULT is DE-NAMED ("the author", not "Vladimir
+# Yakunin" — decision 4 / modal_persona_serving rule 11) and, when the resilience
+# layer is on, SAMPLED across equivalent paraphrases per example so the model
+# stays steerable by its system turn (blog.sft_resilience). The named variants
+# reproduce the pre-de-naming build via --named. PERSONA_USER stays fixed (style
+# SFT maps one instruction onto many distinct outputs — the voice distribution).
+NAMED_PERSONA_SYSTEM = "You are Vladimir Yakunin. Write in your own voice and style."
+NAMED_REPLY_SYSTEM = (
+    "You are Vladimir Yakunin. Respond in your own voice and style to the post below."
 )
+PERSONA_USER = "Write a post."
+
+# Back-compat aliases (the canonical de-named strings). Some callers / the
+# post-hoc denamed_dataset.py reference these conceptually.
+PERSONA_SYSTEM = sft_resilience.PERSONA_VARIANTS[0]
+REPLY_SYSTEM = sft_resilience.REPLY_VARIANTS[0]
 
 
-def _persona_example(post: Post) -> SftExample:
+# A system_fn maps (kind, key) -> system string. ``kind`` is "persona"|"reply";
+# ``key`` is the example's assistant text (so resilience sampling is stable per
+# example). Injected into the generators so handle() controls named/de-named/
+# resilience without threading flags through every function.
+def _make_system_fn(*, named: bool, resilience: bool, seed: int):
+    def fn(kind: str, key: str) -> str:
+        if named:
+            return NAMED_PERSONA_SYSTEM if kind == "persona" else NAMED_REPLY_SYSTEM
+        variants = (
+            sft_resilience.PERSONA_VARIANTS if kind == "persona"
+            else sft_resilience.REPLY_VARIANTS
+        )
+        if not resilience:
+            return variants[0]
+        return sft_resilience.sample_system(variants, key, seed)
+    return fn
+
+
+# Default for direct callers (tests): de-named canonical, no sampling.
+_DEFAULT_SYSTEM_FN = _make_system_fn(named=False, resilience=False, seed=0)
+
+
+def _persona_example(post: Post, *, system_fn=_DEFAULT_SYSTEM_FN) -> SftExample:
     text = post.content_text.strip()
     meta = _base_meta(post, "persona")
     meta["lang"] = _detect_lang(text)
     return SftExample(
         messages=[
-            {"role": "system", "content": PERSONA_SYSTEM},
+            {"role": "system", "content": system_fn("persona", text)},
             {"role": "user", "content": PERSONA_USER},
             {"role": "assistant", "content": text},
         ],
@@ -89,7 +119,7 @@ def _persona_example(post: Post) -> SftExample:
     )
 
 
-def _reply_example(post: Post) -> SftExample:
+def _reply_example(post: Post, *, system_fn=_DEFAULT_SYSTEM_FN) -> SftExample:
     """A (parent → his response) pair. Parent = reshared body (+ author when
     known); response = his own commentary (``content_text``)."""
     return _build_reply_example(
@@ -98,10 +128,11 @@ def _reply_example(post: Post) -> SftExample:
         parent_author=post.reshared_from_author,
         parent_url=post.reshared_from_url,
         parent_kind="reshared",
+        system_fn=system_fn,
     )
 
 
-def _reply_example_from_reply_to(post: Post) -> SftExample:
+def _reply_example_from_reply_to(post: Post, *, system_fn=_DEFAULT_SYSTEM_FN) -> SftExample:
     """A (parent → his reply) pair sourced from the dedicated reply-parent
     fields (true conversational replies: FB comments on others' posts, X plain
     replies). Parent = ``reply_to_text`` (+ author when known); response = his
@@ -112,6 +143,7 @@ def _reply_example_from_reply_to(post: Post) -> SftExample:
         parent_author=post.reply_to_author,
         parent_url=post.reply_to_url,
         parent_kind="reply_to",
+        system_fn=system_fn,
     )
 
 
@@ -124,6 +156,7 @@ def _build_reply_example(
     response: str | None = None,
     parent_kind: str = "reshared",
     extra_meta: dict | None = None,
+    system_fn=_DEFAULT_SYSTEM_FN,
 ) -> SftExample:
     """Construct one (parent → his reply) example.
 
@@ -145,7 +178,7 @@ def _build_reply_example(
         meta.update(extra_meta)
     return SftExample(
         messages=[
-            {"role": "system", "content": REPLY_SYSTEM},
+            {"role": "system", "content": system_fn("reply", resp)},
             {"role": "user", "content": parent},
             {"role": "assistant", "content": resp},
         ],
@@ -180,7 +213,8 @@ def _resolve_sources(raw: str) -> list[PostSource]:
 
 
 def _iter_persona(
-    sources: list[PostSource], public_only: bool, min_len: int, stats: dict
+    sources: list[PostSource], public_only: bool, min_len: int, stats: dict,
+    system_fn=_DEFAULT_SYSTEM_FN,
 ):
     qs = Post.objects.filter(source__in=sources).order_by("created_at")
     if public_only:
@@ -192,11 +226,12 @@ def _iter_persona(
         if _is_dirty(text) or _is_degenerate(text):
             stats["dropped_dirty"] += 1
             continue
-        yield _persona_example(post)
+        yield _persona_example(post, system_fn=system_fn)
 
 
 def _iter_reply_pairs(
-    sources: list[PostSource], public_only: bool, min_len: int, stats: dict
+    sources: list[PostSource], public_only: bool, min_len: int, stats: dict,
+    system_fn=_DEFAULT_SYSTEM_FN,
 ):
     """Yield (parent → his response) examples.
 
@@ -237,7 +272,7 @@ def _iter_reply_pairs(
             and not _is_dirty(reshared)
             and len(reshared) >= min_len
         ):
-            yield _reply_example(post)
+            yield _reply_example(post, system_fn=system_fn)
 
         reply_to = post.reply_to_text.strip()
         if (
@@ -246,11 +281,12 @@ def _iter_reply_pairs(
             and not _is_dirty(reply_to)
             and len(reply_to) >= min_len
         ):
-            yield _reply_example_from_reply_to(post)
+            yield _reply_example_from_reply_to(post, system_fn=system_fn)
 
 
 def _iter_comment_reply_pairs(
-    sources: list[PostSource], public_only: bool, min_len: int, stats: dict
+    sources: list[PostSource], public_only: bool, min_len: int, stats: dict,
+    system_fn=_DEFAULT_SYSTEM_FN,
 ):
     """Yield (parent comment → his reply) examples mined from comment THREADS on
     the author's own posts — the Google+ third reply source.
@@ -302,6 +338,7 @@ def _iter_comment_reply_pairs(
                         response=text,
                         parent_kind="comment_thread",
                         extra_meta={"comment_id": c.source_id or ""},
+                        system_fn=system_fn,
                     )
             prev_text, prev_author, prev_is_self = text, c.author_name, is_self
 
@@ -347,6 +384,22 @@ class Command(BaseCommand):
         )
         parser.add_argument("--limit", type=int, default=0, help="Cap total examples (0 = no cap).")
 
+        # ── Persona/reply system prompt (de-naming + resilience) ──
+        parser.add_argument(
+            "--named", action="store_true", default=False,
+            help="Use the NAMED system prompt ('You are Vladimir Yakunin…'). "
+                 "Default is DE-NAMED ('the author') per decision 4 / rule 11.",
+        )
+        parser.add_argument(
+            "--no-resilience", dest="resilience", action="store_false", default=True,
+            help="Disable per-example system-prompt paraphrase sampling (use the "
+                 "single canonical de-named string for all persona/reply examples).",
+        )
+        parser.add_argument(
+            "--system-seed", type=int, default=1234,
+            help="Seed for resilience system-prompt sampling (reproducible).",
+        )
+
         # ── Grounded-QA objective (train==serve format bridge; paid Q-gen) ──
         g = parser.add_argument_group("grounded-qa")
         g.add_argument(
@@ -381,6 +434,41 @@ class Command(BaseCommand):
             "--persona-file", default=None,
             help="Path to the persona system prompt (default: the FT persona, homebound-platform).",
         )
+        g.add_argument(
+            "--grounded-max-workers", type=int, default=1,
+            help="Thread-pool width for the per-oracle Q-gen+retrieve(+QC) work "
+                 "(>1 for the full build; output stays reproducible).",
+        )
+        g.add_argument(
+            "--relevance-qc", action="store_true", default=False,
+            help="Run the relevance-QC judge (decision 2): drop grounded examples "
+                 "whose oracle does not answer its question. PAID (one judge call "
+                 "per grounded example).",
+        )
+        g.add_argument(
+            "--no-source-bucket", dest="source_bucket", action="store_false", default=True,
+            help="Don't split reshare oracles into the source-discipline bucket "
+                 "(default: reshare oracles → bucket='source').",
+        )
+        g.add_argument(
+            "--abstention", action="store_true", default=False,
+            help="Also emit the abstention bucket (off-corpus questions + RAFT "
+                 "no-oracle). Teaches «хз» when the block doesn't answer.",
+        )
+        g.add_argument(
+            "--abstention-raft-limit", type=int, default=0,
+            help="Cap oracles used for RAFT-no-oracle abstention (0 = same pool as "
+                 "grounded). PAID (Q-gen per oracle).",
+        )
+        g.add_argument(
+            "--transfer", action="store_true", default=False,
+            help="Also emit the transfer bucket (kNN cluster-holdout + entailment "
+                 "gate). PAID + slow (Q-gen + entailment per candidate).",
+        )
+        g.add_argument(
+            "--transfer-limit", type=int, default=200,
+            help="Cap EMITTED transfer examples (small + hand-checked bucket).",
+        )
 
     def handle(self, *args, **opts):
         sources = _resolve_sources(opts["sources"])
@@ -388,25 +476,34 @@ class Command(BaseCommand):
         out_path = opts["out"]
         min_len = opts["min_len"]
         public_only = opts["public_only"]
+        system_fn = _make_system_fn(
+            named=opts["named"], resilience=opts["resilience"], seed=opts["system_seed"]
+        )
 
         stats = {"dropped_dirty": 0}
         generators = []
         if objective in ("persona", "both"):
-            generators.append(("persona", _iter_persona(sources, public_only, min_len, stats)))
-        if objective in ("reply", "both"):
-            generators.append(("reply", _iter_reply_pairs(sources, public_only, min_len, stats)))
             generators.append(
-                ("reply", _iter_comment_reply_pairs(sources, public_only, min_len, stats))
+                ("persona", _iter_persona(sources, public_only, min_len, stats, system_fn))
             )
+        if objective in ("reply", "both"):
+            generators.append(
+                ("reply", _iter_reply_pairs(sources, public_only, min_len, stats, system_fn))
+            )
+            generators.append((
+                "reply",
+                _iter_comment_reply_pairs(sources, public_only, min_len, stats, system_fn),
+            ))
         if opts["grounded_qa"]:
-            generators.append(self._grounded_generator(opts, sources, stats))
+            generators.extend(self._grounded_generators(opts, sources, stats))
 
-        counts = {"persona": 0, "reply": 0, "grounded_qa": 0, "dropped_dup": 0}
-        # Dedup per-objective: a reply reuses the post's content_text as its
-        # response, which also appears as a persona example — those are distinct
-        # training signals (the reply carries parent context), so a shared key
-        # set would wrongly collapse them. Grounded-QA dedups on question+answer
-        # (the same span can faithfully answer two distinct questions).
+        counts: dict[str, int] = {"dropped_dup": 0}
+        # Dedup per-objective. persona/reply key on the assistant turn (a reply
+        # reuses the post's content_text, which also appears as a persona example —
+        # distinct signals, so separate sets). grounded_qa/source/transfer key on
+        # user+assistant (the same span can faithfully answer two distinct
+        # questions; the user turn carries the block). abstention keys on the user
+        # turn only (its assistant target is a small intentional «хз» pool).
         seen_by_obj: dict[str, set[str]] = {}
         fh = sys.stdout if out_path == "-" else open(out_path, "w", encoding="utf-8")
         try:
@@ -414,35 +511,44 @@ class Command(BaseCommand):
                 seen = seen_by_obj.setdefault(name, set())
                 for ex in gen:
                     if opts["dedup"]:
-                        if name == "grounded_qa":
-                            key = ex.messages[1]["content"] + "\x00" + ex.messages[-1]["content"]
-                        else:
-                            key = ex.messages[-1]["content"]
+                        key = self._dedup_key(name, ex)
                         if key in seen:
                             counts["dropped_dup"] += 1
                             continue
                         seen.add(key)
                     fh.write(ex.to_json_line() + "\n")
-                    counts[name] += 1
-                    total = counts["persona"] + counts["reply"] + counts["grounded_qa"]
+                    counts[name] = counts.get(name, 0) + 1
+                    total = sum(v for k, v in counts.items() if k != "dropped_dup")
                     if opts["limit"] and total >= opts["limit"]:
                         break
+                else:
+                    continue
+                break  # outer break when --limit reached
         finally:
             if fh is not sys.stdout:
                 fh.close()
 
         dest = "stdout" if out_path == "-" else out_path
-        n_written = counts["persona"] + counts["reply"] + counts["grounded_qa"]
+        n_written = sum(v for k, v in counts.items() if k != "dropped_dup")
+        breakdown = ", ".join(
+            f"{counts[k]} {k}" for k in sorted(counts) if k != "dropped_dup"
+        )
         grounded_note = self._grounded_stats_note(stats) if opts["grounded_qa"] else ""
         self.stdout.write(
-            f"Wrote {n_written} example(s) to {dest}: "
-            f"{counts['persona']} persona, {counts['reply']} reply, "
-            f"{counts['grounded_qa']} grounded_qa{grounded_note} "
+            f"Wrote {n_written} example(s) to {dest}: {breakdown}{grounded_note} "
             f"({counts['dropped_dup']} duplicate(s), "
             f"{stats['dropped_dirty']} dirty/degenerate dropped)."
         )
 
-    # ── grounded-QA wiring ────────────────────────────────────────────────
+    @staticmethod
+    def _dedup_key(name: str, ex: SftExample) -> str:
+        if name in ("persona", "reply"):
+            return ex.messages[-1]["content"]
+        if name == "abstention":
+            return ex.messages[1]["content"]
+        return ex.messages[1]["content"] + "\x00" + ex.messages[-1]["content"]
+
+    # ── grounded-QA + bucket wiring ───────────────────────────────────────
 
     def _load_persona(self, path: str | None) -> str:
         from blog.bot import _strip_authoring_comments
@@ -452,15 +558,27 @@ class Command(BaseCommand):
             raise CommandError(f"--persona-file not found: {p}")
         return _strip_authoring_comments(p.read_text(encoding="utf-8"))
 
-    def _grounded_generator(self, opts, sources, stats):
-        """Build the ('grounded_qa', generator) entry: load persona, open the
-        Together client, sample oracle posts, wire the prod retriever in-process."""
-        from blog import sft_grounded, sft_qgen
+    def _grounded_generators(self, opts, sources, stats):
+        """Build the grounded + source + abstention + transfer (name, generator)
+        entries: load persona, open the Together client, sample + partition oracle
+        posts, wire the prod retriever in-process.
+
+        Oracle partition (no double Q-gen): reshare oracles → the source-discipline
+        bucket; the rest → grounded_qa. Abstention reuses the grounded oracle pool
+        for its RAFT-no-oracle sub-type; transfer draws from the same pool, capped.
+        """
+        import functools
+
+        from blog import sft_abstention, sft_grounded, sft_qgen, sft_transfer
         from blog.models import PostVisibility
 
         persona = self._load_persona(opts["persona_file"])
         client = sft_qgen.make_together_client(opts["qgen_key"])
         model = opts["qgen_model"] or sft_qgen.DEFAULT_QGEN_MODEL
+        top_k = opts["grounded_top_k"]
+        min_o = opts["grounded_min_len"]
+        seed = opts["grounded_seed"]
+        workers = opts["grounded_max_workers"]
 
         def qgen_fn(post):
             return sft_qgen.generate_qa(
@@ -468,6 +586,10 @@ class Command(BaseCommand):
                 source=PostSource(post.source).name.lower(),
                 date=_iso(post.created_at)[:10],
             )
+
+        judge_fn = None
+        if opts["relevance_qc"]:
+            judge_fn = functools.partial(sft_qgen.judge_grounding, client=client, model=model)
 
         # Oracles = the author's own PUBLIC posts (the only thing the bot serves /
         # the retriever can surface). Random order so a capped sample is
@@ -481,22 +603,69 @@ class Command(BaseCommand):
             qs = qs[: opts["grounded_qa_limit"]]
         posts = list(qs)
         stats["grounded_oracle_pool"] = len(posts)
-        gen = sft_grounded.iter_grounded_qa(
-            posts,
-            qgen_fn=qgen_fn,
-            persona_system=persona,
-            stats=stats,
-            top_k=opts["grounded_top_k"],
-            min_len=opts["grounded_min_len"],
-            seed=opts["grounded_seed"],
+
+        if opts["source_bucket"]:
+            reshare = [p for p in posts if sft_grounded.is_reshare_oracle(p)]
+            grounded = [p for p in posts if not sft_grounded.is_reshare_oracle(p)]
+        else:
+            reshare, grounded = [], posts
+        stats["source_oracle_pool"] = len(reshare)
+
+        gens = [
+            ("grounded_qa", sft_grounded.iter_grounded_qa(
+                grounded, qgen_fn=qgen_fn, persona_system=persona, stats=stats,
+                top_k=top_k, min_len=min_o, judge_fn=judge_fn, seed=seed,
+                max_workers=workers,
+            ))
+        ]
+        if reshare:
+            gens.append(("source", sft_grounded.iter_grounded_qa(
+                reshare, qgen_fn=qgen_fn, persona_system=persona, stats=stats,
+                top_k=top_k, min_len=min_o, judge_fn=judge_fn, bucket="source",
+                seed=seed, max_workers=workers,
+            )))
+        if opts["abstention"]:
+            raft_posts = posts
+            if opts["abstention_raft_limit"]:
+                raft_posts = posts[: opts["abstention_raft_limit"]]
+            gens.append(("abstention", self._abstention_chain(
+                sft_abstention, qgen_fn, persona, stats, raft_posts,
+                top_k=top_k, min_len=min_o, seed=seed,
+            )))
+        if opts["transfer"]:
+            entail_fn = functools.partial(
+                sft_qgen.judge_transfer_support, client=client, model=model
+            )
+            gens.append(("transfer", sft_transfer.iter_transfer(
+                posts, qgen_fn=qgen_fn, entail_fn=entail_fn, persona_system=persona,
+                stats=stats, top_k=top_k, min_len=min_o, limit=opts["transfer_limit"],
+                seed=seed,
+            )))
+        return gens
+
+    @staticmethod
+    def _abstention_chain(sft_abstention, qgen_fn, persona, stats, raft_posts, *,
+                          top_k, min_len, seed):
+        """Chain the off-corpus + RAFT-no-oracle abstention generators."""
+        yield from sft_abstention.iter_off_corpus_abstention(
+            persona_system=persona, stats=stats, top_k=top_k, seed=seed,
         )
-        return ("grounded_qa", gen)
+        yield from sft_abstention.iter_raft_no_oracle_abstention(
+            raft_posts, qgen_fn=qgen_fn, persona_system=persona, stats=stats,
+            top_k=top_k, min_len=min_len, seed=seed,
+        )
 
     @staticmethod
     def _grounded_stats_note(stats: dict) -> str:
         return (
             f" [oracles={stats.get('grounded_oracle_pool', 0)}, "
+            f"source_oracles={stats.get('source_oracle_pool', 0)}, "
             f"no_q={stats.get('grounded_no_questions', 0)}, "
             f"bad_target={stats.get('grounded_bad_target', 0)}, "
-            f"oracle_injected={stats.get('grounded_oracle_injected', 0)}]"
+            f"oracle_injected={stats.get('grounded_oracle_injected', 0)}, "
+            f"qc_dropped={stats.get('grounded_qc_dropped', 0)}, "
+            f"abst_off={stats.get('abstention_off_corpus', 0)}, "
+            f"abst_raft={stats.get('abstention_raft', 0)}, "
+            f"transfer_ok={stats.get('transfer_supported', 0)}, "
+            f"transfer_abst={stats.get('transfer_abstained', 0)}]"
         )
