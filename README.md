@@ -31,9 +31,12 @@ docker compose up -d
 
 ```bash
 bazel build //...
-bazel test //tests:...
+bazel test //tests:all           # the test gate — run the whole package, not a subset
 bazel run //:runserver           # localhost:8080
 ```
+
+Tests run **only** through Bazel (`bazel test //tests:all`) — not a bare `pytest`.
+The venv below is for one-off management commands, not the test suite.
 
 Management commands run via the venv (Bazel sandbox lacks `allauth`'s transitive deps):
 
@@ -82,4 +85,4 @@ The Docker compose in this repo is the *generic* self-host setup. For your own p
 
 ## Contributing
 
-Issues + PRs welcome. Run `bazel test //tests:...` before submitting; CI runs the same on every PR.
+Issues + PRs welcome. Run `bazel test //tests:all` before submitting; CI runs the same on every PR.

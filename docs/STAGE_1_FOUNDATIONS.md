@@ -252,7 +252,7 @@ This goes into the public repo. Self-hosted users get semantic search if they pr
 - [ ] Wife successfully onboarded without technical assistance
 - [ ] Background import worker processes archives reliably
 - [ ] Dashboard shows import status and site stats
-- [ ] `bazel test //tests:...` passes
+- [ ] `bazel test //tests:all` passes
 - [ ] `*.homebound.app` wildcard routing works
 
 ---

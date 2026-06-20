@@ -453,7 +453,7 @@ Tests run via Bazel (pytest + pytest-django under the hood):
 
 ```bash
 # All tests
-bazel test //tests:...
+bazel test //tests:all
 
 # Single test
 bazel test //tests:test_models

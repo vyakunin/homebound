@@ -62,8 +62,17 @@ Follow `docs/DJANGO_BLOG_DESIGN.md` and `docs/HIGH_LEVEL_DESIGN.md`. Use a venv 
 
 ## Build System
 
-Bazel-based; see `.claude/rules/bazel.md` for conventions. Package layout: `blog/`, `django_config/`, `extractors/`, `tests/`, `tools/`, `mcp_server/`.
+Bazel-based. Package layout: `blog/`, `django_config/`, `extractors/`, `tests/`, `tools/`, `mcp_server/`.
 
-- Run tests: `bazel test //tests:...`
+- **Run tests: `bazel test //tests:all` — Bazel is the ONLY allowed test gate.**
+  Do NOT run the suite via a bare `pytest` / `.venv/bin/python -m pytest`; that
+  path silently diverges from the gate (it hit real PostgreSQL before the
+  settings fix, and ambient `~/tokens/*` keys leaked live LLM calls into tests
+  that the sandbox masks). Every test file MUST have a `//tests` target and pass
+  under `bazel test //tests:all`; `bazel build //...` must exit 0. If you add a
+  new module the suite imports, wire its `py_library` into the BUILD graph in the
+  same change (see the `blog:sft_*` targets) — an unwired module is a broken gate,
+  not a "pre-existing" excuse (`~/.claude/rules/clean_baseline.md`).
 - Run server: `bazel run //:runserver` (port 8080)
-- Manage commands: use the venv pattern documented in `docs/HIGH_LEVEL_DESIGN.md`
+- Manage commands: use the venv pattern in `docs/HIGH_LEVEL_DESIGN.md` (venv is for
+  one-off management commands only — never for running the test gate).

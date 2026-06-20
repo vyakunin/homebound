@@ -346,7 +346,7 @@ Estimated effort: **3-5 days** (reuses all existing RAG infrastructure).
 - [ ] MCP `search_posts` returns relevant results via semantic search
 - [ ] MCP `ghostwrite` produces coherent drafts with archive context
 - [ ] Hosted MCP endpoint authenticates via API key
-- [ ] `bazel test //tests:...` passes with LLM feature tests (mocked API calls)
+- [ ] `bazel test //tests:all` passes with LLM feature tests (mocked API calls)
 
 ---
 
