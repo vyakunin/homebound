@@ -132,6 +132,25 @@ def test_parse_infers_lang_when_missing():
     assert items[0].lang == "en"
 
 
+def test_parse_drops_third_person_author_questions():
+    post = "борщ топ, варю с уксусом"
+    raw = (
+        '[{"question": "что думает автор про борщ?", "answer_span": "x", "lang": "ru"},'
+        '{"question": "what does the author cook?", "answer_span": "x", "lang": "en"},'
+        '{"question": "как тебе борщ?", "answer_span": "x", "lang": "ru"}]'
+    )
+    items = parse_items(raw, post)
+    assert [i.question for i in items] == ["как тебе борщ?"]
+
+
+def test_parse_keeps_third_person_about_other_people():
+    # «он» about a third party (Putin) must NOT be filtered — only author-noun forms are.
+    post = "путин военный преступник, однозначно"
+    raw = '[{"question": "путин же диктатор, он развязал войну?", "answer_span": "x", "lang": "ru"}]'
+    items = parse_items(raw, post)
+    assert len(items) == 1
+
+
 # ── generate_qa with a fake client ─────────────────────────────────────
 
 

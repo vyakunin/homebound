@@ -309,10 +309,13 @@ def _iter_comment_reply_pairs(
 class Command(BaseCommand):
     help = "Build a model-agnostic SFT JSONL dataset (persona + post→reply) from the corpus."
 
-    # Default persona = the slim FT system prompt (homebound-platform repo). It is
-    # the LOCKED train==serve string: the same file the bot loads at serve time,
-    # so the grounded-QA `user` turn matches prod byte-for-byte.
-    DEFAULT_PERSONA_FILE = "~/cursor_projects/homebound-platform/personas/bot_persona_ft.md"
+    # Default persona = the slim FT system prompt, DE-NAMED ("the author", not
+    # "Vladimir Yakunin") to avoid summoning the base model's famous-namesake
+    # prior (modal_persona_serving.md rule 11). It is the LOCKED train==serve
+    # string: prod (Modal) must serve THIS same de-named file byte-for-byte, so
+    # the grounded-QA system+user turns match inference. Derived from
+    # bot_persona_ft.md via scripts/denamed_persona.py (no hand-drift).
+    DEFAULT_PERSONA_FILE = "~/cursor_projects/homebound-platform/personas/bot_persona_ft_denamed.md"
 
     def add_arguments(self, parser):
         parser.add_argument(

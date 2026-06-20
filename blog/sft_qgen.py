@@ -94,6 +94,10 @@ QUESTIONS must:
 {fewshot}
 - be asked by a stranger: do NOT quote the post or say "your post"/"you wrote".
   Ask about the topic, opinion, fact, or story as if simply curious.
+- address the author DIRECTLY (second person / impersonal), NEVER in the third
+  person: no «автор», «он/она», «этот блогер», "the author", "this guy", "this
+  person". Ask "ты ..."/"что думаешь про ..." / "what do you think about ...",
+  not "what does the author think".
 - be in the SAME language as the post (Russian post -> Russian question; English
   -> English). Never mix languages inside one question.
 - be genuinely answerable from THIS post alone. If the post is too thin, contextless,
@@ -140,6 +144,17 @@ def build_messages(
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
 _WS_RE = re.compile(r"\s+")
+
+# A visitor asks the author directly ("ты…", "what do you think…"); a question
+# that names "автор"/"the author"/"this guy" in the third person is a Q-gen slip
+# (it talks ABOUT him, not TO him). Narrow on the explicit author-noun forms —
+# bare «он/она» is left alone (it legitimately refers to third parties the
+# question is about, e.g. "что думаешь про Путина, он диктатор?").
+_THIRD_PERSON_AUTHOR_RE = re.compile(
+    r"\bавтор\w*\b|\bthe author\b|\bthis (?:author|blogger|guy|person|dude)\b|"
+    r"\bэтот (?:блогер|автор|чел\w*|тип|мужик|парень)\b",
+    re.IGNORECASE,
+)
 
 
 def _extract_json_array(raw: str) -> list:
@@ -213,6 +228,9 @@ def parse_items(
         # A "question" that is really a verbatim chunk of the post is a copy, not
         # a question — drop it.
         if _norm(post).find(qn) != -1 and len(qn) > 25:
+            continue
+        # Drop 3rd-person-about-the-author slips ("что думает автор?").
+        if _THIRD_PERSON_AUTHOR_RE.search(q):
             continue
         if post_short:
             span = post
