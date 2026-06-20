@@ -469,6 +469,21 @@ class Command(BaseCommand):
             "--transfer-limit", type=int, default=200,
             help="Cap EMITTED transfer examples (small + hand-checked bucket).",
         )
+        g.add_argument(
+            "--contrastive", action="store_true", default=False,
+            help="Also emit the contrastive instruction-variation bucket "
+                 "(length/language/scope/counterfactual knobs — make the rules "
+                 "serve-time editable). PAID (Q-gen + a little translate/gen).",
+        )
+        g.add_argument(
+            "--contrastive-limit", type=int, default=0,
+            help="Cap EMITTED examples PER contrastive knob (0 = no cap). The "
+                 "counterfactual knob is inherently tiny and always uncapped.",
+        )
+        g.add_argument(
+            "--contrastive-pool-limit", type=int, default=400,
+            help="Cap oracle posts sampled for the length/language/scope knobs.",
+        )
 
     def handle(self, *args, **opts):
         sources = _resolve_sources(opts["sources"])
@@ -496,6 +511,8 @@ class Command(BaseCommand):
             ))
         if opts["grounded_qa"]:
             generators.extend(self._grounded_generators(opts, sources, stats))
+        if opts["contrastive"]:
+            generators.extend(self._contrastive_generators(opts, sources, stats))
 
         counts: dict[str, int] = {"dropped_dup": 0}
         # Dedup per-objective. persona/reply key on the assistant turn (a reply
@@ -534,8 +551,10 @@ class Command(BaseCommand):
             f"{counts[k]} {k}" for k in sorted(counts) if k != "dropped_dup"
         )
         grounded_note = self._grounded_stats_note(stats) if opts["grounded_qa"] else ""
+        contrastive_note = self._contrastive_stats_note(stats) if opts["contrastive"] else ""
         self.stdout.write(
-            f"Wrote {n_written} example(s) to {dest}: {breakdown}{grounded_note} "
+            f"Wrote {n_written} example(s) to {dest}: {breakdown}"
+            f"{grounded_note}{contrastive_note} "
             f"({counts['dropped_dup']} duplicate(s), "
             f"{stats['dropped_dirty']} dirty/degenerate dropped)."
         )
@@ -558,6 +577,89 @@ class Command(BaseCommand):
             raise CommandError(f"--persona-file not found: {p}")
         return _strip_authoring_comments(p.read_text(encoding="utf-8"))
 
+    def _together_qgen(self, opts):
+        """Shared Together setup for the paid buckets: (persona, client, model,
+        qgen_fn). qgen_fn maps a post → its (question, span) items."""
+        from blog import sft_qgen
+
+        persona = self._load_persona(opts["persona_file"])
+        client = sft_qgen.make_together_client(opts["qgen_key"])
+        model = opts["qgen_model"] or sft_qgen.DEFAULT_QGEN_MODEL
+
+        def qgen_fn(post):
+            return sft_qgen.generate_qa(
+                post.content_text, client=client, model=model,
+                source=PostSource(post.source).name.lower(),
+                date=_iso(post.created_at)[:10],
+            )
+
+        return persona, client, model, qgen_fn
+
+    def _contrastive_generators(self, opts, sources, stats):
+        """Contrastive instruction-variation bucket (length/language/scope/
+        counterfactual). Independent of --grounded-qa; builds its own public-post
+        oracle pool + the prod retriever in-process. Each knob is a separate
+        ('contrastive', generator) entry so the per-knob --contrastive-limit and
+        the dedup/stats wiring stay uniform."""
+        import functools
+
+        from blog import sft_contrastive, sft_qgen
+        from blog.models import PostVisibility
+
+        persona, client, model, qgen_fn = self._together_qgen(opts)
+        top_k = opts["grounded_top_k"]
+        min_o = opts["grounded_min_len"]
+        seed = opts["grounded_seed"]
+        lim = opts["contrastive_limit"]
+
+        qs = (
+            Post.objects.filter(source__in=sources, visibility=PostVisibility.PUBLIC)
+            .exclude(content_text="")
+            .order_by("?")
+        )
+        if opts["contrastive_pool_limit"]:
+            qs = qs[: opts["contrastive_pool_limit"]]
+        posts = list(qs)
+        stats["contrastive_pool"] = len(posts)
+
+        translate_fn = functools.partial(sft_qgen.translate_text, client=client, model=model)
+        gen_fn = functools.partial(sft_qgen.complete, client=client, model=model)
+
+        return [
+            ("contrastive", sft_contrastive.iter_length_register(
+                posts, qgen_fn=qgen_fn, persona_system=persona, stats=stats,
+                top_k=top_k, min_len=min_o, limit=lim, seed=seed,
+            )),
+            ("contrastive", sft_contrastive.iter_language_default(
+                posts, qgen_fn=qgen_fn, translate_fn=translate_fn,
+                persona_system=persona, stats=stats, top_k=top_k, min_len=min_o,
+                limit=lim, seed=seed,
+            )),
+            ("contrastive", sft_contrastive.iter_scope(
+                posts, qgen_fn=qgen_fn, persona_system=persona, stats=stats,
+                top_k=top_k, min_len=min_o, limit=lim, seed=seed,
+            )),
+            ("contrastive", sft_contrastive.iter_counterfactual(
+                gen_fn=gen_fn, persona_system=persona, stats=stats,
+                top_k=top_k, limit=0, seed=seed,
+            )),
+        ]
+
+    @staticmethod
+    def _contrastive_stats_note(stats: dict) -> str:
+        return (
+            f" [c_pool={stats.get('contrastive_pool', 0)}, "
+            f"len_terse={stats.get('contrastive_length_terse', 0)}, "
+            f"len_long={stats.get('contrastive_length_long', 0)}, "
+            f"lang_agree={stats.get('contrastive_lang_agree', 0)}, "
+            f"lang_conflict={stats.get('contrastive_lang_conflict', 0)}, "
+            f"scope_ans={stats.get('contrastive_scope_answer', 0)}, "
+            f"scope_narrow={stats.get('contrastive_scope_narrowed', 0)}, "
+            f"scope_off={stats.get('contrastive_scope_offtopic', 0)}, "
+            f"cf={stats.get('contrastive_cf_emitted', 0)}, "
+            f"cf_gate_drop={stats.get('contrastive_cf_gate_drop', 0)}]"
+        )
+
     def _grounded_generators(self, opts, sources, stats):
         """Build the grounded + source + abstention + transfer (name, generator)
         entries: load persona, open the Together client, sample + partition oracle
@@ -572,20 +674,11 @@ class Command(BaseCommand):
         from blog import sft_abstention, sft_grounded, sft_qgen, sft_transfer
         from blog.models import PostVisibility
 
-        persona = self._load_persona(opts["persona_file"])
-        client = sft_qgen.make_together_client(opts["qgen_key"])
-        model = opts["qgen_model"] or sft_qgen.DEFAULT_QGEN_MODEL
+        persona, client, model, qgen_fn = self._together_qgen(opts)
         top_k = opts["grounded_top_k"]
         min_o = opts["grounded_min_len"]
         seed = opts["grounded_seed"]
         workers = opts["grounded_max_workers"]
-
-        def qgen_fn(post):
-            return sft_qgen.generate_qa(
-                post.content_text, client=client, model=model,
-                source=PostSource(post.source).name.lower(),
-                date=_iso(post.created_at)[:10],
-            )
 
         judge_fn = None
         if opts["relevance_qc"]:

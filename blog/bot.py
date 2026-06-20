@@ -188,6 +188,24 @@ def _persona_text(lang: Literal["ru", "en"] = "ru") -> str:
     return FALLBACK_PERSONA
 
 
+# Per-request directive overlay. The CANONICAL format shared by serving (this
+# module's answer()) and training (blog.sft_contrastive) — a contrastive-bucket
+# example teaches a knob only if a serve-time caller can set it the SAME way. The
+# block is appended to the persona so the fixed persona stays the anchor and the
+# directive is an explicit, varying overlay the model learns to attend to.
+DIRECTIVE_HEADER = "## For this conversation:"
+
+
+def apply_directive(system_text: str, directive: str) -> str:
+    """Overlay a per-conversation directive onto the system prompt, in the one
+    canonical format both serving and the contrastive SFT bucket use. Empty /
+    blank directive returns the system unchanged (no-op)."""
+    d = (directive or "").strip()
+    if not d:
+        return system_text
+    return f"{system_text.rstrip()}\n\n{DIRECTIVE_HEADER}\n{d}\n"
+
+
 # ── Language detection ────────────────────────────────────────────────
 
 
@@ -566,6 +584,7 @@ def answer(
     top_k: int = DEFAULT_TOP_K,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     model: str | None = None,
+    directive: str | None = None,
 ) -> BotAnswer:
     """Run language detect → retrieval → cache → LLM. Returns BotAnswer.
 
@@ -627,8 +646,14 @@ def answer(
         logger.warning("bot retrieval failed (continuing cold): %s", e)
         hits = []
 
-    # Load language-matched persona once per request.
+    # Load language-matched persona once per request; overlay a per-request
+    # directive (the serve-time knob channel the contrastive SFT bucket trains —
+    # blog.sft_contrastive). Applied BEFORE the context hash so a directive
+    # correctly partitions the cache (two requests differing only by directive
+    # must not share a cached answer).
     persona = _persona_text(lang)
+    if directive:
+        persona = apply_directive(persona, directive)
     p_hash = _prompt_hash(question)
     c_hash = _context_hash(hits, persona)
     cached = _cache_lookup(p_hash, c_hash, requested_model=model)

@@ -479,6 +479,61 @@ def judge_transfer_support(
     return verdict
 
 
+# ── Contrastive-bucket helpers (question translation + freeform gen) ───────
+
+
+def translate_text(
+    text: str,
+    target_lang: str,
+    *,
+    client,
+    model: str = DEFAULT_QGEN_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 200,
+) -> str:
+    """Translate a short visitor QUESTION into ``target_lang`` ('ru'|'en') for the
+    language-default contrastive knob's conflict case. QUESTIONS ONLY — never
+    translate a target (that would destroy the author's voice). Raises on a
+    network error (the caller catches + skips)."""
+    name = "Russian" if target_lang == "ru" else "English"
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": (
+                f"Translate the user's message into {name}. Output ONLY the "
+                "translation — no quotes, no notes, no transliteration."
+            )},
+            {"role": "user", "content": text},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+def complete(
+    system: str,
+    user: str,
+    *,
+    client,
+    model: str = DEFAULT_QGEN_MODEL,
+    temperature: float = 0.7,
+    max_tokens: int = 400,
+) -> str:
+    """One freeform completion for the counterfactual knob — generate a target
+    under a mutated-fact directive. Raises on a network error (caller catches)."""
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
 def make_together_client(key_path: str = DEFAULT_KEY_PATH):
     """Build an OpenAI-compatible client pointed at Together serverless. Lazy
     import so the module loads without ``openai`` installed (tests use a fake)."""
