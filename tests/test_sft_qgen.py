@@ -235,3 +235,45 @@ def test_judge_grounding_fails_open_on_exception():
 
     v = judge_grounding("q?", "oracle", [], client=_Boom())
     assert v.judged is False and v.oracle_answers is True
+
+
+# ── Transfer entailment judge (F5) ─────────────────────────────────────
+
+
+def test_parse_transfer_plain_and_fenced():
+    from blog.sft_qgen import TransferVerdict, _parse_transfer
+    assert _parse_transfer('{"supported": true}') == TransferVerdict(supported=True)
+    assert _parse_transfer('```json\n{"supported": false}\n```').supported is False
+
+
+def test_parse_transfer_garbage_none():
+    from blog.sft_qgen import _parse_transfer
+    assert _parse_transfer("nope") is None
+    assert _parse_transfer('{"x": 1}') is None
+
+
+def test_judge_transfer_support_parses_and_passes_payload():
+    from blog.sft_qgen import judge_transfer_support
+    client = _FakeClient('{"supported": true}')
+    v = judge_transfer_support("q?", ["ctx a", "ctx b"], "answer key", client=client)
+    assert v.judged is True and v.supported is True
+    sent = client.calls[0]["messages"][-1]["content"]
+    assert "answer key" in sent and "ctx a" in sent and "q?" in sent
+
+
+def test_judge_transfer_fails_closed():
+    from blog.sft_qgen import judge_transfer_support
+    # Unparseable AND exception both -> supported=False (fail-closed: never emit
+    # an unconfirmed transfer as training data).
+    v1 = judge_transfer_support("q", ["c"], "k", client=_FakeClient("rambling, no json"))
+    assert v1.judged is False and v1.supported is False
+
+    class _Boom:
+        class chat:  # noqa: N801
+            class completions:  # noqa: N801
+                @staticmethod
+                def create(**kw):
+                    raise RuntimeError("down")
+
+    v2 = judge_transfer_support("q", ["c"], "k", client=_Boom())
+    assert v2.judged is False and v2.supported is False

@@ -386,6 +386,99 @@ def judge_grounding(
     return verdict
 
 
+# ── Transfer entailment gate (cluster-holdout bucket) ─────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class TransferVerdict:
+    """Does the NEIGHBOR block (held-out oracle P excluded) actually support
+    reaching P's answer? ``supported`` True → faithful transfer (target = P's own
+    words, now validated as reachable from the neighbors). ``judged`` False on a
+    failed/unparseable call → caller treats as NOT supported (fail-CLOSED: never
+    fabricate a transfer the judge couldn't confirm)."""
+
+    supported: bool
+    judged: bool = True
+
+
+_TRANSFER_JUDGE_SYSTEM = """\
+You grade whether a set of CONTEXT posts is enough to answer a QUESTION such that
+the answer agrees with a held-out ANSWER KEY.
+
+The CONTEXT does NOT include the post the answer key came from. Decide: reading
+ONLY the CONTEXT, could someone answer the QUESTION in a way that AGREES with the
+ANSWER KEY (same facts / same stance)? Be strict — if the context is merely on
+the same topic but does not actually support the answer key's specific claim,
+that is NOT supported. Guessing or contradicting the key is NOT supported.
+
+Output ONLY a JSON object, nothing else:
+{"supported": true|false}
+"""
+
+
+def _transfer_messages(question: str, context_texts: list[str], answer_key: str) -> list[dict]:
+    ctx = "\n".join(
+        f"[CONTEXT {i + 1}]\n{t.strip()}" for i, t in enumerate(context_texts) if t.strip()
+    ) or "(none)"
+    user = (
+        f"QUESTION:\n{question.strip()}\n\n"
+        f"CONTEXT posts:\n{ctx}\n\n"
+        f"ANSWER KEY (held out — NOT in the context):\n{answer_key.strip()}\n\n"
+        "Grade now."
+    )
+    return [
+        {"role": "system", "content": _TRANSFER_JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def _parse_transfer(raw: str) -> TransferVerdict | None:
+    text = raw.strip()
+    m = _FENCE_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or "supported" not in obj:
+        return None
+    return TransferVerdict(supported=bool(obj.get("supported")))
+
+
+def judge_transfer_support(
+    question: str,
+    context_texts: list[str],
+    answer_key: str,
+    *,
+    client,
+    model: str = DEFAULT_QGEN_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 40,
+) -> TransferVerdict:
+    """Entailment gate for the transfer bucket: does the neighbor CONTEXT support
+    reaching the held-out ANSWER KEY? Fails CLOSED (``supported=False,
+    judged=False``) — an unconfirmed transfer must never become training data."""
+    messages = _transfer_messages(question, context_texts, answer_key)
+    try:
+        resp = client.chat.completions.create(
+            model=model, messages=messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        raw = resp.choices[0].message.content or ""
+    except Exception as e:  # noqa: BLE001 — a judge failure must not abort the build
+        logger.warning("transfer entailment judge call failed: %s", e)
+        return TransferVerdict(supported=False, judged=False)
+    verdict = _parse_transfer(raw)
+    if verdict is None:
+        logger.warning("transfer judge returned unparseable verdict: %r", raw[:200])
+        return TransferVerdict(supported=False, judged=False)
+    return verdict
+
+
 def make_together_client(key_path: str = DEFAULT_KEY_PATH):
     """Build an OpenAI-compatible client pointed at Together serverless. Lazy
     import so the module loads without ``openai`` installed (tests use a fake)."""
