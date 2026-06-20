@@ -1,6 +1,12 @@
 """Tests for the public bot widget + API.
 
-Runs on SQLite. Anthropic is mocked via monkeypatch — no live calls.
+Runs on SQLite. Both LLM providers are neutralized so no test makes a
+live call: Anthropic is replaced per-test via monkeypatch, and the
+OpenRouter primary (RU) path is force-disabled by the ``_no_live_llm``
+autouse fixture below (otherwise a Russian question reaches OpenRouter,
+whose key falls back to ``~/tokens/homebound_openrouter_key`` — a real,
+billable call on any operator box; it silently "passed" only under
+bazel's sandbox home, which has no tokens dir).
 Retrieval falls back to ILIKE on SQLite (verified in test setup), so
 the bot service produces real source hits without needing pgvector.
 """
@@ -17,6 +23,38 @@ import pytest
 from django.test import Client, override_settings
 
 from blog.models import BotTranscript, Post, PostSource, PostVisibility
+
+
+@pytest.fixture(autouse=True)
+def _no_live_llm(monkeypatch):
+    """Guarantee no bot test ever makes a live LLM call.
+
+    The bot's RU primary path is OpenRouter, keyed by ``_openrouter_key()``
+    which env-var-wins then falls back to ``~/tokens/homebound_openrouter_key``.
+    Tests only mock Anthropic, so without this a Russian-language question
+    ("чей крым?") would make a LIVE, billable OpenRouter call on any box that
+    has the token file (i.e. the operator box) — the call returns a real model
+    answer and never touches the Anthropic fake, so e.g. the tier assertions
+    see an empty ``fake.calls``. It only "passed" under bazel because the
+    sandbox ``$HOME`` has no ``tokens/`` dir.
+
+    Suppress only the ambient ``~/tokens`` file fallback (and any inherited
+    env), so the RU path deterministically degrades to the mocked Anthropic
+    model (bot.py:631). A test that *intends* to exercise the OpenRouter path
+    (e.g. the provider-allowlist payload test) sets ``OPENROUTER_API_KEY`` in
+    env itself + stubs the HTTP client, and that explicit env key is still
+    honored here."""
+    import os
+
+    from blog import bot as bot_module
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY_FILE", raising=False)
+    monkeypatch.setattr(
+        bot_module,
+        "_openrouter_key",
+        lambda: (os.environ.get("OPENROUTER_API_KEY", "").strip() or None),
+    )
 
 
 def _make_public_post(slug, title, text, year=2020, month=3, day=14):
