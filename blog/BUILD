@@ -53,6 +53,82 @@ py_library(
     ],
 )
 
+# ── SFT dataset builder modules (stdlib + internal blog.* only) ──────────
+py_library(
+    name = "sft_common",
+    srcs = ["sft_common.py"],
+    visibility = ["//visibility:public"],
+    deps = [":models"],
+)
+
+py_library(
+    name = "sft_qgen",
+    srcs = ["sft_qgen.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "sft_resilience",
+    srcs = ["sft_resilience.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "sft_abstention",
+    srcs = ["sft_abstention.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bot",
+        ":bot_retrieval",
+        ":models",
+        ":sft_common",
+        ":sft_qgen",
+    ],
+)
+
+py_library(
+    name = "sft_grounded",
+    srcs = ["sft_grounded.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bot",
+        ":bot_retrieval",
+        ":models",
+        ":sft_common",
+        ":sft_qgen",
+    ],
+)
+
+py_library(
+    name = "sft_contrastive",
+    srcs = ["sft_contrastive.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bot",
+        ":bot_retrieval",
+        ":models",
+        ":sft_abstention",
+        ":sft_common",
+        ":sft_grounded",
+        ":sft_qgen",
+    ],
+)
+
+py_library(
+    name = "sft_transfer",
+    srcs = ["sft_transfer.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bot",
+        ":bot_retrieval",
+        ":models",
+        ":sft_abstention",
+        ":sft_common",
+        ":sft_grounded",
+        ":sft_qgen",
+    ],
+)
+
 # `bazel run //blog:generate_embeddings -- [--limit N] [--rehash] ...`
 # Delegates to the Django management command of the same name. Needs the
 # full runserver-style dep set because Django's startup loads every entry

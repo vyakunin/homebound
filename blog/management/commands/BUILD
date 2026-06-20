@@ -18,7 +18,15 @@ py_library(
     srcs = ["build_sft_dataset.py"],
     visibility = ["//visibility:public"],
     deps = [
+        "//blog:bot",
         "//blog:models",
+        "//blog:sft_abstention",
+        "//blog:sft_common",
+        "//blog:sft_contrastive",
+        "//blog:sft_grounded",
+        "//blog:sft_qgen",
+        "//blog:sft_resilience",
+        "//blog:sft_transfer",
         requirement("Django"),
     ],
 )
