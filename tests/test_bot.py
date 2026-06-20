@@ -169,13 +169,58 @@ def test_bot_retrieval_never_sees_private_posts(monkeypatch):
     assert "private-1" not in slugs, "PRIVATE post leaked into bot retrieval"
 
 
-def _hit(slug, *, kw_rank=None, sem_dist=None, post_id=None):
+def _hit(slug, *, kw_rank=None, sem_dist=None, post_id=None, snippet="",
+         repost_author="", repost_excerpt=""):
     from blog.bot_retrieval import BotHit
     return BotHit(
         id=post_id if post_id is not None else hash(slug) & 0xFFFFFFFF,
-        slug=slug, title=slug, snippet="", created_at_iso="",
+        slug=slug, title=slug, snippet=snippet, created_at_iso="",
         score=0.0, keyword_rank=kw_rank, semantic_distance=sem_dist,
+        repost_author=repost_author, repost_excerpt=repost_excerpt,
     )
+
+
+def test_fuse_dedups_identical_text_across_distinct_posts():
+    """Near-duplicate posts (same body, different id/slug — FB+X cross-posts,
+    Wayback+extension overlap) survive id-dedup but render to the SAME SOURCE
+    block. _fuse must collapse them on the rendered text, keeping the
+    higher-scoring slug, so the model never gets the identical post twice."""
+    from blog.bot_retrieval import _fuse
+
+    dup_text = "Сегодня переехали в новую квартиру, наконец-то."
+    # Two distinct posts with byte-identical body; 'dup_a' scores higher
+    # (top keyword + semantic) than its twin 'dup_b' (keyword only).
+    kw = [
+        _hit("dup_a", kw_rank=0.9, post_id=1, snippet=dup_text),
+        _hit("dup_b", kw_rank=0.5, post_id=2, snippet="  Сегодня переехали в новую\nквартиру, наконец-то.  "),
+        _hit("other", kw_rank=0.4, post_id=3, snippet="Совсем другой пост про код."),
+    ]
+    sem = [_hit("dup_a", sem_dist=0.2, post_id=1, snippet=dup_text)]
+
+    out = _fuse(kw, sem, top_k=5)
+    slugs = [h.slug for h in out]
+    assert "dup_a" in slugs and "dup_b" not in slugs, (
+        f"Expected the identical twin 'dup_b' collapsed (kept higher-scored "
+        f"'dup_a'); got {slugs}"
+    )
+    assert "other" in slugs, f"Distinct post must survive; got {slugs}"
+    # Exactly one copy of the duplicated body reaches the block.
+    assert len(slugs) == 2, f"Expected 2 distinct hits, got {slugs}"
+
+
+def test_fuse_does_not_merge_empty_snippet_hits():
+    """Hits with no body text (empty snippet/excerpt) are NOT duplicates —
+    there's nothing identical to compare. Guards against collapsing the
+    degenerate/test rows that share an empty snippet."""
+    from blog.bot_retrieval import _fuse
+
+    kw = [
+        _hit("a", kw_rank=0.9, post_id=1),
+        _hit("b", kw_rank=0.6, post_id=2),
+        _hit("c", kw_rank=0.3, post_id=3),
+    ]
+    out = _fuse(kw, [], top_k=5)
+    assert {h.slug for h in out} == {"a", "b", "c"}, [h.slug for h in out]
 
 
 def test_fuse_semantic_top_outranks_weak_keyword():

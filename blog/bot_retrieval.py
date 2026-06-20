@@ -387,10 +387,8 @@ def _sqlite_fallback(query: str, *, top_k: int) -> list[BotHit]:
         .filter(q)
         .order_by("-created_at")[:top_k]
     )
-    return [
-        _post_to_hit(p, keyword_rank=1.0, semantic_distance=None)
-        for p in qs
-    ]
+    hits = [_post_to_hit(p, keyword_rank=1.0, semantic_distance=None) for p in qs]
+    return _dedup_identical(hits)[:top_k]
 
 
 # ── Fusion ─────────────────────────────────────────────────────────────
@@ -476,7 +474,47 @@ def _fuse(
             if h.repost_author:
                 merged[h_id] = _with_score(h, h.score * REPOST_DAMPENING)
 
-    return _mmr_select(list(merged.values()), top_k=top_k)
+    # Collapse near-duplicate posts (same body, different id/slug) BEFORE
+    # MMR so the top_k slots fill with distinct content. See _dedup_identical.
+    deduped = _dedup_identical(list(merged.values()))
+    return _mmr_select(deduped, top_k=top_k)
+
+
+def _norm_text(s: str) -> str:
+    """Whitespace-collapsed, case-folded text for identity comparison."""
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+
+def _dedup_identical(candidates: list[BotHit]) -> list[BotHit]:
+    """Drop hits whose rendered text is identical to a higher-scoring hit.
+
+    Fusion already dedups by post *id*, but the corpus carries genuine
+    near-duplicates — the same body re-imported under different slugs/ids
+    (FB+X cross-posts, Wayback+extension overlap). Those survive id-dedup
+    yet render to the SAME SOURCE block, so sending both to the model
+    wastes prompt budget and amplifies a "just copy the post" signal with
+    zero added grounding. We key on the exact text the model sees (the
+    snippet — already truncated to render width — plus the repost
+    excerpt/author), keeping the highest-scoring representative.
+
+    Hits with no textual content (empty snippet AND excerpt) are never
+    merged: there's nothing identical to compare, and an empty snippet is
+    a degenerate/test row rather than a real duplicate.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    out: list[BotHit] = []
+    for h in sorted(candidates, key=lambda c: c.score, reverse=True):
+        body = _norm_text(h.snippet)
+        excerpt = _norm_text(h.repost_excerpt)
+        if not body and not excerpt:
+            out.append(h)  # nothing to dedup on
+            continue
+        key = (body, excerpt, (h.repost_author or "").strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
 
 
 def _mmr_select(candidates: list[BotHit], *, top_k: int) -> list[BotHit]:
