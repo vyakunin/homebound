@@ -110,6 +110,73 @@ django_py_test(
 )
 
 django_py_test(
+    name = "test_sft_qgen",
+    srcs = ["test_sft_qgen.py"],
+    deps = [
+        "//blog:sft_qgen",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
+    name = "test_sft_grounded",
+    srcs = ["test_sft_grounded.py"],
+    deps = [
+        "//blog:bot_retrieval",
+        "//blog:models",
+        "//blog:sft_grounded",
+        "//blog:sft_qgen",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
+    name = "test_sft_abstention",
+    srcs = ["test_sft_abstention.py"],
+    deps = [
+        "//blog:bot_retrieval",
+        "//blog:models",
+        "//blog:sft_abstention",
+        "//blog:sft_qgen",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
+    name = "test_sft_transfer",
+    srcs = ["test_sft_transfer.py"],
+    deps = [
+        "//blog:models",
+        "//blog:sft_abstention",
+        "//blog:sft_qgen",
+        "//blog:sft_transfer",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
+    name = "test_sft_resilience",
+    srcs = ["test_sft_resilience.py"],
+    deps = [
+        "//blog:sft_resilience",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
+    name = "test_sft_contrastive",
+    srcs = ["test_sft_contrastive.py"],
+    deps = [
+        "//blog:bot",
+        "//blog:bot_retrieval",
+        "//blog:models",
+        "//blog:sft_contrastive",
+        "//blog:sft_qgen",
+        ":conftest_lib",
+    ],
+)
+
+django_py_test(
     name = "test_bot",
     srcs = ["test_bot.py"],
     deps = [
