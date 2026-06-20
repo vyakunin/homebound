@@ -68,6 +68,18 @@ def _rng_for(seed: int, slug: str) -> Random:
     return Random(f"{seed}:{slug}")
 
 
+def is_reshare_oracle(post: Post) -> bool:
+    """A reshare oracle for the source-discipline bucket: the post carries an
+    explicit reshared-from author AND the author's own commentary. The grounded
+    flow renders these with the prod ``_render_hit`` reshare SOURCE line ("you
+    reshared this from X… NOT your words"), and the target is his own commentary
+    (verbatim, faithful) — so the example teaches answering about a reshare in
+    his voice while the block makes the X-attribution explicit. Pure-repost posts
+    (no own commentary) are excluded: there's no first-person span to target."""
+    author = (getattr(post, "reshared_from_author", "") or "").strip()
+    return bool(author and (post.content_text or "").strip())
+
+
 def _strip_wrapping_quotes(text: str) -> str:
     t = text.strip()
     for lq, rq in (('"', '"'), ("«", "»"), ("“", "”"), ("'", "'")):

@@ -233,3 +233,32 @@ def test_no_judge_means_no_qc_meta():
     item = QGenItem(question="о чём пост?", answer_span=body, lang="ru")
     out, _ = _run([p], {"orcl": [item]}, {"о чём пост?": [_hit("orcl", body)]})
     assert "qc_judged" not in out[0].meta
+
+
+# ── Source-discipline (F4): reshare oracles, bucket="source" ───────────────
+
+
+def test_is_reshare_oracle_predicate():
+    from blog.sft_grounded import is_reshare_oracle
+    own = _post("o1", "моя мысль")
+    reshare = _post("o2", "мой коммент к репосту")
+    reshare.reshared_from_author = "@someone"
+    pure_repost = _post("o3", "")
+    pure_repost.reshared_from_author = "@someone"
+    assert is_reshare_oracle(own) is False          # no reshare author
+    assert is_reshare_oracle(reshare) is True        # author + own commentary
+    assert is_reshare_oracle(pure_repost) is False   # no own first-person span
+
+
+def test_source_bucket_tag_via_bucket_override():
+    body = "мой коммент: этот чувак дело говорит про экономику"
+    p = _post("rs", body)
+    p.reshared_from_author = "@econ_guy"
+    item = QGenItem(question="что думаешь про экономику?", answer_span=body, lang="ru")
+    examples, _ = _run(
+        [p], {"rs": [item]},
+        {"что думаешь про экономику?": [_hit("rs", body)]},
+        bucket="source",
+    )
+    assert examples[0].meta["bucket"] == "source"
+    assert examples[0].meta["objective"] == "grounded_qa"
