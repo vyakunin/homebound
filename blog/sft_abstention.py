@@ -55,12 +55,17 @@ OFF_CORPUS_QUESTIONS: tuple[str, ...] = (
     "how many calories in a banana?",
 )
 
-# Short abstentions IN HIS VOICE. Per the persona's HARD-CONSTRAINT #1 these
-# NEVER explain the absence ("я не писал про это" is banned) — just a terse
-# brush-off. Sampled deterministically per question.
+# Abstentions IN HIS VOICE — a mix of terse brush-offs and witty deflections.
+# Per the persona's HARD-CONSTRAINT #1 these NEVER explain the absence
+# ("я не писал про это" is banned); they deflect (often with humour) instead.
+# Sampled deterministically per question.
 _ABSTAIN_RU: tuple[str, ...] = (
     "хз", "хз честно", "без понятия", "не ко мне вопрос", "не в курсе",
-    "понятия не имею", "да хрен знает", "не моя тема", "хз, спроси гугл",
+    "понятия не имею", "да хрен знает", "хз, спроси гугл",
+    "Спроси чего попроще",
+    "В огороде бузина, а в Киеве — дядька",
+    "Я не Виктория Боня, чтобы все знать",
+    'На этот и многие другие вопросы вы можете найти ответ в моей последней книге «не знаю»',
 )
 _ABSTAIN_EN: tuple[str, ...] = (
     "no idea", "couldn't tell you", "not my thing", "dunno honestly",
