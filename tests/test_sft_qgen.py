@@ -5,11 +5,14 @@ the prompt assembly, JSON extraction, and the verbatim-span faithfulness gate.
 """
 import tests.django_setup  # noqa: F401 — must run before any Django imports
 from blog.sft_qgen import (
+    GroundingVerdict,
     QGenItem,
     _extract_json_array,
+    _parse_verdict,
     _span_is_faithful,
     build_messages,
     generate_qa,
+    judge_grounding,
     parse_items,
 )
 
@@ -146,7 +149,10 @@ def test_parse_drops_third_person_author_questions():
 def test_parse_keeps_third_person_about_other_people():
     # «он» about a third party (Putin) must NOT be filtered — only author-noun forms are.
     post = "путин военный преступник, однозначно"
-    raw = '[{"question": "путин же диктатор, он развязал войну?", "answer_span": "x", "lang": "ru"}]'
+    raw = (
+        '[{"question": "путин же диктатор, он развязал войну?", '
+        '"answer_span": "x", "lang": "ru"}]'
+    )
     items = parse_items(raw, post)
     assert len(items) == 1
 
@@ -186,3 +192,46 @@ def test_build_messages_includes_fewshot_and_post():
     assert "как тебе анакондаз?" in msgs[0]["content"]  # a few-shot anchor
     assert "мой пост" in msgs[1]["content"]
     assert "twitter" in msgs[1]["content"]
+
+
+# ── Relevance-QC judge (F2) ────────────────────────────────────────────
+
+
+def test_parse_verdict_plain_and_fenced():
+    assert _parse_verdict('{"oracle_answers": true, "better_distractor": false}') == \
+        GroundingVerdict(oracle_answers=True, better_distractor=False)
+    fenced = '```json\n{"oracle_answers": false, "better_distractor": true}\n```'
+    v = _parse_verdict(fenced)
+    assert v.oracle_answers is False and v.better_distractor is True
+
+
+def test_parse_verdict_garbage_returns_none():
+    assert _parse_verdict("no json here") is None
+    assert _parse_verdict('{"foo": 1}') is None  # missing oracle_answers
+
+
+def test_judge_grounding_parses_client_response():
+    client = _FakeClient('{"oracle_answers": true, "better_distractor": false}')
+    v = judge_grounding("как берлин?", "берлин ок", ["другой пост"], client=client)
+    assert v.judged is True and v.oracle_answers is True
+    # Judge call carries the question, oracle and distractors.
+    sent = client.calls[0]["messages"][-1]["content"]
+    assert "как берлин?" in sent and "берлин ок" in sent and "другой пост" in sent
+
+
+def test_judge_grounding_fails_open_on_unparseable():
+    client = _FakeClient("the model rambled and returned no JSON")
+    v = judge_grounding("q?", "oracle", [], client=client)
+    assert v.judged is False and v.oracle_answers is True  # fail-open keeps the example
+
+
+def test_judge_grounding_fails_open_on_exception():
+    class _Boom:
+        class chat:  # noqa: N801
+            class completions:  # noqa: N801
+                @staticmethod
+                def create(**kw):
+                    raise RuntimeError("network down")
+
+    v = judge_grounding("q?", "oracle", [], client=_Boom())
+    assert v.judged is False and v.oracle_answers is True

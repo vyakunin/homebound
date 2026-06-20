@@ -282,6 +282,110 @@ def generate_qa(
     return parse_items(raw, post_text, short_post_chars=short_post_chars)
 
 
+# ── Relevance-QC judge (grounded-QA quality gate) ─────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingVerdict:
+    """Judge verdict for one grounded-QA example.
+
+    ``oracle_answers`` — does the oracle post actually answer the question (in
+    its own words, as rendered in the block)? ``better_distractor`` — does some
+    OTHER post in the block answer it that the oracle does not? ``judged`` is
+    False when the call failed / was skipped (fail-open: treat as keep).
+    """
+
+    oracle_answers: bool
+    better_distractor: bool
+    judged: bool = True
+
+
+_JUDGE_SYSTEM = """\
+You are a strict relevance grader for a retrieval-augmented QA dataset.
+
+You are given a visitor QUESTION, the ORACLE post (the one a target answer was
+drawn from), and OTHER posts that retrieval also surfaced. Decide:
+
+1. oracle_answers — does the ORACLE post genuinely contain the answer to the
+   QUESTION (a real visitor asking this would be satisfied by the oracle's own
+   words)? Be strict: topical overlap is NOT answering. A near-duplicate or a
+   post merely mentioning the subject does not count unless it actually answers.
+2. better_distractor — does any of the OTHER posts answer the QUESTION clearly
+   BETTER than the oracle (or answer it when the oracle does not)?
+
+Output ONLY a JSON object, nothing else:
+{"oracle_answers": true|false, "better_distractor": true|false}
+"""
+
+
+def _judge_messages(question: str, oracle_text: str, distractor_texts: list[str]) -> list[dict]:
+    others = "\n".join(
+        f"[OTHER {i + 1}]\n{t.strip()}" for i, t in enumerate(distractor_texts) if t.strip()
+    ) or "(none)"
+    user = (
+        f"QUESTION:\n{question.strip()}\n\n"
+        f"ORACLE post:\n{oracle_text.strip()}\n\n"
+        f"OTHER retrieved posts:\n{others}\n\n"
+        "Grade now."
+    )
+    return [
+        {"role": "system", "content": _JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def _parse_verdict(raw: str) -> GroundingVerdict | None:
+    """Parse the judge's JSON object. Returns None on any parse failure."""
+    text = raw.strip()
+    m = _FENCE_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or "oracle_answers" not in obj:
+        return None
+    return GroundingVerdict(
+        oracle_answers=bool(obj.get("oracle_answers")),
+        better_distractor=bool(obj.get("better_distractor")),
+    )
+
+
+def judge_grounding(
+    question: str,
+    oracle_text: str,
+    distractor_texts: list[str],
+    *,
+    client,
+    model: str = DEFAULT_QGEN_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 60,
+) -> GroundingVerdict:
+    """Grade whether the oracle answers the question (relevance-QC for grounded
+    examples). Fails OPEN — on any error returns ``oracle_answers=True,
+    judged=False`` so a flaky judge never silently discards good data; the caller
+    keeps the example but can see it was not judged."""
+    messages = _judge_messages(question, oracle_text, distractor_texts)
+    try:
+        resp = client.chat.completions.create(
+            model=model, messages=messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        raw = resp.choices[0].message.content or ""
+    except Exception as e:  # noqa: BLE001 — a judge failure must not abort the build
+        logger.warning("relevance-QC judge call failed: %s", e)
+        return GroundingVerdict(oracle_answers=True, better_distractor=False, judged=False)
+    verdict = _parse_verdict(raw)
+    if verdict is None:
+        logger.warning("relevance-QC judge returned unparseable verdict: %r", raw[:200])
+        return GroundingVerdict(oracle_answers=True, better_distractor=False, judged=False)
+    return verdict
+
+
 def make_together_client(key_path: str = DEFAULT_KEY_PATH):
     """Build an OpenAI-compatible client pointed at Together serverless. Lazy
     import so the module loads without ``openai`` installed (tests use a fake)."""

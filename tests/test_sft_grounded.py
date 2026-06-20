@@ -11,7 +11,7 @@ import tests.django_setup  # noqa: F401 — must run before any Django imports
 from blog.bot_retrieval import BotHit
 from blog.models import Post, PostSource, PostVisibility
 from blog.sft_grounded import iter_grounded_qa
-from blog.sft_qgen import QGenItem
+from blog.sft_qgen import GroundingVerdict, QGenItem
 
 PERSONA = "You are the author."
 
@@ -144,3 +144,92 @@ def test_oracle_position_is_varied_not_always_first():
     examples, _ = _run(posts, qgen, retrieve, seed=7)
     positions = {ex.meta["oracle_slug"]: ex.meta["oracle_position"] for ex in examples}
     assert len(set(positions.values())) > 1  # not all in the same slot
+
+
+# ── Concurrency (F1) ──────────────────────────────────────────────────────
+
+
+def _run_mw(posts, qgen_map, retrieve_map, max_workers, **kw):
+    stats = {}
+
+    def qgen_fn(post):
+        return qgen_map.get(post.slug, [])
+
+    def retrieve_fn(query, k):
+        return list(retrieve_map.get(query, []))[:k]
+
+    def oracle_hit_fn(post):
+        return _hit(post.slug, post.content_text[:500])
+
+    out = list(
+        iter_grounded_qa(
+            posts, qgen_fn=qgen_fn, persona_system=PERSONA, stats=stats,
+            retrieve_fn=retrieve_fn, oracle_hit_fn=oracle_hit_fn,
+            max_workers=max_workers, **kw,
+        )
+    )
+    return out, stats
+
+
+def test_concurrent_output_matches_serial_and_is_reproducible():
+    bodies = {i: f"пост номер {i} про разные темы события и жизнь автора" for i in range(20)}
+    posts = [_post(f"o{i}", bodies[i]) for i in range(20)]
+    qgen = {f"o{i}": [QGenItem(f"вопрос {i}?", bodies[i], "ru")] for i in range(20)}
+    retrieve = {
+        f"вопрос {i}?": [_hit(f"o{i}", "self")] + [_hit(f"x{j}", "distractor") for j in range(4)]
+        for i in range(20)
+    }
+    serial, s1 = _run_mw(posts, qgen, retrieve, max_workers=1, seed=99)
+    conc, s2 = _run_mw(posts, qgen, retrieve, max_workers=8, seed=99)
+    # Same set of (oracle_slug -> position) regardless of worker count: per-oracle
+    # RNG makes concurrency reproducible against the serial baseline.
+    serial_pos = {e.meta["oracle_slug"]: e.meta["oracle_position"] for e in serial}
+    conc_pos = {e.meta["oracle_slug"]: e.meta["oracle_position"] for e in conc}
+    assert serial_pos == conc_pos
+    assert len(serial) == len(conc) == 20
+    assert s1.get("grounded_emitted") == s2.get("grounded_emitted") == 20
+
+
+# ── Relevance-QC (F2) ─────────────────────────────────────────────────────
+
+
+def test_relevance_qc_drops_non_answering_oracle():
+    body = "длинный пост про берлин и переезд из калифорнии в европу"
+    p = _post("orcl", body)
+    item = QGenItem(question="а про москву что?", answer_span=body, lang="ru")
+    judged = []
+
+    def judge_fn(q, oracle_text, distractors):
+        judged.append(q)
+        return GroundingVerdict(oracle_answers=False, better_distractor=False)
+
+    out, stats = _run([p], {"orcl": [item]}, {"а про москву что?": [_hit("orcl", body)]},
+                      judge_fn=judge_fn)
+    assert out == []
+    assert stats.get("grounded_qc_dropped") == 1
+    assert judged == ["а про москву что?"]
+
+
+def test_relevance_qc_keeps_answering_oracle_and_tags_meta():
+    body = "берлин дорогой но свободный город мне тут ок честно"
+    p = _post("orcl", body)
+    item = QGenItem(question="как берлин?", answer_span=body, lang="ru")
+
+    def judge_fn(q, oracle_text, distractors):
+        return GroundingVerdict(oracle_answers=True, better_distractor=True)
+
+    out, stats = _run([p], {"orcl": [item]}, {"как берлин?": [_hit("orcl", body)]},
+                      judge_fn=judge_fn)
+    assert len(out) == 1
+    m = out[0].meta
+    assert m["qc_judged"] is True and m["qc_oracle_answers"] is True
+    assert m["qc_better_distractor"] is True
+    assert stats.get("grounded_qc_better_distractor") == 1
+
+
+def test_no_judge_means_no_qc_meta():
+    body = "обычный пост без всякого судьи качества тут да"
+    p = _post("orcl", body)
+    item = QGenItem(question="о чём пост?", answer_span=body, lang="ru")
+    out, _ = _run([p], {"orcl": [item]}, {"о чём пост?": [_hit("orcl", body)]})
+    assert "qc_judged" not in out[0].meta
