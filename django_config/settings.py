@@ -1,7 +1,18 @@
 import os
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Test mode → in-memory SQLite (skips the pgvector CREATE EXTENSION in migration
+# 0006; the dev/CI box has no pgvector). Two signals, because they fire at
+# different times:
+#   • RUNNING_TESTS=1 — set by tests/django_setup.py and the bazel py_test env.
+#   • 'pytest' in sys.modules — true whenever pytest is the runner, even under a
+#     bare `pytest` invocation where settings load (in pytest-django's
+#     pytest_configure) BEFORE any test module imports django_setup. Relying on
+#     the env var alone loses that race and tests hit real PostgreSQL.
+RUNNING_TESTS = os.environ.get('RUNNING_TESTS') == '1' or 'pytest' in sys.modules
 
 # Load .env if present (local dev). Production injects env vars via Docker/systemd.
 _env_file = BASE_DIR / '.env'
@@ -67,7 +78,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'django_config.wsgi.application'
 
 # Use SQLite in-memory when running tests to avoid needing PostgreSQL in CI
-if os.environ.get('RUNNING_TESTS') == '1':
+if RUNNING_TESTS:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -110,7 +121,7 @@ STATICFILES_DIRS = [BASE_DIR / 'static']
 # collectstatic time to e.g. ``style.abc123.css``; the {% static %} tag
 # resolves to the hashed URL. In tests/DEBUG the in-memory manifest may not
 # be ready, so fall back to non-hashed storage there.
-if not os.environ.get('RUNNING_TESTS') == '1':
+if not RUNNING_TESTS:
     STORAGES = {
         'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
         'staticfiles': {
