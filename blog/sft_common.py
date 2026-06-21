@@ -76,6 +76,75 @@ def _is_degenerate(text: str) -> bool:
     return len(stripped) < 3 or not any(c.isalpha() for c in stripped)
 
 
+def _norm_for_compare(text: str) -> str:
+    """Whitespace-collapsed, case-folded form for near-equality comparison."""
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+# Below this length a response that happens to be a substring of the parent is a
+# genuine short reply quoting a phrase, not a bare echo — keep it.
+_MIN_ECHO_LEN = 40
+
+
+def _is_parent_echo(response: str, parent: str) -> bool:
+    """True when the author's "reply" is just a verbatim copy of the parent it
+    replies to — a bare repost with no commentary, NOT a real (parent → reply)
+    pair. Training on these teaches the exact regurgitation we are trying to kill
+    (the model learns "echo the context back"), so the pair is unusable.
+
+    Drops a pair when the normalized response is WHOLLY CONTAINED in the parent
+    (his "reply" adds nothing — a pure echo, possibly with the author prefix /
+    a trailing URL trimmed) and is long enough (``_MIN_ECHO_LEN``) that the
+    containment is not a coincidental short quote. Also drops the inverse near-copy
+    (parent ⊆ response with the response only trivially longer, ≥80%), catching a
+    repost with one added word. ``parent`` should be the RAW reshared/reply-to
+    BODY (before any ``author:\\n`` prefix), so a body echo isn't masked by the
+    prefix inflating the length ratio.
+
+    Kept in lockstep with ``scripts/verify_sft_dataset.py``'s voice-bucket copy
+    gate (response ⊆ user-turn, ≥40c) so a clean build always passes the pre-train
+    HARD gate. (2026-06-21 audit: ~114/6734 reply pairs were verbatim parent
+    copies — FB/X reshares where his "content" was the reshared text itself; the
+    filter was specced then but never wired until the pre-build masking pass.)
+    """
+    r = _norm_for_compare(response)
+    p = _norm_for_compare(parent)
+    if not r or not p:
+        return False
+    if r == p:
+        return True
+    if r in p and len(r) >= _MIN_ECHO_LEN:  # response is a pure echo of the parent
+        return True
+    return p in r and len(p) >= 0.8 * len(r)  # response = parent + a trivial add
+
+
+# An explicit "I'm reposting someone else's text in full" lead — these persona
+# bodies are dominated by a THIRD PARTY's words (a reposted Navalny statement,
+# a quoted article), not the author's voice, and run to many thousands of chars
+# (the v3 set had a single 18,120-char such target). Training the model to
+# reproduce long external text hurts voice and burns the token budget. The marker
+# must appear early (the lead announces the repost) AND the body must be long, so
+# a brief mention of "перепост" in a short post is never matched.
+_VERBATIM_REPOST_LEAD_RE = re.compile(
+    r"(?:запост\w+|выкладыва\w+|выложу|публику\w+|приведу|процитиру\w+|перепеча\w+)"
+    r"[^.]{0,80}?(?:целиком|полностью|здесь|тут|ниже)"
+    r"|(?:текст|пост|позици\w+|статья|обращени\w+|заявлени\w+|письмо)"
+    r"[^.]{0,40}?целиком",
+    re.IGNORECASE,
+)
+
+
+def _is_verbatim_repost(text: str, *, min_len: int = 1500) -> bool:
+    """True for a long persona body that announces, in its lead, a verbatim
+    repost of someone else's text (so the target is third-party words, not the
+    author's voice). Conservative: requires BOTH the length and an early lead
+    marker, so genuine long-form posts in his own voice are kept."""
+    stripped = text.strip()
+    if len(stripped) < min_len:
+        return False
+    return bool(_VERBATIM_REPOST_LEAD_RE.search(stripped[:200]))
+
+
 def _detect_lang(text: str) -> str:
     """Cheap RU/EN hint for downstream weighting — Cyrillic-ratio heuristic."""
     letters = [c for c in text if c.isalpha()]

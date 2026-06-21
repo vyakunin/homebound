@@ -17,6 +17,7 @@ from blog.management.commands.build_sft_dataset import (
     _detect_lang,
     _is_degenerate,
     _is_dirty,
+    _is_parent_echo,
     _is_self_author,
     _persona_example,
     _reply_example,
@@ -253,6 +254,52 @@ def test_reply_skips_placeholder_parent(tmp_path):
     call_command("build_sft_dataset", "--objective", "reply",
                  "--sources", "twitter", "--out", str(out))
     assert out.read_text(encoding="utf-8").strip() == ""
+
+
+def test_is_parent_echo_semantics():
+    body = "Труп у них разлагается, ну так мож убрать его уже с трона наконец."
+    # Exact echo, and the prefix-shifted echo (response == body, parent had an
+    # "author:\n" prefix stripped before the call) → dropped.
+    assert _is_parent_echo(body, body)
+    assert _is_parent_echo(body, f"{body} https://t.co/x")  # response ⊆ parent (URL trimmed)
+    # A genuine reply that ADDS commentary to a quoted span is kept (response is
+    # not wholly contained in the parent).
+    assert not _is_parent_echo(f"{body} — и вот почему он не прав", body)
+    # A short coincidental quote (< _MIN_ECHO_LEN) is kept.
+    assert not _is_parent_echo("согласен", "согласен с тобой полностью, дружище")
+
+
+@pytest.mark.django_db
+def test_command_drops_parent_echo_reshare(tmp_path):
+    # His "reply" is a verbatim echo of the reshared body (a bare repost with no
+    # commentary) — must be dropped (contamination: teaches echo-the-context).
+    echo = "Труп у них разлагается, ну так мож убрать его уже с трона наконец как-то?"
+    _make_post(
+        source_id="echo-1",
+        content_text=echo,
+        reshared_content_text=echo,
+        reshared_from_author="@orig",
+    )
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply",
+                 "--sources", "twitter", "--out", str(out))
+    assert out.read_text(encoding="utf-8").strip() == ""
+
+
+@pytest.mark.django_db
+def test_command_keeps_reply_that_adds_commentary(tmp_path):
+    # Same body quoted, but his reply adds a real take → kept (not an echo).
+    body = "Труп у них разлагается, ну так мож убрать его уже с трона наконец как-то?"
+    _make_post(
+        source_id="keep-1",
+        content_text=f"{body} В общем, согласен, давно пора менять систему целиком.",
+        reshared_content_text=body,
+        reshared_from_author="@orig",
+    )
+    out = tmp_path / "ds.jsonl"
+    call_command("build_sft_dataset", "--objective", "reply",
+                 "--sources", "twitter", "--out", str(out))
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 1
 
 
 @pytest.mark.django_db

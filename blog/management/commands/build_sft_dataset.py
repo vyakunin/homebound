@@ -50,6 +50,7 @@ from blog.sft_common import (  # noqa: F401 — re-exported for callers/tests
     _detect_lang,
     _is_degenerate,
     _is_dirty,
+    _is_parent_echo,
     _is_placeholder_parent,
     _iso,
 )
@@ -272,7 +273,10 @@ def _iter_reply_pairs(
             and not _is_dirty(reshared)
             and len(reshared) >= min_len
         ):
-            yield _reply_example(post, system_fn=system_fn)
+            if _is_parent_echo(response, reshared):
+                stats["dropped_echo"] += 1
+            else:
+                yield _reply_example(post, system_fn=system_fn)
 
         reply_to = post.reply_to_text.strip()
         if (
@@ -281,7 +285,10 @@ def _iter_reply_pairs(
             and not _is_dirty(reply_to)
             and len(reply_to) >= min_len
         ):
-            yield _reply_example_from_reply_to(post, system_fn=system_fn)
+            if _is_parent_echo(response, reply_to):
+                stats["dropped_echo"] += 1
+            else:
+                yield _reply_example_from_reply_to(post, system_fn=system_fn)
 
 
 def _iter_comment_reply_pairs(
@@ -324,6 +331,8 @@ def _iter_comment_reply_pairs(
             if is_self and not prev_is_self:
                 if _is_degenerate(text) or _is_dirty(text):
                     stats["dropped_dirty"] += 1
+                elif _is_parent_echo(text, prev_text):
+                    stats["dropped_echo"] += 1
                 elif (
                     len(text) >= min_len
                     and len(prev_text) >= min_len
@@ -495,7 +504,7 @@ class Command(BaseCommand):
             named=opts["named"], resilience=opts["resilience"], seed=opts["system_seed"]
         )
 
-        stats = {"dropped_dirty": 0}
+        stats = {"dropped_dirty": 0, "dropped_echo": 0}
         generators = []
         if objective in ("persona", "both"):
             generators.append(
@@ -556,7 +565,8 @@ class Command(BaseCommand):
             f"Wrote {n_written} example(s) to {dest}: {breakdown}"
             f"{grounded_note}{contrastive_note} "
             f"({counts['dropped_dup']} duplicate(s), "
-            f"{stats['dropped_dirty']} dirty/degenerate dropped)."
+            f"{stats['dropped_dirty']} dirty/degenerate, "
+            f"{stats['dropped_echo']} parent-echo dropped)."
         )
 
     @staticmethod
