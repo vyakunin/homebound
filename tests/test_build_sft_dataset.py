@@ -14,11 +14,13 @@ from django.core.management.base import CommandError
 
 from blog.models import Post, PostComment, PostSource, PostVisibility
 from blog.management.commands.build_sft_dataset import (
+    PERSONA_USER,
     _detect_lang,
     _is_degenerate,
     _is_dirty,
     _is_parent_echo,
     _is_self_author,
+    _make_user_fn,
     _persona_example,
     _reply_example,
     _reply_example_from_reply_to,
@@ -77,10 +79,28 @@ def test_persona_example_shape():
     ex = _persona_example(post)
     roles = [m["role"] for m in ex.messages]
     assert roles == ["system", "user", "assistant"]
+    # default (no resilience) reproduces the historical fixed user turn byte-for-byte
+    assert ex.messages[1]["content"] == PERSONA_USER == "Write a post."
     assert ex.messages[-1]["content"] == "Каждый день — это маленькая жизнь."
     assert ex.meta["objective"] == "persona"
     assert ex.meta["source"] == "twitter"
     assert ex.meta["lang"] == "ru"
+
+
+@pytest.mark.django_db
+def test_persona_user_turn_diversifies_under_resilience():
+    # resilience off → fixed canonical on every example (byte-identical v3 build).
+    off = _make_user_fn(named=False, resilience=False, seed=1234)
+    assert {off(f"text-{i}") for i in range(50)} == {"Write a post."}
+    # resilience on → the persona user turn varies across examples (breaks the
+    # baked terse-prior the 7B run keyed on the fixed string).
+    on = _make_user_fn(named=False, resilience=True, seed=1234)
+    assert len({on(f"text-{i}") for i in range(200)}) > 1
+    # wired end-to-end: the builder emits the sampled user turn.
+    post = _make_post(content_text="Длинный осмысленный пост про жизнь и работу.")
+    ex = _persona_example(post, user_fn=on)
+    from blog.sft_resilience import PERSONA_USER_VARIANTS
+    assert ex.messages[1]["content"] in PERSONA_USER_VARIANTS
 
 
 @pytest.mark.django_db

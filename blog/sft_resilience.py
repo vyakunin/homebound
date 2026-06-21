@@ -46,6 +46,34 @@ REPLY_VARIANTS: tuple[str, ...] = (
     "You are the author — reply to the post below the way you actually would.",
 )
 
+# Equivalent USER-turn instructions for the persona objective. The persona set is
+# the single largest objective (~12k), and v3 used the byte-identical user turn
+# "Write a post." on every one of them → the model bakes an unconditional
+# "respond to anything tersely" prior keyed on that exact string (the 7B run's
+# main weakness). Varying the instruction (meaning constant) breaks that prior
+# without dropping or generating any data. The first entry is the historical
+# canonical string so a build without sampling reproduces it byte-for-byte.
+PERSONA_USER_VARIANTS: tuple[str, ...] = (
+    "Write a post.",
+    "Write a post in your own voice.",
+    "Post something.",
+    "Share a new post.",
+    "Write your next post.",
+    "Write a short post about whatever's on your mind.",
+)
+
+
+def sample_user(variants: tuple[str, ...], key: str, seed: int) -> str:
+    """Deterministically pick one user-instruction variant for an example.
+
+    Same mechanism as :func:`sample_system` but on a distinct sub-stream
+    (``usr``) so the system and user choices for one example are independent."""
+    if not variants:
+        raise ValueError("variants must be non-empty")
+    if len(variants) == 1:
+        return variants[0]
+    return Random(f"{seed}:usr:{key}").choice(variants)
+
 
 def sample_system(variants: tuple[str, ...], key: str, seed: int) -> str:
     """Deterministically pick one system-prompt variant for an example.

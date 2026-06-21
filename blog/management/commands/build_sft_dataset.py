@@ -70,13 +70,20 @@ SOURCE_SLUGS: dict[str, PostSource] = {
 # Yakunin" — decision 4 / modal_persona_serving rule 11) and, when the resilience
 # layer is on, SAMPLED across equivalent paraphrases per example so the model
 # stays steerable by its system turn (blog.sft_resilience). The named variants
-# reproduce the pre-de-naming build via --named. PERSONA_USER stays fixed (style
-# SFT maps one instruction onto many distinct outputs — the voice distribution).
+# reproduce the pre-de-naming build via --named. The persona USER turn is ALSO
+# sampled under resilience (blog.sft_resilience.PERSONA_USER_VARIANTS): the v3 run
+# used the byte-identical "Write a post." on all ~12k persona examples, which baked
+# an unconditional "respond tersely to anything" prior keyed on that exact string
+# (the 7B run's #1 weakness). Varying the instruction (meaning constant) breaks the
+# prior without dropping or generating data — and it matters more for the option-2
+# instruct+LoRA base, where a light adapter keys on the training string and can't
+# override a baked prior the way a full FT can. PERSONA_USER is variant[0] so a
+# --named / --no-resilience build reproduces the historical string byte-for-byte.
 NAMED_PERSONA_SYSTEM = "You are Vladimir Yakunin. Write in your own voice and style."
 NAMED_REPLY_SYSTEM = (
     "You are Vladimir Yakunin. Respond in your own voice and style to the post below."
 )
-PERSONA_USER = "Write a post."
+PERSONA_USER = sft_resilience.PERSONA_USER_VARIANTS[0]  # "Write a post."
 
 # Back-compat aliases (the canonical de-named strings). Some callers / the
 # post-hoc denamed_dataset.py reference these conceptually.
@@ -102,18 +109,38 @@ def _make_system_fn(*, named: bool, resilience: bool, seed: int):
     return fn
 
 
-# Default for direct callers (tests): de-named canonical, no sampling.
+# A user_fn maps key -> persona user-turn string. Only the persona objective has a
+# synthetic user turn (the reply objectives use the parent text as the user turn,
+# so they are never routed here). ``key`` is the example's assistant text, sampled
+# on a distinct sub-stream from the system choice so the two are independent.
+# named is accepted for signature symmetry but irrelevant — the user turn is the
+# same string in the named and de-named builds. With resilience off it returns the
+# historical canonical "Write a post." (variant[0]) byte-for-byte.
+def _make_user_fn(*, named: bool, resilience: bool, seed: int):
+    def fn(key: str) -> str:
+        if not resilience:
+            return sft_resilience.PERSONA_USER_VARIANTS[0]
+        return sft_resilience.sample_user(
+            sft_resilience.PERSONA_USER_VARIANTS, key, seed
+        )
+    return fn
+
+
+# Defaults for direct callers (tests): de-named canonical system, fixed user turn.
 _DEFAULT_SYSTEM_FN = _make_system_fn(named=False, resilience=False, seed=0)
+_DEFAULT_USER_FN = _make_user_fn(named=False, resilience=False, seed=0)
 
 
-def _persona_example(post: Post, *, system_fn=_DEFAULT_SYSTEM_FN) -> SftExample:
+def _persona_example(
+    post: Post, *, system_fn=_DEFAULT_SYSTEM_FN, user_fn=_DEFAULT_USER_FN
+) -> SftExample:
     text = post.content_text.strip()
     meta = _base_meta(post, "persona")
     meta["lang"] = _detect_lang(text)
     return SftExample(
         messages=[
             {"role": "system", "content": system_fn("persona", text)},
-            {"role": "user", "content": PERSONA_USER},
+            {"role": "user", "content": user_fn(text)},
             {"role": "assistant", "content": text},
         ],
         meta=meta,
@@ -215,7 +242,7 @@ def _resolve_sources(raw: str) -> list[PostSource]:
 
 def _iter_persona(
     sources: list[PostSource], public_only: bool, min_len: int, stats: dict,
-    system_fn=_DEFAULT_SYSTEM_FN,
+    system_fn=_DEFAULT_SYSTEM_FN, user_fn=_DEFAULT_USER_FN,
 ):
     qs = Post.objects.filter(source__in=sources).order_by("created_at")
     if public_only:
@@ -227,7 +254,7 @@ def _iter_persona(
         if _is_dirty(text) or _is_degenerate(text):
             stats["dropped_dirty"] += 1
             continue
-        yield _persona_example(post, system_fn=system_fn)
+        yield _persona_example(post, system_fn=system_fn, user_fn=user_fn)
 
 
 def _iter_reply_pairs(
@@ -503,12 +530,16 @@ class Command(BaseCommand):
         system_fn = _make_system_fn(
             named=opts["named"], resilience=opts["resilience"], seed=opts["system_seed"]
         )
+        user_fn = _make_user_fn(
+            named=opts["named"], resilience=opts["resilience"], seed=opts["system_seed"]
+        )
 
         stats = {"dropped_dirty": 0, "dropped_echo": 0}
         generators = []
         if objective in ("persona", "both"):
             generators.append(
-                ("persona", _iter_persona(sources, public_only, min_len, stats, system_fn))
+                ("persona", _iter_persona(
+                    sources, public_only, min_len, stats, system_fn, user_fn))
             )
         if objective in ("reply", "both"):
             generators.append(
