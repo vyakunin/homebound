@@ -324,6 +324,159 @@ def test_fuse_dual_hit_beats_date_only():
     )
 
 
+# ── Relevance rerank (Voyage mocked — never bills live) ────────────────
+
+
+def _fake_rerank(score_map, *, calls=None):
+    """Build a fake of blog.embeddings.rerank: scores a doc by the first
+    score_map key found as a substring (0.0 if none). Records calls when a
+    list is passed, so a test can assert the reranker was/wasn't invoked."""
+
+    def _inner(query, docs):
+        if calls is not None:
+            calls.append((query, list(docs)))
+        out = []
+        for d in docs:
+            score = 0.0
+            for key, val in score_map.items():
+                if key in d:
+                    score = val
+                    break
+            out.append(score)
+        return out
+
+    return _inner
+
+
+def test_rerank_floats_buried_on_topic_post(monkeypatch):
+    """The bug this whole reranker exists for: keyword-coincidence posts
+    each get a flat ~0.5 fusion contribution and bury a semantically
+    on-topic post below the top-K cut (the «какой самый охуенный рэп?» →
+    Anacondaz repost at pool position 8). The reranker re-scores
+    relevance so the on-topic post floats to the top after the MMR cut."""
+    from blog import bot_retrieval
+
+    pool = [
+        bot_retrieval._with_score(
+            _hit("coincide1", post_id=1, snippet="случайное совпадение слова рэп"), 0.50),
+        bot_retrieval._with_score(
+            _hit("coincide2", post_id=2, snippet="ещё одно совпадение про рэп"), 0.48),
+        bot_retrieval._with_score(
+            _hit("anaconda", post_id=3, snippet="репост Anacondaz — лучший трек"), 0.20),
+    ]
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: True)
+    monkeypatch.setattr(
+        bot_retrieval, "rerank",
+        _fake_rerank({"Anacondaz": 0.95, "совпадение": 0.10}))
+
+    reranked = bot_retrieval._rerank(
+        "какой самый охуенный рэп?", pool, date_ids=set())
+    out = bot_retrieval._mmr_select(reranked, top_k=3)
+    assert out[0].slug == "anaconda", (
+        f"Expected on-topic 'anaconda' floated to top by rerank; got "
+        f"{[h.slug for h in out]}"
+    )
+
+
+def test_rerank_unavailable_keeps_fusion_order_no_call(monkeypatch):
+    """Voyage key missing / down → keep the pre-rerank fusion order AND do
+    not call the reranker (no billed call when it can't help)."""
+    from blog import bot_retrieval
+
+    pool = [
+        bot_retrieval._with_score(_hit("a", post_id=1, snippet="x"), 0.9),
+        bot_retrieval._with_score(_hit("b", post_id=2, snippet="y"), 0.4),
+    ]
+
+    def _boom(*a, **k):
+        raise AssertionError("rerank must not be called when Voyage is unavailable")
+
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: False)
+    monkeypatch.setattr(bot_retrieval, "rerank", _boom)
+
+    out = bot_retrieval._rerank("q", pool, date_ids=set())
+    assert [(h.slug, h.score) for h in out] == [("a", 0.9), ("b", 0.4)]
+
+
+def test_rerank_error_keeps_fusion_order(monkeypatch):
+    """A reranker error (network/auth) is a soft-fail: keep fusion order,
+    never raise into the request path."""
+    from blog import bot_retrieval
+    from blog.embeddings import EmbeddingsUnavailableError
+
+    pool = [
+        bot_retrieval._with_score(_hit("a", post_id=1, snippet="x"), 0.9),
+        bot_retrieval._with_score(_hit("b", post_id=2, snippet="y"), 0.4),
+    ]
+
+    def _raise(query, docs):
+        raise EmbeddingsUnavailableError("voyage down")
+
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: True)
+    monkeypatch.setattr(bot_retrieval, "rerank", _raise)
+
+    out = bot_retrieval._rerank("q", pool, date_ids=set())
+    assert [h.score for h in out] == [0.9, 0.4]
+
+
+def test_rerank_shape_mismatch_keeps_fusion_order(monkeypatch):
+    """Reranker returns the wrong number of scores → defensive keep-order
+    (never zip-misalign relevance onto the wrong posts)."""
+    from blog import bot_retrieval
+
+    pool = [
+        bot_retrieval._with_score(_hit("a", post_id=1, snippet="x"), 0.9),
+        bot_retrieval._with_score(_hit("b", post_id=2, snippet="y"), 0.4),
+    ]
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: True)
+    monkeypatch.setattr(bot_retrieval, "rerank", lambda query, docs: [0.1])  # 1≠2
+
+    out = bot_retrieval._rerank("q", pool, date_ids=set())
+    assert [h.score for h in out] == [0.9, 0.4]
+
+
+def test_rerank_date_hit_keeps_bonus(monkeypatch):
+    """A date-anchored hit keeps DATE_RERANK_BONUS on TOP of its relevance,
+    so «что было 24 февраля 2022» still surfaces that day's post even when
+    the reranker scores it low on pure topicality."""
+    from blog import bot_retrieval
+    from blog.bot_retrieval import DATE_RERANK_BONUS
+
+    pool = [
+        bot_retrieval._with_score(_hit("topical", post_id=1, snippet="on topic"), 0.5),
+        bot_retrieval._with_score(_hit("dated", post_id=2, snippet="that day"), 0.5),
+    ]
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: True)
+    monkeypatch.setattr(
+        bot_retrieval, "rerank",
+        _fake_rerank({"on topic": 0.40, "that day": 0.10}))
+
+    out = bot_retrieval._rerank("что было 24 февраля 2022", pool, date_ids={2})
+    by_slug = {h.slug: h.score for h in out}
+    assert by_slug["dated"] == pytest.approx(0.10 + DATE_RERANK_BONUS)
+    assert by_slug["topical"] == pytest.approx(0.40)
+    ranked = bot_retrieval._mmr_select(out, top_k=2)
+    assert ranked[0].slug == "dated", (
+        f"date bonus must float the dated post first; got "
+        f"{[h.slug for h in ranked]}"
+    )
+
+
+def test_rerank_skips_trivial_pool_no_call(monkeypatch):
+    """A <2-hit pool can't be reordered — skip the reranker (don't bill a
+    call that can't change anything)."""
+    from blog import bot_retrieval
+
+    def _boom(*a, **k):
+        raise AssertionError("rerank must not be called on a <2 pool")
+
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: True)
+    monkeypatch.setattr(bot_retrieval, "rerank", _boom)
+
+    single = [bot_retrieval._with_score(_hit("a", post_id=1, snippet="x"), 0.9)]
+    assert bot_retrieval._rerank("q", single, date_ids=set()) == single
+
+
 # ── Happy path with mocked Anthropic ──────────────────────────────────
 
 

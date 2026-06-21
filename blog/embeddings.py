@@ -45,7 +45,13 @@ import httpx
 logger = logging.getLogger(__name__)
 
 VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
+VOYAGE_RERANK_URL = "https://api.voyageai.com/v1/rerank"
 DEFAULT_MODEL = "voyage-3.5"
+# Cross-encoder reranker. voyage-3.5 embeddings handle recall (the right
+# post lands in the candidate pool); rerank-2.5 re-scores query<->document
+# relevance so the bot's fusion can't bury a semantically on-topic post
+# under keyword-coincidence hits. Same key/provider as embeddings.
+DEFAULT_RERANK_MODEL = "rerank-2.5"
 DEFAULT_DIM = 1024
 DEFAULT_TIMEOUT_S = 30.0
 # Voyage's per-request batch limit. Backfill hits this often; query-time
@@ -241,6 +247,75 @@ def embed_batch(
         for vector in resp:
             out.append(EmbeddingResult(vector=vector, model=model, dim=len(vector)))
     return out
+
+
+def rerank(
+    query: str,
+    documents: list[str],
+    *,
+    model: str = DEFAULT_RERANK_MODEL,
+) -> list[float]:
+    """Re-score ``documents`` by relevance to ``query``.
+
+    Returns one relevance score in ``[0, 1]`` per document, **aligned to
+    input order** (``documents[i]`` → ``scores[i]``) — NOT sorted by score.
+    Empty input returns ``[]`` without a call (Voyage charges per token).
+
+    Raises ``EmbeddingsUnavailableError`` on missing key / network / auth /
+    malformed response, exactly like ``embed_batch`` — callers are expected
+    to fall back to their pre-rerank ordering rather than fail the request.
+    """
+    if not documents:
+        return []
+    key = _api_key()
+    if not key:
+        raise EmbeddingsUnavailableError(
+            "Voyage API key missing for rerank — set VOYAGE_API_KEY or "
+            "VOYAGE_API_KEY_FILE / ~/tokens/homebound_voyage_key (mode 600)."
+        )
+    try:
+        return _call_voyage_rerank(key, query, documents, model=model)
+    except (httpx.HTTPError, ValueError) as e:
+        raise EmbeddingsUnavailableError(f"Voyage rerank failed: {e}") from e
+
+
+def _call_voyage_rerank(
+    api_key: str,
+    query: str,
+    documents: list[str],
+    *,
+    model: str,
+) -> list[float]:
+    """Single Voyage Rerank API call. Returns relevance scores in INPUT
+    order (the API returns rows sorted by score with an ``index`` field;
+    we scatter them back). ``truncation=True`` lets Voyage trim docs that
+    exceed the per-document context instead of erroring the whole call."""
+    body = {
+        "query": query,
+        "documents": documents,
+        "model": model,
+        "truncation": True,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client(timeout=DEFAULT_TIMEOUT_S) as client:
+        resp = client.post(VOYAGE_RERANK_URL, headers=headers, json=body)
+    if resp.status_code >= 400:
+        raise httpx.HTTPStatusError(
+            f"Voyage rerank HTTP {resp.status_code}: {resp.text[:200]}",
+            request=resp.request,
+            response=resp,
+        )
+    data = resp.json()
+    rows = data.get("data") or []
+    scores = [0.0] * len(documents)
+    for r in rows:
+        idx = int(r.get("index", -1))
+        if 0 <= idx < len(documents):
+            scores[idx] = float(r.get("relevance_score", 0.0))
+    return scores
 
 
 def _call_voyage(

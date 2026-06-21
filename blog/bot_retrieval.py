@@ -36,7 +36,12 @@ from django.db import connection
 from django.db.models import F, FloatField, Q
 from django.db.models.functions import Cast
 
-from blog.embeddings import EmbeddingsUnavailableError, embed_query, is_available
+from blog.embeddings import (
+    EmbeddingsUnavailableError,
+    embed_query,
+    is_available,
+    rerank,
+)
 from blog.models import Post, PostChunk, PostVisibility
 
 _log = logging.getLogger(__name__)
@@ -68,6 +73,28 @@ REPOST_DAMPENING = 0.95
 # posts spanning the corpus's temporal range so the model doesn't infer
 # "Vladimir lost interest after Y" from a single old hit.
 MMR_YEAR_PENALTY = 0.10
+
+# Cross-encoder relevance reranker over the fused candidate pool.
+#
+# Recall is handled upstream (chunk-level voyage-3.5 embeddings reliably
+# pull the right post INTO the pool). The residual failure is RANKING:
+# FTS keyword-coincidence hits — posts that merely contain a query word —
+# each get a flat 0.5 fusion contribution and out-score a semantically
+# on-topic post, which then gets cut from the top-K (and MMR can't rescue
+# it because the fusion score gap is tiny). Example: «какой самый охуенный
+# рэп?» left the on-topic Anacondaz repost at pool position 8, below
+# keyword-coincidence posts, so it never reached the model.
+#
+# rerank-2.5 re-scores query<->document relevance over the whole pool,
+# widening the gap between genuinely on-topic posts and keyword
+# coincidence so the subsequent MMR/top-K cut keeps the right ones.
+# Degrades gracefully: if Voyage is unavailable the pre-rerank fusion
+# order is used unchanged.
+RERANK_DOC_MAX_CHARS = 1000
+# Date-anchored posts keep this bonus ON TOP of their rerank relevance so
+# explicit-date questions («что было 24 февраля 2022») still surface that
+# day's posts even when the reranker scores them low on topical relevance.
+DATE_RERANK_BONUS = 0.85
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +128,13 @@ def retrieve(query: str, *, top_k: int = DEFAULT_TOP_K) -> list[BotHit]:
     kw_hits = _fts_hits(query)
     sem_hits = _semantic_hits(query)
     date_hits = _date_hits(query)
-    return _fuse(kw_hits, sem_hits, date_hits, top_k=top_k)
+    # Build the deduped candidate pool (fusion scores), re-score it by
+    # query<->document relevance, then apply the MMR/top-K diversity cut.
+    # Reranking BEFORE the cut is the point: the right post is already in
+    # the pool, just mis-ranked — rerank floats it up so the cut keeps it.
+    pool = _merge_and_dedup(kw_hits, sem_hits, date_hits)
+    pool = _rerank(query, pool, date_ids={h.id for h in date_hits})
+    return _mmr_select(pool, top_k=top_k)
 
 
 # ── PostgreSQL FTS half ───────────────────────────────────────────────
@@ -406,7 +439,24 @@ def _fuse(
     *,
     top_k: int,
 ) -> list[BotHit]:
-    """Rank-based fusion of keyword + semantic + date halves.
+    """Merge the retrieval halves and apply the MMR/top-K diversity cut.
+
+    Thin wrapper for the classic one-shot fuse-and-cut (and existing
+    tests). The live ``retrieve()`` path instead calls ``_merge_and_dedup``
+    → ``_rerank`` → ``_mmr_select`` so the relevance reranker sees the full
+    candidate pool BEFORE the cut."""
+    return _mmr_select(_merge_and_dedup(kw, sem, date_hits), top_k=top_k)
+
+
+def _merge_and_dedup(
+    kw: list[BotHit],
+    sem: list[BotHit],
+    date_hits: list[BotHit] | None = None,
+) -> list[BotHit]:
+    """Rank-based fusion of keyword + semantic + date halves, deduped.
+
+    Returns the full scored+deduped candidate pool (no top-K cut) so a
+    downstream reranker can re-score the whole pool. Score model below:
 
     Each of the keyword and semantic lists contributes up to 0.5 based
     on rank within that list (rank-1 → 0.5, rank-N → ~0). A dual hit
@@ -475,9 +525,8 @@ def _fuse(
                 merged[h_id] = _with_score(h, h.score * REPOST_DAMPENING)
 
     # Collapse near-duplicate posts (same body, different id/slug) BEFORE
-    # MMR so the top_k slots fill with distinct content. See _dedup_identical.
-    deduped = _dedup_identical(list(merged.values()))
-    return _mmr_select(deduped, top_k=top_k)
+    # rerank/MMR so the slots fill with distinct content. See _dedup_identical.
+    return _dedup_identical(list(merged.values()))
 
 
 def _norm_text(s: str) -> str:
@@ -559,6 +608,50 @@ def _mmr_select(candidates: list[BotHit], *, top_k: int) -> list[BotHit]:
         if y is not None:
             picked_years[y] = picked_years.get(y, 0) + 1
     return picked
+
+
+# ── Relevance rerank ───────────────────────────────────────────────────
+
+
+def _rerank(query: str, pool: list[BotHit], *, date_ids: set[int]) -> list[BotHit]:
+    """Re-score the candidate pool by query↔document relevance.
+
+    The fusion score is replaced by the reranker's relevance (date hits
+    keep ``DATE_RERANK_BONUS`` on top so explicit-date questions still
+    surface that day's posts even when the topical relevance is low).
+
+    Degrades gracefully: a pool of <2, no Voyage key, a reranker error, or
+    a shape mismatch all return the pool with its fusion scores untouched —
+    the bot never fails a request over a reranker hiccup, it just falls
+    back to the pre-rerank ordering.
+    """
+    if len(pool) < 2 or not is_available():
+        return pool
+    docs = [_rerank_doc_text(h) for h in pool]
+    try:
+        scores = rerank(query, docs)
+    except EmbeddingsUnavailableError as e:
+        _log.warning("bot rerank soft-fail (keeping fusion order): %s", e)
+        return pool
+    if len(scores) != len(pool):  # defensive: shape mismatch → keep fusion order
+        _log.warning(
+            "bot rerank returned %d scores for %d docs; keeping fusion order",
+            len(scores), len(pool),
+        )
+        return pool
+    return [
+        _with_score(h, rel + (DATE_RERANK_BONUS if h.id in date_ids else 0.0))
+        for h, rel in zip(pool, scores)
+    ]
+
+
+def _rerank_doc_text(h: BotHit) -> str:
+    """The text handed to the reranker for one candidate — the same
+    title + body + reshared excerpt the model ultimately sees, capped so a
+    long post can't dominate the rerank token budget."""
+    parts = [h.title or "", h.snippet or "", h.repost_excerpt or ""]
+    text = "\n".join(p for p in parts if p).strip()
+    return text[:RERANK_DOC_MAX_CHARS]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
