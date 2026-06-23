@@ -277,3 +277,93 @@ def test_judge_transfer_fails_closed():
 
     v2 = judge_transfer_support("q", ["c"], "k", client=_Boom())
     assert v2.judged is False and v2.supported is False
+
+
+# ── funded-balance gate (assert_funded) ─────────────────────────────────
+
+
+class _RaisingClient:
+    """OpenAI-compatible stub whose create() raises a given exception."""
+
+    def __init__(self, exc):
+        class _Completions:
+            def create(self, **kw):
+                raise exc
+
+        class _Chat:
+            def __init__(self):
+                self.completions = _Completions()
+
+        self.chat = _Chat()
+
+
+def _status_error(status, message):
+    e = RuntimeError(message)
+    e.status_code = status
+    return e
+
+
+def test_assert_funded_passes_on_real_content():
+    from blog.sft_qgen import assert_funded
+
+    # A normal 200 with content → no raise.
+    assert_funded(_FakeClient("чо как, как сам?"), model="fake") is None
+
+
+def test_assert_funded_raises_on_402_unfunded():
+    from blog.sft_qgen import TogetherBalanceError, assert_funded
+
+    client = _RaisingClient(_status_error(402, "spend limit reached for this billing cycle"))
+    try:
+        assert_funded(client, model="fake")
+        assert False, "expected TogetherBalanceError on 402"
+    except TogetherBalanceError as e:
+        assert "UNFUNDED" in str(e) and "billing" in str(e)
+
+
+def test_assert_funded_raises_on_402_by_message_without_status():
+    # No status_code attr, but the message names a spend limit → still caught.
+    from blog.sft_qgen import TogetherBalanceError, assert_funded
+
+    client = _RaisingClient(RuntimeError("Error: insufficient balance"))
+    try:
+        assert_funded(client, model="fake")
+        assert False, "expected TogetherBalanceError"
+    except TogetherBalanceError:
+        pass
+
+
+def test_assert_funded_raises_on_401_bad_key():
+    from blog.sft_qgen import TogetherBalanceError, assert_funded
+
+    client = _RaisingClient(_status_error(401, "invalid api key"))
+    try:
+        assert_funded(client, model="fake")
+        assert False, "expected TogetherBalanceError on 401"
+    except TogetherBalanceError as e:
+        assert "REJECTED" in str(e)
+
+
+def test_assert_funded_reraises_transient_5xx():
+    # A transient server error must NOT be swallowed as a balance error — the
+    # caller's retry path handles it; we only HARD-stop on 402/401.
+    from blog.sft_qgen import TogetherBalanceError, assert_funded
+
+    client = _RaisingClient(_status_error(503, "service temporarily unavailable"))
+    try:
+        assert_funded(client, model="fake")
+        assert False, "expected the original error to propagate"
+    except TogetherBalanceError:
+        assert False, "transient 5xx must not be classified as a balance error"
+    except RuntimeError as e:
+        assert "unavailable" in str(e)
+
+
+def test_assert_funded_raises_on_empty_content():
+    from blog.sft_qgen import TogetherBalanceError, assert_funded
+
+    try:
+        assert_funded(_FakeClient(""), model="fake")
+        assert False, "expected TogetherBalanceError on empty content"
+    except TogetherBalanceError as e:
+        assert "empty content" in str(e)

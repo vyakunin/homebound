@@ -627,6 +627,20 @@ class Command(BaseCommand):
         client = sft_qgen.make_together_client(opts["qgen_key"])
         model = opts["qgen_model"] or sft_qgen.DEFAULT_QGEN_MODEL
 
+        # Funded-balance HARD gate — runs once per build (this is the single
+        # chokepoint for ALL paid buckets: grounded/source/abstention/transfer/
+        # contrastive). A real metered probe call; if the workspace is unfunded
+        # Together 402s here exactly as it would on the build's first call, so we
+        # abort for $0 instead of 402-looping for an hour (the 2026-06-22 burn).
+        if not getattr(self, "_funded_checked", False):
+            self.stdout.write("Together funded-balance probe (real metered call)…")
+            try:
+                sft_qgen.assert_funded(client, model)
+            except sft_qgen.TogetherBalanceError as e:
+                raise CommandError(str(e)) from e
+            self._funded_checked = True
+            self.stdout.write(self.style.SUCCESS("  funded ✓ — proceeding with paid build"))
+
         def qgen_fn(post):
             return sft_qgen.generate_qa(
                 post.content_text, client=client, model=model,

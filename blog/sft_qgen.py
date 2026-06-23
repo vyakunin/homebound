@@ -70,6 +70,14 @@ DEFAULT_FEWSHOT: tuple[str, ...] = (
 )
 
 
+class TogetherBalanceError(RuntimeError):
+    """Raised by ``assert_funded`` when a real metered probe call shows the
+    Together workspace is unfunded (HTTP 402 / 'spend limit reached' / payment)
+    or the key is rejected (401). Kept distinct from transient 5xx so the caller
+    can HARD-abort a paid build instead of 402-looping for an hour. (Django-free
+    on purpose; the management command maps it to a clean CommandError.)"""
+
+
 @dataclass(frozen=True, slots=True)
 class QGenItem:
     """One generated (question, grounded-answer-span) pair for an oracle post."""
@@ -541,3 +549,61 @@ def make_together_client(key_path: str = DEFAULT_KEY_PATH):
 
     key = Path(key_path).expanduser().read_text(encoding="utf-8").strip()
     return OpenAI(base_url=TOGETHER_BASE_URL, api_key=key)
+
+
+def assert_funded(client, model: str = DEFAULT_QGEN_MODEL) -> None:
+    """Fail-fast funded-balance check — run ONCE before a paid build loop.
+
+    Together exposes **no balance API**, and a 1-token *validity* ping only
+    proves the key authenticates: it does NOT prove the workspace is funded (it
+    can slip past a near-zero balance). So this fires ONE real, workload-shaped
+    metered Q-gen call — same model, same ~few-hundred-token shape the build
+    makes thousands of times. If the balance is exhausted, Together returns
+    **402 'spend limit reached'** on this real call exactly as it would on the
+    build's first call → we raise ``TogetherBalanceError`` so the build aborts
+    cheaply instead of 402-looping for an hour (the 2026-06-22 failure). A 200
+    with content proves the endpoint will actually serve the build's calls.
+
+    Raises ``TogetherBalanceError`` on 402/payment (unfunded) or 401 (bad key).
+    Re-raises the original error on transient 5xx/unknown so normal retry can
+    handle it — we only HARD-stop on the two non-retryable billing/auth cases.
+    """
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You generate one short question."},
+                {"role": "user", "content": (
+                    "Reply with ONE short casual question a visitor might type to a "
+                    "blogger. One line, no preamble."
+                )},
+            ],
+            temperature=0.7,
+            # Real metered cost, workload-shaped — deliberately NOT a 1-token ping.
+            max_tokens=200,
+        )
+    except Exception as e:  # noqa: BLE001 — classify by status, re-raise the rest
+        status = getattr(e, "status_code", None) or getattr(e, "status", None)
+        first = str(e).splitlines()[0] if str(e) else type(e).__name__
+        low = str(e).lower()
+        if status == 402 or any(
+            s in low for s in ("spend limit", "insufficient", "payment", "balance", "quota")
+        ):
+            raise TogetherBalanceError(
+                "Together balance UNFUNDED — a real metered probe returned a "
+                f"payment error ({status or 'billing'}): {first}. "
+                "Top up at https://api.together.xyz/settings/billing, then re-run. "
+                "(A 1-token validity ping does NOT catch this — see "
+                "homebound-platform/docs/SFT_PLAN.md pre-gen gate.)"
+            ) from e
+        if status == 401 or "authenticat" in low or "api key" in low:
+            raise TogetherBalanceError(
+                f"Together key REJECTED (401) — invalid/expired key: {first}"
+            ) from e
+        raise  # transient/unknown — let the caller's retry path handle it
+    content = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+    if not content:
+        raise TogetherBalanceError(
+            "Together funded-probe returned empty content — refusing to start a "
+            "paid build against an endpoint that won't produce output."
+        )
