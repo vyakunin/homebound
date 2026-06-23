@@ -3,18 +3,28 @@
 No network: a fake OpenAI-compatible client returns canned content, so we test
 the prompt assembly, JSON extraction, and the verbatim-span faithfulness gate.
 """
+import pytest
+
 import tests.django_setup  # noqa: F401 — must run before any Django imports
 from blog.sft_qgen import (
     GroundingVerdict,
+    QGenCallError,
     QGenItem,
     _extract_json_array,
     _parse_verdict,
+    _retry_call,
     _span_is_faithful,
     build_messages,
     generate_qa,
     judge_grounding,
     parse_items,
 )
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Stub the backoff sleep so requeue tests run instantly."""
+    monkeypatch.setattr("blog.sft_qgen._sleep", lambda _s: None)
 
 
 class _FakeMessage:
@@ -52,6 +62,33 @@ class _FakeClient:
                 self.completions = _Completions(outer)
 
         self.chat = _Chat(self)
+
+
+class _FlakyClient:
+    """OpenAI-compatible stub that raises ``fail_times`` then returns ``content``.
+
+    Models a transient Together 429/503 wave that clears after a few attempts, so
+    a requeue pass recovers the example.
+    """
+
+    def __init__(self, content, fail_times):
+        self._content = content
+        self._fail = fail_times
+        self.calls = 0
+        outer = self
+
+        class _Completions:
+            def create(self, **kw):
+                outer.calls += 1
+                if outer.calls <= outer._fail:
+                    raise RuntimeError("503 service unavailable")
+                return _FakeResp(outer._content)
+
+        class _Chat:
+            def __init__(self):
+                self.completions = _Completions()
+
+        self.chat = _Chat()
 
 
 # ── JSON extraction ────────────────────────────────────────────────────
@@ -175,15 +212,28 @@ def test_generate_qa_bad_response_returns_empty():
     assert generate_qa("post", client=_FakeClient("sorry, I can't."), model="fake") == []
 
 
-def test_generate_qa_client_error_returns_empty():
-    class _BoomClient:
-        class chat:  # noqa: N801
-            class completions:  # noqa: N801
-                @staticmethod
-                def create(**kw):
-                    raise RuntimeError("network down")
+def test_generate_qa_client_error_returns_empty(no_sleep):
+    # A call that fails every requeue pass falls back to [] (drop), not a crash.
+    boom = _FlakyClient("ignored", fail_times=99)
+    assert generate_qa("post", client=boom, model="fake", retry_passes=3) == []
+    assert boom.calls == 3  # all passes exhausted before giving up
 
-    assert generate_qa("post", client=_BoomClient(), model="fake") == []
+
+def test_generate_qa_recovers_after_transient_failures(no_sleep):
+    # 503 on the first two attempts, then a valid response → the requeue pass
+    # recovers the example instead of silently dropping it (the silent-loss bug).
+    reply = '[{"question": "как берлин?", "answer_span": "берлин ок", "lang": "ru"}]'
+    client = _FlakyClient(reply, fail_times=2)
+    items = generate_qa("берлин ок", client=client, model="fake", retry_passes=4)
+    assert client.calls == 3  # 2 failures + 1 success
+    assert len(items) == 1 and items[0].question == "как берлин?"
+
+
+def test_generate_qa_no_requeue_when_passes_is_one(no_sleep):
+    # retry_passes=1 == old behaviour: one attempt, drop on failure.
+    boom = _FlakyClient("ignored", fail_times=99)
+    assert generate_qa("post", client=boom, model="fake", retry_passes=1) == []
+    assert boom.calls == 1
 
 
 def test_build_messages_includes_fewshot_and_post():
@@ -225,16 +275,19 @@ def test_judge_grounding_fails_open_on_unparseable():
     assert v.judged is False and v.oracle_answers is True  # fail-open keeps the example
 
 
-def test_judge_grounding_fails_open_on_exception():
-    class _Boom:
-        class chat:  # noqa: N801
-            class completions:  # noqa: N801
-                @staticmethod
-                def create(**kw):
-                    raise RuntimeError("network down")
+def test_judge_grounding_fails_open_on_exception(no_sleep):
+    boom = _FlakyClient("ignored", fail_times=99)
+    v = judge_grounding("q?", "oracle", [], client=boom, retry_passes=3)
+    assert v.judged is False and v.oracle_answers is True  # fail-open after retries
+    assert boom.calls == 3
 
-    v = judge_grounding("q?", "oracle", [], client=_Boom())
-    assert v.judged is False and v.oracle_answers is True
+
+def test_judge_grounding_recovers_after_transient_failure(no_sleep):
+    client = _FlakyClient('{"oracle_answers": true, "better_distractor": false}',
+                          fail_times=2)
+    v = judge_grounding("q?", "oracle", [], client=client, retry_passes=4)
+    assert client.calls == 3
+    assert v.judged is True and v.oracle_answers is True
 
 
 # ── Transfer entailment judge (F5) ─────────────────────────────────────
@@ -261,22 +314,66 @@ def test_judge_transfer_support_parses_and_passes_payload():
     assert "answer key" in sent and "ctx a" in sent and "q?" in sent
 
 
-def test_judge_transfer_fails_closed():
+def test_judge_transfer_fails_closed(no_sleep):
     from blog.sft_qgen import judge_transfer_support
-    # Unparseable AND exception both -> supported=False (fail-closed: never emit
-    # an unconfirmed transfer as training data).
+    # Unparseable AND exhausted-retries both -> supported=False (fail-closed:
+    # never emit an unconfirmed transfer as training data).
     v1 = judge_transfer_support("q", ["c"], "k", client=_FakeClient("rambling, no json"))
     assert v1.judged is False and v1.supported is False
 
-    class _Boom:
-        class chat:  # noqa: N801
-            class completions:  # noqa: N801
-                @staticmethod
-                def create(**kw):
-                    raise RuntimeError("down")
-
-    v2 = judge_transfer_support("q", ["c"], "k", client=_Boom())
+    boom = _FlakyClient("ignored", fail_times=99)
+    v2 = judge_transfer_support("q", ["c"], "k", client=boom, retry_passes=3)
     assert v2.judged is False and v2.supported is False
+    assert boom.calls == 3
+
+
+def test_judge_transfer_recovers_after_transient_failure(no_sleep):
+    from blog.sft_qgen import judge_transfer_support
+    # Fail-closed judge: a swallowed throttle was silent data loss. Requeue must
+    # recover the transfer rather than drop it.
+    client = _FlakyClient('{"supported": true}', fail_times=2)
+    v = judge_transfer_support("q", ["c"], "k", client=client, retry_passes=4)
+    assert client.calls == 3
+    assert v.judged is True and v.supported is True
+
+
+# ── _retry_call helper ─────────────────────────────────────────────────
+
+
+def test_retry_call_returns_on_first_success(no_sleep):
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        return "ok"
+
+    assert _retry_call(fn, passes=4) == "ok"
+    assert calls["n"] == 1  # no retries when the first attempt works
+
+
+def test_retry_call_raises_qgencallerror_after_exhausting(no_sleep):
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise RuntimeError("429 dynamic_rate_limit")
+
+    with pytest.raises(QGenCallError):
+        _retry_call(fn, passes=3)
+    assert calls["n"] == 3
+
+
+def test_retry_call_recovers_on_later_pass(no_sleep):
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("503")
+        return "recovered"
+
+    assert _retry_call(fn, passes=5) == "recovered"
+    assert calls["n"] == 3
 
 
 # ── funded-balance gate (assert_funded) ─────────────────────────────────

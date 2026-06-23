@@ -244,7 +244,17 @@ def _iter_persona(
     sources: list[PostSource], public_only: bool, min_len: int, stats: dict,
     system_fn=_DEFAULT_SYSTEM_FN, user_fn=_DEFAULT_USER_FN,
 ):
+    from django.db.models import Q
+
     qs = Post.objects.filter(source__in=sources).order_by("created_at")
+    # Reply-derived posts (those carrying reshare/reply context) are his RESPONSES,
+    # not standalone posts — they're emitted as (parent → reply) pairs by the reply
+    # objective. Emitting them ALSO as "write a post" persona targets meant ~1-in-5
+    # persona examples was a context-less reply fragment, double-counting the same
+    # assistant text and amplifying the terse-fragment prior. Exclude exactly what
+    # _iter_reply_pairs consumes so persona ⟂ reply (comment-thread leading posts,
+    # which have neither field set, stay in persona). See modal_persona_serving rule.
+    qs = qs.filter(reshared_content_text="", reply_to_text="")
     if public_only:
         qs = qs.filter(visibility=PostVisibility.PUBLIC)
     for post in qs.iterator(chunk_size=1000):
@@ -254,6 +264,7 @@ def _iter_persona(
         if _is_dirty(text) or _is_degenerate(text):
             stats["dropped_dirty"] += 1
             continue
+        stats["persona_emitted"] += 1
         yield _persona_example(post, system_fn=system_fn, user_fn=user_fn)
 
 
@@ -467,6 +478,11 @@ class Command(BaseCommand):
             help="Path to the Together API key file.",
         )
         g.add_argument(
+            "--qgen-retry-passes", type=int, default=None,
+            help="Requeue passes for a throttled Together call before dropping it "
+                 "(default: sft_qgen.DEFAULT_RETRY_PASSES). 1 = no requeue.",
+        )
+        g.add_argument(
             "--persona-file", default=None,
             help="Path to the persona system prompt (default: the FT persona, homebound-platform).",
         )
@@ -534,7 +550,7 @@ class Command(BaseCommand):
             named=opts["named"], resilience=opts["resilience"], seed=opts["system_seed"]
         )
 
-        stats = {"dropped_dirty": 0, "dropped_echo": 0}
+        stats = {"dropped_dirty": 0, "dropped_echo": 0, "persona_emitted": 0}
         generators = []
         if objective in ("persona", "both"):
             generators.append(
@@ -626,6 +642,7 @@ class Command(BaseCommand):
         persona = self._load_persona(opts["persona_file"])
         client = sft_qgen.make_together_client(opts["qgen_key"])
         model = opts["qgen_model"] or sft_qgen.DEFAULT_QGEN_MODEL
+        retry_passes = opts["qgen_retry_passes"] or sft_qgen.DEFAULT_RETRY_PASSES
 
         # Funded-balance HARD gate — runs once per build (this is the single
         # chokepoint for ALL paid buckets: grounded/source/abstention/transfer/
@@ -646,8 +663,10 @@ class Command(BaseCommand):
                 post.content_text, client=client, model=model,
                 source=PostSource(post.source).name.lower(),
                 date=_iso(post.created_at)[:10],
+                retry_passes=retry_passes,
             )
 
+        self._qgen_retry_passes = retry_passes
         return persona, client, model, qgen_fn
 
     def _contrastive_generators(self, opts, sources, stats):
@@ -737,7 +756,10 @@ class Command(BaseCommand):
 
         judge_fn = None
         if opts["relevance_qc"]:
-            judge_fn = functools.partial(sft_qgen.judge_grounding, client=client, model=model)
+            judge_fn = functools.partial(
+                sft_qgen.judge_grounding, client=client, model=model,
+                retry_passes=self._qgen_retry_passes,
+            )
 
         # Oracles = the author's own PUBLIC posts (the only thing the bot serves /
         # the retriever can surface). Random order so a capped sample is
@@ -782,7 +804,8 @@ class Command(BaseCommand):
             )))
         if opts["transfer"]:
             entail_fn = functools.partial(
-                sft_qgen.judge_transfer_support, client=client, model=model
+                sft_qgen.judge_transfer_support, client=client, model=model,
+                retry_passes=self._qgen_retry_passes,
             )
             gens.append(("transfer", sft_transfer.iter_transfer(
                 posts, qgen_fn=qgen_fn, entail_fn=entail_fn, persona_system=persona,

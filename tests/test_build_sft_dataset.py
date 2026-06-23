@@ -137,11 +137,41 @@ def test_command_emits_both_objectives_jsonl(tmp_path):
 
     lines = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines()]
     objectives = sorted(rec["meta"]["objective"] for rec in lines)
-    # 2 persona (both posts) + 1 reply (the quote) = 3
-    assert objectives == ["persona", "persona", "reply"]
+    # The plain post → persona; the reshare → reply ONLY (it's a response, not a
+    # standalone post). persona ⟂ reply: a reply-derived post is no longer also
+    # emitted as a "write a post" persona example. So 1 persona + 1 reply = 2.
+    assert objectives == ["persona", "reply"]
+    by_obj = {rec["meta"]["objective"]: rec["meta"]["source_id"] for rec in lines}
+    assert by_obj["persona"] == "plain-1"
+    assert by_obj["reply"] == "quote-1"
     for rec in lines:
         assert [m["role"] for m in rec["messages"]] == ["system", "user", "assistant"]
         assert rec["messages"][-1]["content"]  # non-empty assistant turn
+
+
+@pytest.mark.django_db
+def test_persona_excludes_reply_derived_posts(tmp_path):
+    # Regression: reply-derived posts (reshare or reply_to context) must NOT also
+    # be emitted as persona "write a post" examples — they belong only to the reply
+    # objective. Before the fix ~1-in-5 persona targets was a context-less reply
+    # fragment double-counted from the reply pairs.
+    _make_post(source_id="standalone", content_text="A genuine standalone post.")
+    _make_post(
+        source_id="reshare", content_text="My reshare commentary.",
+        reshared_content_text="The reshared parent body.",
+    )
+    _make_post(
+        source_id="convo-reply", content_text="My reply to someone.",
+        reply_to_text="The parent he is replying to.",
+    )
+    out = tmp_path / "persona.jsonl"
+    call_command(
+        "build_sft_dataset", "--objective", "persona",
+        "--sources", "twitter", "--min-len", "5", "--out", str(out),
+    )
+    ids = sorted(json.loads(ln)["meta"]["source_id"]
+                 for ln in out.read_text(encoding="utf-8").splitlines())
+    assert ids == ["standalone"]  # the two reply-derived posts are excluded
 
 
 @pytest.mark.django_db
@@ -160,10 +190,16 @@ def test_command_min_len_filters_short_posts(tmp_path):
 
 @pytest.mark.django_db
 def test_command_dedup_is_per_objective_not_cross(tmp_path):
-    # A quote post yields BOTH a persona example and a reply example whose
-    # assistant turn is the same content_text. Cross-objective dedup would wrongly
-    # drop the reply (regression: persona pass poisons the reply pass).
-    _make_post(
+    # Two DISTINCT posts whose assistant turn is the same text: a standalone post
+    # (→ persona example) and a quote post (→ reply example). Since persona ⟂ reply
+    # by construction (a reply-derived post is excluded from persona), the
+    # collision can only arise across separate posts. Cross-objective dedup would
+    # wrongly drop one; per-objective dedup keeps both (regression guard).
+    _make_post(  # standalone → persona; no reshare/reply context
+        source_id="standalone-1",
+        content_text="Same commentary text.",
+    )
+    _make_post(  # quote → reply (his reply text collides with the persona target)
         source_id="quote-1",
         content_text="Same commentary text.",
         reshared_content_text="Parent body.",

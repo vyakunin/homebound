@@ -25,11 +25,75 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# ── Requeue-on-drop: deferred retry passes past the SDK's own retries ──────
+#
+# Together's serverless ``-tput`` tier rate-limits *dynamically* (429
+# ``dynamic_rate_limit`` / 503 ``service_unavailable``) as its shared fleet load
+# and our burst shape shift. The OpenAI SDK already retries 429/5xx twice with
+# backoff; a call that still raises means those 3 attempts all failed. Before
+# this layer, the call sites swallowed that exception and returned a benign
+# sentinel ([] / fail-open / fail-closed) — i.e. a throttled call SILENTLY
+# dropped a training example. These passes requeue the dropped call a few more
+# times with exponential backoff + full jitter, so transient throttling no
+# longer costs data. The blocking sleep is intentional: a throttled worker that
+# waits in place lowers our request rate into Together's dynamic limit (good
+# traffic shaping) rather than re-bursting. Failed 429/5xx calls are not billed,
+# so extra passes cost nothing unless they succeed — which is the example we
+# wanted. Only the API-call path is retried; deterministic parse-empty /
+# unparseable results are NOT (retrying can't change them).
+DEFAULT_RETRY_PASSES = 4
+
+# Injectable seam so tests run instantly (monkeypatch ``blog.sft_qgen._sleep``).
+_sleep = time.sleep
+
+
+class QGenCallError(RuntimeError):
+    """A Together call that failed every requeue pass — a transient 429/5xx/
+    timeout that the SDK's retries plus our backoff passes could not clear.
+    Callers convert it into their own benign fallback (drop / fail-open /
+    fail-closed), but it is raised ONLY after a real requeue effort, so the
+    fallback is a last resort rather than a first-throttle silent loss."""
+
+
+def _retry_call(
+    fn,
+    *,
+    passes: int = DEFAULT_RETRY_PASSES,
+    base_delay: float = 2.0,
+    max_delay: float = 45.0,
+    rng=random.uniform,
+    label: str = "together call",
+):
+    """Run ``fn()`` up to ``passes`` times; return its result on first success.
+
+    On each attempt's exception, sleep ``uniform(0, min(max_delay, base_delay *
+    2**attempt))`` (exponential backoff + full jitter) and retry. After the last
+    pass fails, raise :class:`QGenCallError` carrying the final exception. A
+    ``passes`` of 1 means "no requeue" (one attempt, raise on failure)."""
+    last: Exception | None = None
+    for attempt in range(max(1, passes)):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — retry every transient failure
+            last = e
+            first = str(e).splitlines()[0] if str(e) else type(e).__name__
+            if attempt + 1 >= passes:
+                break
+            delay = min(max_delay, base_delay * (2 ** attempt))
+            logger.warning(
+                "%s failed (attempt %d/%d), requeueing in ≤%.0fs: %s",
+                label, attempt + 1, passes, delay, first,
+            )
+            _sleep(rng(0, delay))
+    raise QGenCallError(str(last)) from last
 
 # Together serverless route for Qwen3-235B-A22B-Instruct-2507. The "-tput" suffix
 # is the pay-per-token serverless variant (pricing.input/output non-zero); the
@@ -267,25 +331,32 @@ def generate_qa(
     temperature: float = 0.7,
     max_tokens: int = 800,
     short_post_chars: int = SHORT_POST_CHARS,
+    retry_passes: int = DEFAULT_RETRY_PASSES,
 ) -> list[QGenItem]:
     """Generate validated (question, answer-span) items for one oracle post.
 
     ``client`` is any object exposing ``.chat.completions.create`` (the real
     OpenAI client pointed at Together, or a fake in tests). Returns [] on an
     empty/garbage response rather than raising, so a single bad post never aborts
-    a long build.
+    a long build. A transient call failure is requeued ``retry_passes`` times
+    (see :func:`_retry_call`) before falling back to [] — so throttling drops an
+    example only after a real retry effort, not on first 429/503.
     """
     messages = build_messages(post_text, source=source, date=date, fewshot=fewshot)
-    try:
+
+    def _call() -> str:
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        raw = resp.choices[0].message.content or ""
-    except Exception as e:  # noqa: BLE001 — never let one post kill the build
-        logger.warning("qgen call failed: %s", e)
+        return resp.choices[0].message.content or ""
+
+    try:
+        raw = _retry_call(_call, passes=retry_passes, label="qgen")
+    except QGenCallError as e:  # all passes exhausted — drop this post, don't abort
+        logger.warning("qgen call dropped after %d passes: %s", retry_passes, e)
         return []
     return parse_items(raw, post_text, short_post_chars=short_post_chars)
 
@@ -372,20 +443,27 @@ def judge_grounding(
     model: str = DEFAULT_QGEN_MODEL,
     temperature: float = 0.0,
     max_tokens: int = 60,
+    retry_passes: int = DEFAULT_RETRY_PASSES,
 ) -> GroundingVerdict:
     """Grade whether the oracle answers the question (relevance-QC for grounded
     examples). Fails OPEN — on any error returns ``oracle_answers=True,
     judged=False`` so a flaky judge never silently discards good data; the caller
-    keeps the example but can see it was not judged."""
+    keeps the example but can see it was not judged. A transient call failure is
+    requeued ``retry_passes`` times before failing open, so throttling lowers
+    judge *coverage* only after a real retry effort."""
     messages = _judge_messages(question, oracle_text, distractor_texts)
-    try:
+
+    def _call() -> str:
         resp = client.chat.completions.create(
             model=model, messages=messages,
             temperature=temperature, max_tokens=max_tokens,
         )
-        raw = resp.choices[0].message.content or ""
-    except Exception as e:  # noqa: BLE001 — a judge failure must not abort the build
-        logger.warning("relevance-QC judge call failed: %s", e)
+        return resp.choices[0].message.content or ""
+
+    try:
+        raw = _retry_call(_call, passes=retry_passes, label="relevance-QC judge")
+    except QGenCallError as e:  # all passes exhausted — fail open (keep, unjudged)
+        logger.warning("relevance-QC judge dropped after %d passes: %s", retry_passes, e)
         return GroundingVerdict(oracle_answers=True, better_distractor=False, judged=False)
     verdict = _parse_verdict(raw)
     if verdict is None:
@@ -466,19 +544,28 @@ def judge_transfer_support(
     model: str = DEFAULT_QGEN_MODEL,
     temperature: float = 0.0,
     max_tokens: int = 40,
+    retry_passes: int = DEFAULT_RETRY_PASSES,
 ) -> TransferVerdict:
     """Entailment gate for the transfer bucket: does the neighbor CONTEXT support
     reaching the held-out ANSWER KEY? Fails CLOSED (``supported=False,
-    judged=False``) — an unconfirmed transfer must never become training data."""
+    judged=False``) — an unconfirmed transfer must never become training data. A
+    transient call failure is requeued ``retry_passes`` times before failing
+    closed, so throttling drops a transfer example only after a real retry
+    effort (this judge is fail-CLOSED, so a swallowed throttle was silent
+    data loss — exactly what the requeue prevents)."""
     messages = _transfer_messages(question, context_texts, answer_key)
-    try:
+
+    def _call() -> str:
         resp = client.chat.completions.create(
             model=model, messages=messages,
             temperature=temperature, max_tokens=max_tokens,
         )
-        raw = resp.choices[0].message.content or ""
-    except Exception as e:  # noqa: BLE001 — a judge failure must not abort the build
-        logger.warning("transfer entailment judge call failed: %s", e)
+        return resp.choices[0].message.content or ""
+
+    try:
+        raw = _retry_call(_call, passes=retry_passes, label="transfer entailment judge")
+    except QGenCallError as e:  # all passes exhausted — fail closed (drop)
+        logger.warning("transfer judge dropped after %d passes: %s", retry_passes, e)
         return TransferVerdict(supported=False, judged=False)
     verdict = _parse_transfer(raw)
     if verdict is None:
