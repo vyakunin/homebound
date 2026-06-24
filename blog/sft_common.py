@@ -118,6 +118,18 @@ def _is_parent_echo(response: str, parent: str) -> bool:
     return p in r and len(p) >= 0.8 * len(r)  # response = parent + a trivial add
 
 
+def _target_copied_into(target: str, text: str) -> bool:
+    """True when ``target`` appears verbatim (normalized) inside ``text`` and is
+    long enough to be a real copy, not a coincidental short quote — the exact
+    predicate ``scripts/verify_sft_dataset.py`` HARD-gates as a voice-bucket echo
+    (normalized target ⊆ user turn, ≥``_MIN_ECHO_LEN``). Use in any generator that
+    assembles a retrieval/user turn from corpus posts, so a content-duplicate of
+    the target post can never leak the answer into the question. Kept in lockstep
+    with the gate's normalization + length floor."""
+    t = _norm_for_compare(target)
+    return len(t) >= _MIN_ECHO_LEN and t in _norm_for_compare(text)
+
+
 # An explicit "I'm reposting someone else's text in full" lead — these persona
 # bodies are dominated by a THIRD PARTY's words (a reposted Navalny statement,
 # a quoted article), not the author's voice, and run to many thousands of chars

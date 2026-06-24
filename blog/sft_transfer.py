@@ -34,7 +34,13 @@ from blog import bot, bot_retrieval
 from blog.bot_retrieval import BotHit
 from blog.models import Post, PostChunk, PostVisibility
 from blog.sft_abstention import _abstain_target
-from blog.sft_common import SftExample, _base_meta, _is_degenerate, _is_dirty
+from blog.sft_common import (
+    SftExample,
+    _base_meta,
+    _is_degenerate,
+    _is_dirty,
+    _target_copied_into,
+)
 from blog.sft_grounded import _strip_wrapping_quotes
 from blog.sft_qgen import QGenItem, TransferVerdict
 
@@ -154,8 +160,29 @@ def iter_transfer(
             continue
 
         block = _neighbor_hits(neighbors, top_k)
+        # Drop any neighbor that leaks P's answer span verbatim into the retrieval
+        # block. This is a content-duplicate of P with a DIFFERENT pk (so the
+        # pk-level kNN exclusion misses it) whose distance fell outside the
+        # near-dup band (so the band-low check — which only inspects the single
+        # nearest neighbor — misses it too). Left in, the target is trivially
+        # copyable from its own user turn: the voice-bucket echo that
+        # scripts/verify_sft_dataset.py HARD-gates. Lockstep via the shared
+        # _target_copied_into (same normalize + 40-char floor as the gate).
+        block = [h for h in block if not _target_copied_into(answer_key, h.snippet)]
+        if not block:
+            stats["transfer_self_leak"] = stats.get("transfer_self_leak", 0) + 1
+            continue
         neighbor_texts = [h.snippet for h in block]
         verdict = entail_fn(item.question, neighbor_texts, answer_key)
+
+        user_content = build_user_fn(item.question, block)
+        # Defensive lockstep guard: the assembled user turn must never contain the
+        # target verbatim (the exact predicate the pre-train HARD gate flags).
+        # Neighbor filtering above should already prevent it; this catches a leak
+        # via any other part of the built turn.
+        if _target_copied_into(answer_key, user_content):
+            stats["transfer_self_leak"] = stats.get("transfer_self_leak", 0) + 1
+            continue
 
         meta = _base_meta(post, "transfer")
         meta.update(
@@ -179,7 +206,7 @@ def iter_transfer(
         yield SftExample(
             messages=[
                 {"role": "system", "content": persona_system},
-                {"role": "user", "content": build_user_fn(item.question, block)},
+                {"role": "user", "content": user_content},
                 {"role": "assistant", "content": target},
             ],
             meta=meta,

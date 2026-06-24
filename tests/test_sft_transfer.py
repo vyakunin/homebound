@@ -134,3 +134,50 @@ def test_limit_caps_emitted_examples():
         entail=lambda *a: TransferVerdict(supported=True), limit=2,
     )
     assert len(out) == 2
+
+
+# A content-duplicate of P (same text, DIFFERENT pk) is missed by the pk-level kNN
+# exclusion, and if its distance lands inside the band the band-low check (which
+# only inspects the single nearest neighbor) misses it too. Left in the block it
+# leaks P's answer span verbatim into the user turn — the voice-bucket echo the
+# pre-train HARD gate (scripts/verify_sft_dataset.py) rejects. Regression for the
+# v6 build's lone HARD failure (L22598, a google_plus transfer self-leak).
+_LEAK_ANSWER = "очень крутой дима ищет ковырятелей в ядре дайте знать и резюме"
+
+
+def _dup_neighbor(text, dist, *, slug="dup", pk=98765):
+    """A neighbor post whose body is `text` (a content-duplicate of P)."""
+    return (_post(slug, text, pk=pk), dist)
+
+
+def test_self_leak_only_neighbor_skips_candidate():
+    p = _post("p", "достаточно длинный осмысленный пост про дениса и резюме да")
+    item = QGenItem("кого ищет дима?", _LEAK_ANSWER, "ru")
+    out, stats = _run(
+        [p],
+        # the sole in-band neighbor is a verbatim duplicate of P's answer span
+        knn={"p": [_dup_neighbor(_LEAK_ANSWER, 0.2)]},
+        qgen={"p": [item]},
+        entail=lambda *a: TransferVerdict(supported=True),
+    )
+    assert out == []
+    assert stats["transfer_self_leak"] == 1
+
+
+def test_self_leak_neighbor_dropped_clean_neighbor_salvages_example():
+    p = _post("p", "достаточно длинный осмысленный пост про дениса и резюме да")
+    item = QGenItem("кого ищет дима?", _LEAK_ANSWER, "ru")
+    out, stats = _run(
+        [p],
+        # nearest is the leaking duplicate (in band); a clean neighbor also supports
+        knn={"p": [_dup_neighbor(_LEAK_ANSWER, 0.2)] + _neigh(("clean", 0.3))},
+        qgen={"p": [item]},
+        entail=lambda *a: TransferVerdict(supported=True),
+    )
+    assert len(out) == 1
+    ex = out[0]
+    assert ex.meta["bucket"] == "transfer"
+    # the leaking duplicate is gone from the user turn; the clean neighbor remains
+    assert _LEAK_ANSWER not in ex.messages[1]["content"].casefold()
+    assert "/post/clean/" in ex.messages[1]["content"]
+    assert "transfer_self_leak" not in stats
