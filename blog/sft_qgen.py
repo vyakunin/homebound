@@ -188,9 +188,58 @@ If no good question exists, output [].
 """
 
 
-def _system_prompt(fewshot: tuple[str, ...]) -> str:
+# Stance-biased variant for the drift buckets (transfer / raft-no-oracle): steer
+# qgen toward opinion/taste/theme/habit questions and AWAY from narrow single-fact
+# lookups, which the drift router would only route to abstain anyway. Same verbatim
+# answer_span contract. Validated 2026-06-24 (scripts/oneoff/test_drift_route.py):
+# returns [] on a fact-only post (e.g. a criminal-code statute) where the standard
+# prompt would mint "сколько дают…".
+_QGEN_STANCE_SYSTEM = """\
+You generate realistic VISITOR QUESTIONS for a "talk to the author" chatbot.
+
+The author is a private person — terse, ironic, bilingual Russian/English. His
+chatbot answers strangers using his past social-media posts. Given ONE of his past
+posts, output 1-3 questions a real visitor might type, plus the exact verbatim
+excerpt of the post that answers each.
+
+PREFER questions about his OPINION, TAKE, TASTE, VALUES, ATTITUDE, a RECURRING
+THEME, or his TYPICAL BEHAVIOR / what he DOES in a situation — the kind a stranger
+asks to get HIS VIEW ("что думаешь про…", "как относишься к…", "что бы ты сделал…",
+"что делаешь, когда…", "what's your take on…", "do you like…"). These generalize:
+his stance/habits show up across many posts, so the bot can answer them even when
+this exact post isn't retrieved.
+
+AVOID narrow single-fact lookups whose answer is one number/price/date/count/
+address/proper-name/one-off-event that lives ONLY in this post (e.g. "how much did X
+cost", "how many people came", "when exactly"). Those don't generalize and force the
+bot to guess. If the post only supports such a fact-lookup question, return [].
+
+QUESTIONS must:
+- sound like these REAL examples (casual, short, lowercase ok, slang/profanity ok),
+  NOT polished QA-benchmark prose:
+{fewshot}
+- be asked by a stranger: do NOT quote the post or say "your post"/"you wrote". Ask
+  about the topic/opinion as if simply curious.
+- address the author DIRECTLY (second person / impersonal), NEVER third person
+  (no «автор», «он/она», "the author", "this guy").
+- be in the SAME language as the post. Never mix languages in one question.
+- be varied; no near-duplicates.
+
+ANSWER_SPAN must:
+- be a VERBATIM substring copied from the post (his own words) that best expresses
+  his view on the question — the minimal relevant part (whole post if it's all
+  relevant). NEVER paraphrased/translated/reworded.
+
+Output ONLY a JSON array, nothing else:
+[{{"question":"...","answer_span":"...","lang":"ru"|"en"}}]
+If no good stance question exists, output [].
+"""
+
+
+def _system_prompt(fewshot: tuple[str, ...], *, stance: bool = False) -> str:
     bullets = "\n".join(f"    • {q}" for q in fewshot)
-    return _QGEN_SYSTEM.format(fewshot=bullets)
+    base = _QGEN_STANCE_SYSTEM if stance else _QGEN_SYSTEM
+    return base.format(fewshot=bullets)
 
 
 def build_messages(
@@ -199,8 +248,10 @@ def build_messages(
     source: str = "",
     date: str = "",
     fewshot: tuple[str, ...] = DEFAULT_FEWSHOT,
+    stance: bool = False,
 ) -> list[dict]:
-    """Assemble the chat messages for one oracle post."""
+    """Assemble the chat messages for one oracle post. ``stance=True`` uses the
+    stance-biased system prompt for the drift buckets."""
     ctx = []
     if source:
         ctx.append(f"source: {source}")
@@ -209,7 +260,7 @@ def build_messages(
     header = f"Past post by the author ({', '.join(ctx)}):" if ctx else "Past post by the author:"
     user = f'{header}\n"""\n{post_text.strip()}\n"""\n\nGenerate the questions now.'
     return [
-        {"role": "system", "content": _system_prompt(fewshot)},
+        {"role": "system", "content": _system_prompt(fewshot, stance=stance)},
         {"role": "user", "content": user},
     ]
 
@@ -332,6 +383,7 @@ def generate_qa(
     max_tokens: int = 800,
     short_post_chars: int = SHORT_POST_CHARS,
     retry_passes: int = DEFAULT_RETRY_PASSES,
+    stance: bool = False,
 ) -> list[QGenItem]:
     """Generate validated (question, answer-span) items for one oracle post.
 
@@ -340,9 +392,12 @@ def generate_qa(
     empty/garbage response rather than raising, so a single bad post never aborts
     a long build. A transient call failure is requeued ``retry_passes`` times
     (see :func:`_retry_call`) before falling back to [] — so throttling drops an
-    example only after a real retry effort, not on first 429/503.
+    example only after a real retry effort, not on first 429/503. ``stance=True``
+    uses the stance-biased prompt for the drift buckets (fewer fact-lookups).
     """
-    messages = build_messages(post_text, source=source, date=date, fewshot=fewshot)
+    messages = build_messages(
+        post_text, source=source, date=date, fewshot=fewshot, stance=stance
+    )
 
     def _call() -> str:
         resp = client.chat.completions.create(
@@ -571,6 +626,173 @@ def judge_transfer_support(
     if verdict is None:
         logger.warning("transfer judge returned unparseable verdict: %r", raw[:200])
         return TransferVerdict(supported=False, judged=False)
+    return verdict
+
+
+# ── Drift router (positive-topic-drift bucket) ────────────────────────────
+#
+# Replaces the strict transfer entailment gate for the drift buckets. The old
+# gate asked "do the neighbors ENTAIL P's specific claim?" — too strict for
+# stance questions, so ~90% of close-neighbor examples fell to abstain. This
+# 3-way router instead asks "SHOULD the bot answer here?", routing on the kind
+# of question rather than literal entailment:
+#   • SYNTHESIZE      — opinion / stance / taste / theme / habit / "what do you
+#                       do" questions the author's OWN posts support → answer in
+#                       his voice (target = his verbatim post; never LLM-written);
+#   • ABSTAIN_FACT    — answering needs a specific quantitative/identity fact or a
+#                       one-off event outcome that lives only in the held-out post;
+#   • ABSTAIN_NOSUPPORT — context is off-topic / only reshares, no own material.
+# Fails CLOSED to ABSTAIN_NOSUPPORT: an unconfirmed synthesis is never emitted as
+# one (same safety posture as the transfer gate it replaces).
+
+_DRIFT_ROUTES = ("SYNTHESIZE", "ABSTAIN_FACT", "ABSTAIN_NOSUPPORT")
+
+
+@dataclass(frozen=True, slots=True)
+class DriftVerdict:
+    """How a close-neighbor (oracle-held-out) example should be routed.
+
+    ``route`` ∈ SYNTHESIZE / ABSTAIN_FACT / ABSTAIN_NOSUPPORT. ``synthesize`` is
+    the convenience predicate (route == SYNTHESIZE). ``judged`` False on a failed/
+    unparseable call → caller treats as NOT synthesize (fail-CLOSED: never emit an
+    unconfirmed synthesis as training data)."""
+
+    route: str
+    reason: str = ""
+    judged: bool = True
+
+    @property
+    def synthesize(self) -> bool:
+        return self.route == "SYNTHESIZE"
+
+
+# Validated 2026-06-24 on 40 real abstain examples (60%→75% flip after the
+# behavior/habit loosening) — see scripts/oneoff/test_drift_route.py. Keep the
+# wording in sync with that harness if you re-tune.
+_DRIFT_JUDGE_SYSTEM = """\
+You route how a "talk to the author" chatbot should handle ONE visitor question.
+
+The author is a private person; his bot answers strangers using his past posts.
+For this question the retriever surfaced some CONTEXT posts but MISSED his own best
+post on it — that post (the ANSWER KEY) is shown to you but is NOT in the bot's
+context. Decide what the bot should be trained to do here.
+
+Choose ONE route:
+
+SYNTHESIZE — answer in the author's voice from his related posts. Pick this when:
+  • the QUESTION asks for his opinion, take, taste, attitude, values, a recurring
+    theme, his general approach, OR his TYPICAL BEHAVIOR / HABITS / what he DOES in
+    a kind of situation — i.e. a "what do you think / would you / how do you feel /
+    what's your take / what do you do when / how do you handle / how do you usually"
+    question, NOT a single lookup-able fact; AND
+  • the CONTEXT has enough of the author's OWN posts (lines tagged
+    "you wrote this yourself" — IGNORE reshared / third-party posts) on the same
+    theme that answering in his voice is faithful to him.
+  The answer need NOT appear in the CONTEXT. A stance or typical-behavior CONSISTENT
+  with his related posts is exactly what we want the bot to synthesize. Be GENEROUS:
+  most opinion / taste / stance / habit / "what do you do" questions are SYNTHESIZE
+  when his own posts show his attitude or conduct in that domain — even if the
+  ANSWER KEY's exact wording or the precise step-by-step isn't reachable from the
+  context. A general behavior question is NOT a fact-lookup just because the exact
+  actions aren't spelled out in the context.
+
+ABSTAIN_FACT — pick this ONLY when answering correctly REQUIRES a specific
+  QUANTITATIVE or IDENTITY fact, or a SINGLE ONE-OFF EVENT'S specific outcome, that
+  lives only in the ANSWER KEY and cannot be inferred from his general stance/
+  behavior: a number, price, count, date, duration, address, proper name, a specific
+  URL/title, or what specifically happened in one particular past episode.
+  Producing the answer would be GUESSING that specific. (e.g. "how much does X cost",
+  "how many people came", "when exactly did you travel", "what's the referral
+  reward", "what does THIS specific in-joke/postcard mean".)
+  Do NOT use ABSTAIN_FACT for a general "what do you do / how do you handle / how do
+  you usually" behavior question — that is SYNTHESIZE when his posts show his conduct.
+
+ABSTAIN_NOSUPPORT — pick this when the CONTEXT is off-topic, or has no first-person
+  posts on the theme (only reshares / unrelated material), so there's no real basis
+  to answer in his voice.
+
+Output ONLY JSON, nothing else:
+{"route":"SYNTHESIZE"|"ABSTAIN_FACT"|"ABSTAIN_NOSUPPORT","reason":"<=12 words"}
+"""
+
+
+def _drift_messages(
+    question: str, context: list[tuple[str, bool]], answer_key: str
+) -> list[dict]:
+    """``context`` is [(post_text, is_own)] — is_own True for the author's own
+    posts, False for reshares (the judge is told to ignore reshares for 'his own
+    material')."""
+    blocks = []
+    for i, (txt, own) in enumerate(context, 1):
+        if not txt.strip():
+            continue
+        tag = "you wrote this yourself" if own else (
+            "RESHARED / third-party (ignore for 'his own material')"
+        )
+        blocks.append(f"[CONTEXT {i}] ({tag})\n{txt.strip()}")
+    ctx = "\n\n".join(blocks) or "(none)"
+    user = (
+        f"QUESTION:\n{question.strip()}\n\n"
+        f"CONTEXT posts (retriever surfaced these; the answer post is NOT here):\n{ctx}\n\n"
+        f"ANSWER KEY (the author's real post on this — held out, NOT in context):\n"
+        f"{answer_key.strip()}\n\nRoute now."
+    )
+    return [
+        {"role": "system", "content": _DRIFT_JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def _parse_drift(raw: str) -> DriftVerdict | None:
+    text = raw.strip()
+    m = _FENCE_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or obj.get("route") not in _DRIFT_ROUTES:
+        return None
+    return DriftVerdict(route=obj["route"], reason=str(obj.get("reason", ""))[:120])
+
+
+def judge_drift_route(
+    question: str,
+    context: list[tuple[str, bool]],
+    answer_key: str,
+    *,
+    client,
+    model: str = DEFAULT_QGEN_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 80,
+    retry_passes: int = DEFAULT_RETRY_PASSES,
+) -> DriftVerdict:
+    """3-way drift router (see ``_DRIFT_JUDGE_SYSTEM``). Fails CLOSED
+    (``route=ABSTAIN_NOSUPPORT, judged=False``) on a failed/unparseable call — an
+    unconfirmed synthesis must never become training data. A transient call failure
+    is requeued ``retry_passes`` times before failing closed."""
+    messages = _drift_messages(question, context, answer_key)
+
+    def _call() -> str:
+        resp = client.chat.completions.create(
+            model=model, messages=messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content or ""
+
+    try:
+        raw = _retry_call(_call, passes=retry_passes, label="drift router")
+    except QGenCallError as e:
+        logger.warning("drift router dropped after %d passes: %s", retry_passes, e)
+        return DriftVerdict(route="ABSTAIN_NOSUPPORT", reason="judge-failed", judged=False)
+    verdict = _parse_drift(raw)
+    if verdict is None:
+        logger.warning("drift router returned unparseable verdict: %r", raw[:200])
+        return DriftVerdict(route="ABSTAIN_NOSUPPORT", reason="unparseable", judged=False)
     return verdict
 
 

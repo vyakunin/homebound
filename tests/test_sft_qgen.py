@@ -337,6 +337,60 @@ def test_judge_transfer_recovers_after_transient_failure(no_sleep):
     assert v.judged is True and v.supported is True
 
 
+# ── drift router (positive-topic-drift 3-way gate) ──────────────────────
+
+
+def test_judge_drift_route_synthesize_and_payload():
+    from blog.sft_qgen import judge_drift_route
+    client = _FakeClient('{"route":"SYNTHESIZE","reason":"stance clear"}')
+    v = judge_drift_route(
+        "what do you think about X?",
+        [("my own take on X", True), ("someone else reshared", False)],
+        "the held-out answer post",
+        client=client,
+    )
+    assert v.judged is True and v.synthesize is True and v.route == "SYNTHESIZE"
+    sent = client.calls[0]["messages"][-1]["content"]
+    assert "you wrote this yourself" in sent      # own-post tag
+    assert "RESHARED" in sent                      # reshare tag (judge ignores these)
+    assert "held-out answer post" in sent
+    assert "what do you think about X?" in sent
+
+
+def test_judge_drift_route_abstain_fact():
+    from blog.sft_qgen import judge_drift_route
+    v = judge_drift_route(
+        "how much did it cost?", [("ctx", True)], "key",
+        client=_FakeClient('{"route":"ABSTAIN_FACT","reason":"needs price"}'),
+    )
+    assert v.route == "ABSTAIN_FACT" and v.synthesize is False and v.judged is True
+
+
+def test_judge_drift_route_fails_closed(no_sleep):
+    from blog.sft_qgen import judge_drift_route
+    # Unparseable / unknown-route / exhausted retries all -> ABSTAIN_NOSUPPORT,
+    # judged=False (fail-closed: never emit an unconfirmed synthesis).
+    v1 = judge_drift_route("q", [("c", True)], "k", client=_FakeClient("no json here"))
+    assert v1.judged is False and v1.route == "ABSTAIN_NOSUPPORT" and v1.synthesize is False
+
+    v2 = judge_drift_route("q", [("c", True)], "k",
+                           client=_FakeClient('{"route":"MAYBE"}'))
+    assert v2.judged is False and v2.synthesize is False  # unknown route rejected
+
+    boom = _FlakyClient("ignored", fail_times=99)
+    v3 = judge_drift_route("q", [("c", True)], "k", client=boom, retry_passes=3)
+    assert v3.judged is False and v3.route == "ABSTAIN_NOSUPPORT" and boom.calls == 3
+
+
+def test_qgen_stance_prompt_selected():
+    from blog.sft_qgen import build_messages
+    std = build_messages("some post", stance=False)[0]["content"]
+    stance = build_messages("some post", stance=True)[0]["content"]
+    assert std != stance
+    assert "TYPICAL BEHAVIOR" in stance and "AVOID narrow single-fact" in stance
+    assert "TYPICAL BEHAVIOR" not in std
+
+
 # ── _retry_call helper ─────────────────────────────────────────────────
 
 
