@@ -696,36 +696,30 @@ def answer(
     user_msg = _build_user_message(question, hits)
 
     t0 = time.monotonic()
-    fallback_from_openrouter = False
-    try:
-        if is_openrouter:
-            try:
-                text, input_tokens, output_tokens, cache_read, resolved_model = \
-                    _call_openrouter(model, persona, user_msg, max_tokens)
-            except (httpx.HTTPError, ValueError) as e:
-                # OpenRouter call failed end-to-end — every allowlisted
-                # downstream errored, or the request was rejected at the
-                # OR edge. Fall back to Haiku on Anthropic so the visitor
-                # still gets an answer (slightly worse RU phrasing, but
-                # the persona + retrieval are unchanged).
-                if not _api_key():
-                    # No Anthropic key to fall back to. Let the original
-                    # error surface.
-                    raise
-                logger.warning(
-                    "OpenRouter call failed (%s); falling back to %s",
-                    e, ANTHROPIC_FALLBACK_MODEL,
-                )
-                fallback_from_openrouter = True
-                text, input_tokens, output_tokens, cache_read, resolved_model = \
-                    _call_anthropic(
-                        ANTHROPIC_FALLBACK_MODEL, persona, user_msg, max_tokens,
-                    )
-        else:
+    text = input_tokens = output_tokens = cache_read = resolved_model = None
+
+    # Persona-first: the fine-tuned voice LoRA (Modal) is the primary model for
+    # its configured languages. Any failure — cold-start timeout, HTTP error,
+    # Modal spend-cap, or the daily $ guard — transparently falls through to the
+    # existing per-language model (the "old model"). The visitor always gets an
+    # answer; the only cost of a persona failure is a slightly less on-voice one.
+    persona_used = False
+    if _should_try_persona(lang, forced_model=model):
+        try:
             text, input_tokens, output_tokens, cache_read, resolved_model = \
-                _call_anthropic(model, persona, user_msg, max_tokens)
-    except (APIError, httpx.HTTPError, ValueError) as e:
-        raise BotUnavailableError(f"LLM call failed: {e}") from e
+                _call_persona(persona, user_msg, max_tokens, lang=lang)
+            persona_used = True
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(
+                "persona model unavailable (%s); falling back to %s", e, model,
+            )
+
+    if not persona_used:
+        try:
+            text, input_tokens, output_tokens, cache_read, resolved_model = \
+                _call_old_model(model, persona, user_msg, max_tokens, is_openrouter)
+        except (APIError, httpx.HTTPError, ValueError) as e:
+            raise BotUnavailableError(f"LLM call failed: {e}") from e
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     _cache_write(
@@ -750,7 +744,142 @@ def answer(
     )
 
 
+# ── Persona model (Modal vLLM) ────────────────────────────────────────
+
+
+def _persona_langs() -> set[str]:
+    raw = getattr(settings, "BOT_PERSONA_LANGS", "ru,en") or ""
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def _persona_spent_usd_today() -> float:
+    """Estimate today's (UTC) Modal GPU spend on persona calls, from the sum of
+    persona-call latencies in BotTranscript × the configured $/hr. Cold starts
+    inflate latency, which is correct — Modal bills wall-clock GPU time."""
+    try:
+        from datetime import timezone
+
+        from django.db.models import Sum
+        from django.utils import timezone as dj_tz
+
+        from blog.models import BotTranscript
+
+        model_name = getattr(settings, "BOT_PERSONA_MODEL", "homebound-persona")
+        usd_per_hour = float(getattr(settings, "BOT_PERSONA_USD_PER_HOUR", 3.95))
+        start = dj_tz.now().astimezone(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        agg = (
+            BotTranscript.objects
+            .filter(model=model_name, created_at__gte=start)
+            .aggregate(ms=Sum("latency_ms"))
+        )
+        total_ms = agg.get("ms") or 0
+        return (total_ms / 1000.0 / 3600.0) * usd_per_hour
+    except Exception as e:  # noqa: BLE001 — budget read must never block answering
+        logger.warning("persona spend lookup failed (assuming 0): %s", e)
+        return 0.0
+
+
+def _should_try_persona(lang: str, *, forced_model: str | None) -> bool:
+    """Persona is primary for its configured languages when configured and the
+    daily $ guard isn't tripped. A caller-forced model (e.g. the Sonnet premium
+    tier) does NOT suppress persona — persona is the voice; the forced model
+    becomes the fallback if persona fails."""
+    if not getattr(settings, "BOT_PERSONA_BASE_URL", ""):
+        return False
+    if lang not in _persona_langs():
+        return False
+    cap = float(getattr(settings, "BOT_PERSONA_DAILY_USD", 0) or 0)
+    if cap > 0 and _persona_spent_usd_today() >= cap:
+        logger.info("persona daily $ cap (%.2f) reached — using fallback model", cap)
+        return False
+    return True
+
+
+def _call_persona(
+    persona: str, user_msg: str, max_tokens: int, *, lang: str,
+) -> tuple[str, int, int, int, str]:
+    """Call the Modal vLLM persona endpoint (OpenAI-compatible chat completions)
+    with the validated serve params. Returns
+    (text, input_tokens, output_tokens, cache_read=0, model). Raises
+    httpx.HTTPError / ValueError on any failure so the caller falls back.
+
+    The endpoint scales to zero, so this may block through a ~1-3 min cold
+    start (BOT_PERSONA_TIMEOUT_S); the streaming view emits heartbeats meanwhile
+    so the visitor's connection stays alive."""
+    base = getattr(settings, "BOT_PERSONA_BASE_URL", "").rstrip("/")
+    if not base:
+        raise ValueError("BOT_PERSONA_BASE_URL not configured")
+    model = getattr(settings, "BOT_PERSONA_MODEL", "homebound-persona")
+    timeout = float(getattr(settings, "BOT_PERSONA_TIMEOUT_S", 240))
+    headers = {"Content-Type": "application/json"}
+    key = getattr(settings, "BOT_PERSONA_PROXY_KEY", "")
+    secret = getattr(settings, "BOT_PERSONA_PROXY_SECRET", "")
+    if key and secret:  # Modal requires_proxy_auth headers
+        headers["Modal-Key"] = key
+        headers["Modal-Secret"] = secret
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": persona},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": float(getattr(settings, "BOT_PERSONA_TEMPERATURE", 0.7)),
+        "top_p": float(getattr(settings, "BOT_PERSONA_TOP_P", 0.8)),
+        "presence_penalty": float(getattr(settings, "BOT_PERSONA_PRESENCE_PENALTY", 1.5)),
+        # vLLM-only sampler param + non-thinking chat template (the Instruct-2507
+        # base is non-thinking, but pin it so a template change can't leak a
+        # "Thinking Process:" preamble — the SFT targets carry no CoT).
+        "top_k": int(getattr(settings, "BOT_PERSONA_TOP_K", 20)),
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(f"{base}/chat/completions", headers=headers, json=payload)
+    if resp.status_code >= 400:
+        raise ValueError(f"persona HTTP {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content") or ""
+    if not text.strip():
+        raise ValueError("persona returned empty content")
+    usage = data.get("usage") or {}
+    return (
+        _strip_model_artifacts(text.strip()),
+        int(usage.get("prompt_tokens", 0) or 0),
+        int(usage.get("completion_tokens", 0) or 0),
+        0,
+        model,
+    )
+
+
 # ── Provider adapters ─────────────────────────────────────────────────
+
+
+def _call_old_model(
+    model: str, persona: str, user_msg: str, max_tokens: int, is_openrouter: bool,
+) -> tuple[str, int, int, int, str]:
+    """The pre-persona model path: OpenRouter (with end-to-end fall back to
+    Anthropic Haiku) or Anthropic directly. Extracted so the persona-first
+    branch in answer() can call it as the fallback."""
+    if not is_openrouter:
+        return _call_anthropic(model, persona, user_msg, max_tokens)
+    try:
+        return _call_openrouter(model, persona, user_msg, max_tokens)
+    except (httpx.HTTPError, ValueError) as e:
+        # OpenRouter failed end-to-end — every allowlisted downstream errored,
+        # or the request was rejected at the OR edge. Fall back to Haiku on
+        # Anthropic so the visitor still gets an answer (slightly worse RU
+        # phrasing, but persona + retrieval are unchanged).
+        if not _api_key():
+            raise  # No Anthropic key to fall back to — surface the original error.
+        logger.warning(
+            "OpenRouter call failed (%s); falling back to %s",
+            e, ANTHROPIC_FALLBACK_MODEL,
+        )
+        return _call_anthropic(
+            ANTHROPIC_FALLBACK_MODEL, persona, user_msg, max_tokens,
+        )
 
 
 def _call_anthropic(

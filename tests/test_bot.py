@@ -878,5 +878,202 @@ def test_openrouter_provider_payload_uses_allowlist():
     assert "Novita" not in order
 
 
+@pytest.mark.django_db
+@override_settings(
+    BOT_PERSONA_BASE_URL="https://x.modal.run/v1",
+    BOT_PERSONA_MODEL="homebound-persona",
+    BOT_PERSONA_LANGS="ru,en", BOT_PERSONA_DAILY_USD=5.0,
+)
+def test_persona_first_used_when_configured(monkeypatch):
+    """When the persona endpoint is configured and the language is in scope,
+    it is the PRIMARY model — the old per-language model is not called."""
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    calls = {"persona": 0, "or": 0}
+
+    def _persona(persona, user_msg, max_tokens, *, lang):
+        calls["persona"] += 1
+        return ("ответ персоны", 120, 40, 0, "homebound-persona")
+
+    def _or_boom(*a, **kw):
+        calls["or"] += 1
+        raise AssertionError("old model must not run when persona succeeds")
+
+    monkeypatch.setattr(bot_module, "_call_persona", _persona)
+    monkeypatch.setattr(bot_module, "_call_openrouter", _or_boom)
+    _make_public_post("p1", "t", "тестовый пост", year=2021)
+
+    resp = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "как дела?"}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, resp.content
+    assert resp.json()["model"] == "homebound-persona"
+    assert calls == {"persona": 1, "or": 0}
+
+
+@pytest.mark.django_db
+@override_settings(
+    BOT_PERSONA_BASE_URL="https://x.modal.run/v1", BOT_PERSONA_LANGS="ru,en",
+    BOT_MODEL_RU="deepseek/deepseek-chat", BOT_DEFAULT_MODEL="claude-haiku-4-5",
+)
+def test_persona_failure_falls_back_to_old_model(monkeypatch):
+    """A persona failure (cold-start timeout / HTTP error) transparently falls
+    through the full old-model chain (OpenRouter → Haiku)."""
+    import httpx
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    fake = _FakeAnthropic()
+    monkeypatch.setattr(bot_module, "Anthropic", lambda **kw: fake)
+
+    def _persona_boom(*a, **kw):
+        raise httpx.ConnectError("modal cold-start timeout")
+
+    def _or_boom(*a, **kw):
+        raise httpx.ConnectError("OR down too")
+
+    monkeypatch.setattr(bot_module, "_call_persona", _persona_boom)
+    monkeypatch.setattr(bot_module, "_call_openrouter", _or_boom)
+    _make_public_post("p1", "t", "пост про кота", year=2021)
+
+    resp = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "как зовут кота тут?"}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, resp.content
+    assert resp.json()["model"].startswith("claude-haiku")
+
+
+@pytest.mark.django_db
+@override_settings(
+    BOT_PERSONA_BASE_URL="https://x.modal.run/v1", BOT_PERSONA_LANGS="ru,en",
+    BOT_PERSONA_DAILY_USD=5.0, BOT_PERSONA_USD_PER_HOUR=3.95,
+    BOT_PERSONA_MODEL="homebound-persona", BOT_MODEL_RU="deepseek/deepseek-chat",
+)
+def test_persona_daily_cap_skips_persona(monkeypatch):
+    """Once today's estimated Modal spend reaches the daily $ cap, persona is
+    skipped and the cheap old model answers instead."""
+    from blog import bot as bot_module
+    from blog.models import BotTranscript
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    # ~$5.49 of persona GPU time already today (5000s × $3.95/hr) → over $5 cap.
+    BotTranscript.objects.create(
+        ip_hash="x", session_token="", question="q", answer="a",
+        model="homebound-persona", latency_ms=5_000_000,
+    )
+
+    def _persona_forbidden(*a, **kw):
+        raise AssertionError("persona must be skipped when over the daily cap")
+
+    def _or_ok(model, persona, user_msg, max_tokens):
+        return ("ответ от запасной модели", 10, 5, 0, "deepseek/deepseek-chat-v3")
+
+    monkeypatch.setattr(bot_module, "_call_persona", _persona_forbidden)
+    monkeypatch.setattr(bot_module, "_call_openrouter", _or_ok)
+    _make_public_post("p1", "t", "пост", year=2021)
+
+    resp = Client().post(
+        "/api/bot/ask/?bot=1",
+        data=json.dumps({"question": "вопрос по-русски тут?"}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200, resp.content
+    assert "deepseek" in resp.json()["model"]
+
+
+def test_persona_payload_uses_decided_serve_params(monkeypatch):
+    """_call_persona must send the validated serve params (temp 0.7, top_p 0.8,
+    top_k 20, presence_penalty 1.5) + non-thinking chat template, to the
+    OpenAI-compatible chat-completions endpoint."""
+    from blog import bot as bot_module
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+        def json(self):
+            return {"choices": [{"message": {"content": "ок"}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, url, headers=None, json=None):
+            captured.update(url=url, headers=headers, json=json)
+            return _Resp()
+
+    import httpx as _httpx
+    orig = _httpx.Client
+    _httpx.Client = _Client
+    try:
+        with override_settings(BOT_PERSONA_BASE_URL="https://x.modal.run/v1",
+                               BOT_PERSONA_MODEL="homebound-persona"):
+            bot_module._call_persona("PERSONA", "USERMSG", 256, lang="ru")
+    finally:
+        _httpx.Client = orig
+
+    assert captured["url"] == "https://x.modal.run/v1/chat/completions"
+    p = captured["json"]
+    assert p["temperature"] == 0.7 and p["top_p"] == 0.8 and p["top_k"] == 20
+    assert p["presence_penalty"] == 1.5
+    assert p["chat_template_kwargs"] == {"enable_thinking": False}
+    assert p["model"] == "homebound-persona"
+    assert p["messages"][0] == {"role": "system", "content": "PERSONA"}
+    assert p["messages"][1] == {"role": "user", "content": "USERMSG"}
+
+
+@pytest.mark.django_db
+def test_bot_ask_stream_emits_status_then_done(monkeypatch):
+    """The SSE endpoint streams at least one `status` heartbeat then a final
+    `done` event carrying the rendered answer + model."""
+    from blog import bot as bot_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    fake = bot_module.BotAnswer(
+        answer="привет!", cited_slugs=["p1"], cited_titles=["t"],
+        model="homebound-persona", input_tokens=1, output_tokens=1,
+        cache_read_input_tokens=0, latency_ms=10, cache_hit=False,
+    )
+    monkeypatch.setattr(bot_module, "answer", lambda *a, **k: fake)
+    _make_public_post("p1", "t", "пост", year=2021)
+
+    resp = Client().post(
+        "/api/bot/ask_stream/?bot=1",
+        data=json.dumps({"question": "привет?"}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp["Content-Type"].startswith("text/event-stream")
+    assert resp["X-Accel-Buffering"] == "no"
+    body = b"".join(resp.streaming_content).decode()
+    assert "event: status" in body
+    assert "event: done" in body
+    assert "homebound-persona" in body
+
+
+@pytest.mark.django_db
+def test_bot_ask_stream_preflight_error_stays_json(monkeypatch):
+    """Pre-flight failures (here: empty question) return a JSON error with the
+    right status, NOT an event-stream — so the widget surfaces them normally."""
+    resp = Client().post(
+        "/api/bot/ask_stream/?bot=1",
+        data=json.dumps({"question": ""}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "question_required"
+    assert "text/event-stream" not in resp["Content-Type"]
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))

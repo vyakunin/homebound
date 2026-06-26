@@ -124,6 +124,39 @@
   // the server ignores this token but it costs nothing to keep sending.
   var hasGateToken = new URLSearchParams(window.location.search).get('bot') === '1';
 
+  function showBotError(msg, status) {
+    document.getElementById('bot-error-message').textContent =
+      msg || ('Error ' + (status || ''));
+    // For 429s the API includes WhatsApp/Telegram URLs; surface the hidden
+    // cap-handoff anchors only on a cap hit. Anchors are pre-rendered server-side.
+    document.getElementById('bot-cap-handoff').hidden = status !== 429;
+    errorEl.hidden = false;
+  }
+
+  function renderBotAnswer(body) {
+    answerEl.innerHTML = body.answer_html || '';
+    if (body.sources && body.sources.length) {
+      sourcesList.innerHTML = body.sources.map(function(s) {
+        var url = (s.url || '').replace(/"/g, '&quot;');
+        var title = (s.title || s.slug || '').replace(/</g, '&lt;');
+        return '<li><a href="' + url + '">' + title + '</a></li>';
+      }).join('');
+      sourcesWrap.hidden = false;
+    }
+    result.hidden = false;
+  }
+
+  // Non-streaming fallback (older browsers / no ReadableStream, or the stream
+  // endpoint is unreachable). Same payloads as the SSE path's done/error events.
+  async function askBuffered(bodyJson) {
+    var resp = await fetch('/api/bot/ask/', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: bodyJson,
+    });
+    var body = await resp.json().catch(function() { return {}; });
+    if (!resp.ok) { showBotError(body.message, resp.status); return; }
+    renderBotAnswer(body);
+  }
+
   form.addEventListener('submit', async function(e) {
     e.preventDefault();
     var question = (textarea.value || '').trim();
@@ -135,42 +168,68 @@
     submit.disabled = true;
     hint.textContent = 'Thinking…';
 
+    var bodyJson = JSON.stringify({
+      question: question,
+      bot: hasGateToken ? '1' : undefined,
+    });
+
     try {
-      var resp = await fetch('/api/bot/ask/', {
+      var resp = await fetch('/api/bot/ask_stream/', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          question: question,
-          bot: hasGateToken ? '1' : undefined,
-        }),
+        body: bodyJson,
       });
-      var body = await resp.json().catch(function() { return {}; });
-
+      var ctype = resp.headers.get('Content-Type') || '';
+      // Pre-flight failures (gate/validation/throttle) come back as JSON, not
+      // a stream — surface them the same way as the buffered endpoint.
       if (!resp.ok) {
-        document.getElementById('bot-error-message').textContent =
-          body.message || ('Error ' + resp.status);
-        // For 429s the API includes WhatsApp/Telegram URLs; surface the
-        // hidden cap-handoff anchors only when they're populated. The
-        // anchors themselves are pre-rendered from server context.
-        var handoff = document.getElementById('bot-cap-handoff');
-        handoff.hidden = resp.status !== 429;
-        errorEl.hidden = false;
+        var errBody = await resp.json().catch(function() { return {}; });
+        showBotError(errBody.message, resp.status);
+        return;
+      }
+      // 200 but not an event-stream, or no streaming support → buffered fallback.
+      if (ctype.indexOf('text/event-stream') === -1 || !resp.body || !resp.body.getReader) {
+        await askBuffered(bodyJson);
         return;
       }
 
-      answerEl.innerHTML = body.answer_html || '';
-      if (body.sources && body.sources.length) {
-        sourcesList.innerHTML = body.sources.map(function(s) {
-          var url = (s.url || '').replace(/"/g, '&quot;');
-          var title = (s.title || s.slug || '').replace(/</g, '&lt;');
-          return '<li><a href="' + url + '">' + title + '</a></li>';
-        }).join('');
-        sourcesWrap.hidden = false;
+      // Parse the SSE stream: rotating `status` heartbeats, then `done`/`error`.
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buf = '';
+      var settled = false;
+      while (!settled) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, {stream: true});
+        var frames = buf.split('\n\n');
+        buf = frames.pop();  // keep any incomplete trailing frame
+        for (var fi = 0; fi < frames.length; fi++) {
+          var ev = 'message', dataStr = '';
+          var lines = frames[fi].split('\n');
+          for (var li = 0; li < lines.length; li++) {
+            if (lines[li].indexOf('event:') === 0) ev = lines[li].slice(6).trim();
+            else if (lines[li].indexOf('data:') === 0) dataStr += lines[li].slice(5).trim();
+          }
+          var data = {};
+          try { data = JSON.parse(dataStr); } catch (_) {}
+          if (ev === 'status') {
+            hint.textContent = data.message || 'Thinking…';
+          } else if (ev === 'done') {
+            renderBotAnswer(data); settled = true;
+          } else if (ev === 'error') {
+            showBotError(data.message, 200); settled = true;
+          }
+        }
       }
-      result.hidden = false;
     } catch (e) {
-      errorEl.textContent = 'Network error — please try again.';
-      errorEl.hidden = false;
+      // Stream setup/read failed — try the buffered endpoint before giving up.
+      try {
+        await askBuffered(bodyJson);
+      } catch (e2) {
+        errorEl.textContent = 'Network error — please try again.';
+        errorEl.hidden = false;
+      }
     } finally {
       submit.disabled = false;
       hint.textContent = '';

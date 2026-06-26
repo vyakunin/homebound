@@ -416,34 +416,27 @@ class BotWidgetView(TemplateView):
 from django.views.decorators.csrf import csrf_exempt as _csrf_exempt
 
 
-@_csrf_exempt
-@require_POST
-def bot_ask_api(request):
-    """JSON endpoint the widget posts to. Two layers of throttling
-    (per-IP + site-wide) on top of nginx's own rate-limit zones, and a
-    sign-off gate that mirrors the widget view: anonymous visitors hit
-    a 404 here too if BOT_PUBLIC is False and they don't carry the
-    ``?bot=1`` token (we accept it on either the GET querystring or
-    inside the JSON body for the API-style usage).
+def _bot_preflight(request):
+    """Shared gate/validation/throttle/tier logic for both bot endpoints.
 
-    CSRF-exempt: the bot is public/unauthenticated, so CSRF tokens add
-    no real security here — the only thing CSRF would block is
-    cross-origin POSTs, but the bot deliberately accepts them (e.g. an
-    RSS reader embedding the widget on a third-party page is fine)."""
+    Returns ``(error_response, None)`` on any pre-flight failure (the caller
+    returns it verbatim — same JSON error shapes for both the JSON and SSE
+    endpoints), or ``(None, ctx)`` on success, where ctx carries
+    question / ip_hash / session_token / chosen_model. Raises Http404 for the
+    sign-off gate (mirrors the widget view)."""
     import json as _json
     from django.http import Http404
 
-    from blog.bot import BotUnavailableError, answer as bot_answer
     from blog.bot import is_available as bot_is_available
     from blog.bot_throttle import (
         extract_client_ip, ip_hash_for, is_ip_rate_limited, is_site_rate_limited,
+        sonnet_eligible,
     )
-    from blog.models import BotTranscript
 
     try:
         payload = _json.loads(request.body or b"{}")
     except _json.JSONDecodeError:
-        return JsonResponse({"error": "invalid_json"}, status=400)
+        return JsonResponse({"error": "invalid_json"}, status=400), None
 
     is_gate_open = getattr(settings, "BOT_PUBLIC", False)
     gate_token_ok = (
@@ -455,19 +448,18 @@ def bot_ask_api(request):
 
     question = str(payload.get("question", "")).strip()
     if not question:
-        return JsonResponse({"error": "question_required"}, status=400)
+        return JsonResponse({"error": "question_required"}, status=400), None
     if len(question) > 4000:
-        return JsonResponse({"error": "question_too_long"}, status=400)
+        return JsonResponse({"error": "question_too_long"}, status=400), None
 
     if not bot_is_available():
         return JsonResponse(
             {"error": "bot_unavailable",
              "message": "The bot service is currently offline."},
             status=503,
-        )
+        ), None
 
-    ip = extract_client_ip(request)
-    ip_hash = ip_hash_for(ip)
+    ip_hash = ip_hash_for(extract_client_ip(request))
 
     # Cap-exhausted handoff message — sent for both per-IP and site-wide
     # 429s. Visitor gets the user's public DM links instead of nothing.
@@ -475,7 +467,6 @@ def bot_ask_api(request):
         "Мой LLM-бюджет на сегодня кончился. "
         "Если есть вопрос — напиши мне в Telegram или WhatsApp, ссылки ниже."
     )
-
     if is_site_rate_limited():
         return JsonResponse(
             {"error": "site_rate_limited",
@@ -483,7 +474,7 @@ def bot_ask_api(request):
              "whatsapp_url": getattr(settings, "BOT_CONTACT_WHATSAPP_URL", ""),
              "telegram_url": getattr(settings, "BOT_CONTACT_TELEGRAM_URL", "")},
             status=429,
-        )
+        ), None
     if is_ip_rate_limited(ip_hash):
         return JsonResponse(
             {"error": "ip_rate_limited",
@@ -492,71 +483,184 @@ def bot_ask_api(request):
              "whatsapp_url": getattr(settings, "BOT_CONTACT_WHATSAPP_URL", ""),
              "telegram_url": getattr(settings, "BOT_CONTACT_TELEGRAM_URL", "")},
             status=429,
-        )
+        ), None
 
-    # Sonnet-tier eligibility: one premium call per IP per day, only
-    # for non-trivial questions. Trivial / repeated questions stay on
-    # the per-language default — Sonnet doesn't add much for one-liners.
-    #
-    # When upgrading to Sonnet we override the per-language default;
-    # otherwise pass model=None so the bot's language router picks
-    # BOT_MODEL_RU vs BOT_MODEL_EN based on the question's language.
-    from blog.bot_throttle import sonnet_eligible
-    if sonnet_eligible(ip_hash, question):
-        chosen_model: str | None = getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
-    else:
-        chosen_model = None
-
+    # Sonnet-tier eligibility: one premium call per IP per day, only for
+    # non-trivial questions. With persona-first serving this becomes the
+    # premium *fallback* tier — persona is tried first regardless.
+    chosen_model = (
+        getattr(settings, "BOT_PREMIUM_MODEL", "claude-sonnet-4-6")
+        if sonnet_eligible(ip_hash, question) else None
+    )
     session_token = str(payload.get("session_token", ""))[:64]
+    return None, {
+        "question": question, "ip_hash": ip_hash,
+        "session_token": session_token, "chosen_model": chosen_model,
+    }
+
+
+def _log_bot_transcript(ctx, *, result=None, error=None):
+    from blog.models import BotTranscript
+    if error is not None:
+        BotTranscript.objects.create(
+            ip_hash=ctx["ip_hash"], session_token=ctx["session_token"],
+            question=ctx["question"], answer="", error=str(error),
+        )
+        return
+    BotTranscript.objects.create(
+        ip_hash=ctx["ip_hash"], session_token=ctx["session_token"],
+        question=ctx["question"], answer=result.answer,
+        cited_slugs=result.cited_slugs, model=result.model,
+        input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+        cache_read_input_tokens=result.cache_read_input_tokens,
+        latency_ms=result.latency_ms,
+    )
+
+
+def _render_bot_answer(result):
+    """Result → JSON-serialisable payload (answer, markdown HTML, sources, model).
+
+    Trust boundary: only the bot's own model responses pass through this path,
+    so we accept the default Markdown→HTML without bleach sanitization (adversary
+    model is "the model writes weird markdown", not "injects <script>"). `nl2br`
+    keeps the model's single-newline line breaks."""
+    import markdown as _md
+    sources = [
+        {"slug": s, "title": t, "url": f"/post/{s}/"}
+        for s, t in zip(result.cited_slugs, result.cited_titles, strict=True)
+    ]
+    return {
+        "answer": result.answer,
+        "answer_html": _md.markdown(
+            result.answer, extensions=['extra', 'nl2br', 'sane_lists']),
+        "sources": sources,
+        "model": result.model,
+    }
+
+
+@_csrf_exempt
+@require_POST
+def bot_ask_api(request):
+    """JSON endpoint the widget posts to (buffered, single response). Kept for
+    non-streaming clients + as the widget's fallback; the widget prefers the
+    SSE endpoint so a Modal cold start doesn't 524 at the Cloudflare edge.
+
+    CSRF-exempt: the bot is public/unauthenticated, so CSRF adds no security
+    here — the only thing it would block is cross-origin POSTs, which the bot
+    deliberately accepts (e.g. an RSS reader embedding the widget)."""
+    from blog.bot import BotUnavailableError, answer as bot_answer
+
+    err, ctx = _bot_preflight(request)
+    if err is not None:
+        return err
     try:
-        result = bot_answer(question, model=chosen_model)
+        result = bot_answer(ctx["question"], model=ctx["chosen_model"])
     except BotUnavailableError as e:
         _log.error("bot_ask_api hard fail: %s", e, exc_info=True)
-        BotTranscript.objects.create(
-            ip_hash=ip_hash, session_token=session_token,
-            question=question, answer="", error=str(e),
-        )
+        _log_bot_transcript(ctx, error=e)
         return JsonResponse(
             {"error": "bot_unavailable",
              "message": "The bot couldn't generate an answer — please try again later."},
             status=503,
         )
+    _log_bot_transcript(ctx, result=result)
+    return JsonResponse(_render_bot_answer(result))
 
-    BotTranscript.objects.create(
-        ip_hash=ip_hash,
-        session_token=session_token,
-        question=question,
-        answer=result.answer,
-        cited_slugs=result.cited_slugs,
-        model=result.model,
-        input_tokens=result.input_tokens,
-        output_tokens=result.output_tokens,
-        cache_read_input_tokens=result.cache_read_input_tokens,
-        latency_ms=result.latency_ms,
-    )
 
-    sources = [
-        {"slug": s, "title": t, "url": f"/post/{s}/"}
-        for s, t in zip(result.cited_slugs, result.cited_titles, strict=True)
-    ]
-    # Server-side markdown rendering. Trust boundary: only the bot's
-    # own Anthropic responses pass through this path, so we accept the
-    # default Markdown→HTML output without bleach sanitization (the
-    # adversary model is "Claude writes weird markdown", not "Claude
-    # injects <script>"). The `extra` extension covers fenced code +
-    # tables; `nl2br` turns single newlines into <br> so the widget
-    # respects the model's line breaks.
-    import markdown as _md
-    answer_html = _md.markdown(
-        result.answer,
-        extensions=['extra', 'nl2br', 'sane_lists'],
-    )
-    return JsonResponse({
-        "answer": result.answer,
-        "answer_html": answer_html,
-        "sources": sources,
-        "model": result.model,
-    })
+# Rotating, informative status lines streamed during generation. The persona
+# model scales to zero, so the first question after a quiet spell pays a GPU
+# cold start (~1-3 min) — be honest about it and keep the visitor company.
+_BOT_STATUS_LINES = (
+    "Listening…",
+    "Digging through the archive…",
+    "Pulling up old posts…",
+    "Finding the relevant memories…",
+    "Composing a reply…",
+)
+_BOT_WARMING_LINES = (
+    "Warming up the model — the first question after a quiet spell spins up a "
+    "GPU, so this one takes about a minute. Hang tight.",
+    "Still booting the GPU… this only happens on the first question in a while.",
+    "Loading the model weights… thanks for your patience.",
+    "Nearly there — spinning the model up to speed.",
+)
+
+
+def _bot_status_line(elapsed: int, i: int) -> str:
+    if elapsed < 8:
+        return _BOT_STATUS_LINES[i % len(_BOT_STATUS_LINES)]
+    return f"{_BOT_WARMING_LINES[i % len(_BOT_WARMING_LINES)]} ({elapsed}s)"
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _bot_event_stream(ctx):
+    """Generator yielding SSE frames: periodic `status` heartbeats while the
+    answer is generated on a worker thread, then a final `done` (or `error`).
+    Heartbeats keep bytes flowing so Cloudflare/nginx don't time out a slow
+    (cold-start) generation."""
+    import threading
+    import time as _time
+
+    from blog.bot import BotUnavailableError, answer as bot_answer
+
+    box: dict = {}
+    finished = threading.Event()
+
+    def _run():
+        from django.db import connection
+        try:
+            box["result"] = bot_answer(ctx["question"], model=ctx["chosen_model"])
+        except BotUnavailableError as e:
+            box["error"] = str(e)
+        except Exception as e:  # noqa: BLE001 — surface as a clean error event
+            box["error"] = str(e)
+        finally:
+            finished.set()
+            connection.close()  # worker thread owns its own DB connection
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    start = _time.monotonic()
+    yield _sse("status", {"message": _bot_status_line(0, 0), "elapsed": 0})
+    i = 1
+    while not finished.wait(timeout=2.5):
+        elapsed = int(_time.monotonic() - start)
+        yield _sse("status", {"message": _bot_status_line(elapsed, i), "elapsed": elapsed})
+        i += 1
+
+    if "error" in box:
+        _log.error("bot_ask_stream hard fail: %s", box["error"])
+        _log_bot_transcript(ctx, error=box["error"])
+        yield _sse("error", {
+            "message": "The bot couldn't generate an answer — please try again later."})
+        return
+    result = box["result"]
+    _log_bot_transcript(ctx, result=result)
+    yield _sse("done", _render_bot_answer(result))
+
+
+@_csrf_exempt
+@require_POST
+def bot_ask_stream(request):
+    """SSE variant of bot_ask_api. The persona model is served on a scale-to-zero
+    Modal endpoint whose cold start (~1-3 min) far exceeds Cloudflare's ~100s
+    edge timeout, so a single buffered request would 524. This streams `status`
+    heartbeats while the answer is generated on a worker thread, then a final
+    `done`/`error` event. Same pre-flight as the JSON endpoint; pre-flight
+    failures return the identical JSON error responses."""
+    from django.http import StreamingHttpResponse
+
+    err, ctx = _bot_preflight(request)
+    if err is not None:
+        return err
+    resp = StreamingHttpResponse(
+        _bot_event_stream(ctx), content_type="text/event-stream")
+    resp["Cache-Control"] = "no-cache"
+    resp["X-Accel-Buffering"] = "no"  # disable nginx response buffering for SSE
+    return resp
 
 
 @require_GET

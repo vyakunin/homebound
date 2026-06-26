@@ -202,6 +202,36 @@ BOT_MODEL_EN = os.environ.get('BOT_MODEL_EN', BOT_DEFAULT_MODEL)
 BOT_SONNET_PER_IP_PER_DAY = int(os.environ.get('BOT_SONNET_PER_IP_PER_DAY', '1'))
 BOT_SONNET_MIN_WORDS = int(os.environ.get('BOT_SONNET_MIN_WORDS', '6'))
 
+# ── Persona model (the fine-tuned voice LoRA, served on Modal H100) ──────
+# The v7 persona LoRA has no serverless path; it lives on a scale-to-zero
+# Modal vLLM endpoint (OpenAI-compatible). When BOT_PERSONA_BASE_URL is set
+# it becomes the PRIMARY model for the languages in BOT_PERSONA_LANGS; on any
+# failure (cold-start timeout, HTTP error, Modal spend-cap, or the daily $ cap
+# below being hit) the bot transparently falls back to the existing per-language
+# model (BOT_MODEL_RU / BOT_MODEL_EN → OpenRouter → Haiku). Empty base url =
+# feature off (current OpenRouter/Haiku behavior, unchanged).
+BOT_PERSONA_BASE_URL = os.environ.get('BOT_PERSONA_BASE_URL', '').rstrip('/')
+BOT_PERSONA_MODEL = os.environ.get('BOT_PERSONA_MODEL', 'homebound-persona')
+BOT_PERSONA_LANGS = os.environ.get('BOT_PERSONA_LANGS', 'ru,en')
+# Generous per-request timeout: the endpoint scales to zero, so a cold start is
+# ~1-3 min. The streaming view emits heartbeats meanwhile, so the visitor's
+# connection (and Cloudflare's ~100s edge limit) is kept alive with flowing bytes.
+BOT_PERSONA_TIMEOUT_S = float(os.environ.get('BOT_PERSONA_TIMEOUT_S', '240'))
+# Soft daily Modal-spend guard. Estimated as wall-clock GPU time billed by Modal
+# (sum of persona-call latencies for the UTC day) × BOT_PERSONA_USD_PER_HOUR.
+# When today's estimate >= the cap, new requests skip persona and use the cheap
+# fallback model — bounding worst-case GPU spend on a public endpoint.
+BOT_PERSONA_DAILY_USD = float(os.environ.get('BOT_PERSONA_DAILY_USD', '5.0'))
+BOT_PERSONA_USD_PER_HOUR = float(os.environ.get('BOT_PERSONA_USD_PER_HOUR', '3.95'))  # H100
+# Modal proxy-auth credentials (set when serve() runs with requires_proxy_auth).
+BOT_PERSONA_PROXY_KEY = os.environ.get('BOT_PERSONA_PROXY_KEY', '')
+BOT_PERSONA_PROXY_SECRET = os.environ.get('BOT_PERSONA_PROXY_SECRET', '')
+# Decided serve params (validated against the v7 endpoint; see SFT_PLAN.md).
+BOT_PERSONA_TEMPERATURE = float(os.environ.get('BOT_PERSONA_TEMPERATURE', '0.7'))
+BOT_PERSONA_TOP_P = float(os.environ.get('BOT_PERSONA_TOP_P', '0.8'))
+BOT_PERSONA_TOP_K = int(os.environ.get('BOT_PERSONA_TOP_K', '20'))
+BOT_PERSONA_PRESENCE_PENALTY = float(os.environ.get('BOT_PERSONA_PRESENCE_PENALTY', '1.5'))
+
 # Public contact handles for the cap-exhausted handoff message and the
 # widget's footer DM buttons. Read from env so they can be rotated /
 # disabled without a code change.
