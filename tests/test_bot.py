@@ -218,6 +218,35 @@ def _hit(slug, *, kw_rank=None, sem_dist=None, post_id=None, snippet="",
     )
 
 
+def test_build_user_message_reframes_retrieval_as_memory_not_numbered_posts():
+    """Deixis fix (regression): retrieval is framed as un-numbered first-person
+    memory, NOT a numbered '## Post N — /post/slug/' list. The post-shaped block
+    was exactly what the model pointed at ('в первом посте', 'вот этот пост') —
+    dangling references the visitor can't resolve. Also strips snippet-internal
+    lead pointers the model would otherwise copy verbatim (q27)."""
+    from blog.bot import _build_user_message
+    hits = [
+        _hit("a", snippet="успешный успех"),
+        _hit("b", snippet="вот это, кстати, крутой пост. Про образование всё верно."),
+        _hit("c", snippet="чужая мысль про успех", repost_author="vofitserov"),
+    ]
+    msg = _build_user_message("как стать успешным?", hits)
+    # No pointable, post-shaped / slugged structure survives.
+    assert "## Post" not in msg
+    assert "/post/" not in msg
+    assert "SOURCE:" not in msg
+    # Memory framing present.
+    assert "это просто твоя память" in msg
+    # Snippet-internal lead pointer neutralised ("вот это," gone; rest kept).
+    assert "вот это, кстати, крутой пост" not in msg
+    assert "кстати, крутой пост" in msg
+    # Reshare attribution inlined (not voiced first-person).
+    assert "перепост от vofitserov" in msg
+    # Question still delimited and present.
+    assert "# Visitor question" in msg
+    assert "как стать успешным?" in msg
+
+
 def test_fuse_dedups_identical_text_across_distinct_posts():
     """Near-duplicate posts (same body, different id/slug — FB+X cross-posts,
     Wayback+extension overlap) survive id-dedup but render to the SAME SOURCE

@@ -427,18 +427,37 @@ def _cache_write(
 # ── Prompt assembly ───────────────────────────────────────────────────
 
 
+# Retrieval is framed as the author's OWN MEMORY, not a numbered list of
+# "posts". The numbered, slugged, post-shaped block we used before was exactly
+# what the model pointed at ("в первом посте", "вот этот пост") — dangling
+# deictic references a visitor (who never sees this block) can't resolve.
+# Reframing it into un-numbered first-person memory fragments removes the
+# referent. Validated as a serve-time deixis fix (3/50 → 0/50, EN→EN 10/12 →
+# 11/12) against the v7 persona model; see homebound-platform docs/SFT_PLAN.md.
+_MEMORY_HEADER = (
+    "# Что ты когда-то писал и думал\n"
+    "(визитёр этого НЕ видит — это просто твоя память. Не нумеруй её, "
+    "не называй «постами», не показывай списком — просто вспоминай суть.)"
+)
+
+
 def _build_user_message(question: str, hits: Iterable[BotHit]) -> str:
-    parts: list[str] = ["# Past posts that may help you answer\n"]
+    parts: list[str] = [_MEMORY_HEADER, ""]
     hits = list(hits)
     if not hits:
-        parts.append("\n*(No relevant past posts found.)*\n")
+        parts.append("*(Ничего подходящего в памяти не всплыло.)*")
     else:
+        # Year-coverage note is an aggregate (not a numbered post), so it stays
+        # — it's orthogonal to the deixis fix and counters the "lost interest
+        # after year Y" hallucination.
         timeline = _topic_timeline_summary(hits)
         if timeline:
             parts.append(timeline)
-        for i, h in enumerate(hits, 1):
-            parts.append(_render_hit(i, h))
-    parts.append("\n---\n\n# Visitor question\n")
+        for h in hits:
+            fragment = _render_hit(h)
+            if fragment:
+                parts.append(fragment)
+    parts.append("\n# Visitor question\n")
     parts.append(question.strip())
     return "\n".join(parts)
 
@@ -511,68 +530,70 @@ def _topic_timeline_summary(hits: list[BotHit]) -> str:
     )
 
 
-def _render_hit(idx: int, h: BotHit) -> str:
-    """Format one retrieved post with an explicit ownership SOURCE line.
+# Leading pure-pointer phrases a snippet body may open with. Some retrieved
+# snippets are the author's OWN old posts that themselves contain deixis (q27:
+# "вот это, кстати, крутой пост" — he was looking at something in 2016), which
+# the model regurgitates verbatim. Minimal, meaning-preserving neutralisation.
+_DEIXIS_LEAD: list[tuple[re.Pattern, object]] = [
+    (re.compile(r"^\s*вот этот пост[,.]?\s*", re.I), ""),
+    (re.compile(r"^\s*вот это[,.]?\s*(кстати[,.]?\s*)?", re.I),
+     lambda m: m.group(1) or ""),
+    (re.compile(r"^\s*this post[,.]?\s*", re.I), ""),
+    (re.compile(r"^\s*(the )?first post[,.]?\s*", re.I), ""),
+]
+# Inline pointer determiners → neutral demonstrative (light, to preserve voice).
+_DEIXIS_INLINE: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bвот этот пост\b", re.I), "эта мысль"),
+    (re.compile(r"\bвот это\b", re.I), "это"),
+]
 
-    Three shapes, picked by which of (repost_author, repost_excerpt) is set:
 
-    SOURCE lines address the model in the second person ("you") so it never
-    sees itself referred to as "Vladimir" in the third person:
+def _strip_deixis(body: str) -> str:
+    """Neutralise pointer phrases inside a retrieved snippet so the model has
+    nothing deictic to lift into its answer."""
+    b = body or ""
+    for rx, repl in _DEIXIS_LEAD:
+        b = rx.sub(repl, b, count=1)  # type: ignore[arg-type]
+    for rx, repl in _DEIXIS_INLINE:
+        b = rx.sub(repl, b)
+    return b.strip()
 
-    1. Your own post (no repost_author) →
-         SOURCE: you wrote this yourself.
 
-    2. Pure repost (repost_author set, no separate excerpt — snippet IS
-       the reshared text) →
-         SOURCE: you reshared this from <author>. The text below is
-         <author>'s words, NOT yours…
+def _render_hit(h: BotHit) -> str:
+    """Format one retrieved post as an un-numbered first-person memory fragment.
 
-    3. Repost + your own commentary (both content_text and
-       reshared_content_text non-empty) →
-         SOURCE: your own commentary, attached to a repost from
-         <author>. Two labelled sections follow.
+    Attribution is inlined parenthetically rather than as a verbose, slugged,
+    post-shaped SOURCE header, so there is no enumerable structure the model can
+    point at ("в первом посте"). The body is deixis-stripped; returns '' when
+    nothing survives (drop the fragment). Three shapes by which of
+    (repost_author, repost_excerpt) is set — same ownership semantics as before:
 
-    Persona's "Handling retrieved content" section explains how to use
-    each SOURCE shape; this function's job is just to make the
-    attribution structurally unambiguous in the prompt.
+    1. Your own post (no repost_author)          → no attribution prefix.
+    2. Pure reshare (repost_author, no excerpt)  → "(перепост от X — его слова…)"
+       — the first-person-misattribution + @-handle safety is kept inline.
+    3. Commentary + repost (both set)            → "(твой комментарий к перепосту…)"
     """
-    date_str = h.created_at_iso[:10] if h.created_at_iso else "unknown date"
-    lines: list[str] = [f"\n## Post {idx} — /post/{h.slug}/ ({date_str})"]
-    if h.title:
-        lines.append(f"**{h.title}**")
-
     if not h.repost_author:
-        lines.append("SOURCE: you wrote this yourself.")
-        lines.append("---")
-        lines.append(h.snippet)
+        prefix = ""
+        body = h.snippet
     elif h.repost_excerpt:
-        # You wrote commentary AND the reshared body is separately
-        # captured. Two labelled sections.
-        lines.append(
-            f"SOURCE: your own commentary, attached to a repost "
-            f"from {h.repost_author}."
-        )
-        lines.append("---")
-        lines.append(f"*Your commentary:*\n{h.snippet}")
-        lines.append(
-            f"\n*Reposted from {h.repost_author} (NOT your words):*\n"
-            f"{h.repost_excerpt}"
+        prefix = f"(твой комментарий к перепосту от {h.repost_author}) "
+        body = (
+            f"{h.snippet}\n(перепост от {h.repost_author}, его слова, не твои: "
+            f"{h.repost_excerpt.strip()})"
         )
     else:
-        # Pure reshare — the snippet itself is the reshared text.
-        # @-handles inside the text are flagged so the model knows the
-        # reshared author may themselves be quoting/tagging someone else.
-        lines.append(
-            f"SOURCE: you reshared this from {h.repost_author}. "
-            f"The text below is {h.repost_author}'s words, NOT yours. "
-            f"If it contains an @-handle (e.g. @rap_anacondaz = Russian band "
-            f"Anacondaz), that's a third party you're indirectly "
-            f"endorsing by resharing. Do NOT quote this text in the first "
-            f"person."
+        # Pure reshare — keep the attribution-safety note inline so the model
+        # never voices reshared text in the first person.
+        prefix = (
+            f"(перепост от {h.repost_author} — его слова, не твои; не цитируй "
+            f"от первого лица; @-handle внутри = третья сторона) "
         )
-        lines.append("---")
-        lines.append(h.snippet)
-    return "\n".join(lines)
+        body = h.snippet
+    body = _strip_deixis(body)
+    if not body:
+        return ""
+    return f"— {prefix}{body}"
 
 
 # ── Entry point ───────────────────────────────────────────────────────
