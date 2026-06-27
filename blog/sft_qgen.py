@@ -95,10 +95,13 @@ def _retry_call(
             _sleep(rng(0, delay))
     raise QGenCallError(str(last)) from last
 
-# Together serverless route for Qwen3-235B-A22B-Instruct-2507. The "-tput" suffix
-# is the pay-per-token serverless variant (pricing.input/output non-zero); the
-# bare / "-FP8" ids are dedicated-endpoint-only decoys (see together_finetune.md).
-DEFAULT_QGEN_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+# Together serverless Q-gen model. Was Qwen3-235B-A22B-Instruct-2507-tput until
+# Together deprecated that serverless route on 2026-07-10 (vendor migration target
+# was MiniMax-M3). Verify any candidate with a REAL chat/completions call — the
+# /v1/models pricing field is a decoy (several non-zero-priced ids 400 as
+# "non-serverless"; see together_finetune.md). MiniMax-M3 verified serverless +
+# clean RU JSON output (no thinking-leak) 2026-06-27.
+DEFAULT_QGEN_MODEL = "MiniMaxAI/MiniMax-M3"
 TOGETHER_BASE_URL = "https://api.together.xyz/v1"
 DEFAULT_KEY_PATH = "~/tokens/together_api_key"
 

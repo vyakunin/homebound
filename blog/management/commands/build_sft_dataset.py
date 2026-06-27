@@ -471,7 +471,7 @@ class Command(BaseCommand):
         )
         g.add_argument(
             "--qgen-model", default=None,
-            help="Together model id for Q-gen (default: Qwen3-235B serverless).",
+            help="Together model id for Q-gen (default: MiniMax-M3 serverless).",
         )
         g.add_argument(
             "--qgen-key", default="~/tokens/together_api_key",
