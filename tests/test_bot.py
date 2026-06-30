@@ -506,6 +506,136 @@ def test_rerank_skips_trivial_pool_no_call(monkeypatch):
     assert bot_retrieval._rerank("q", single, date_ids=set()) == single
 
 
+# ── Recall fix: semantic post-fanout + matched-chunk rerank ────────────
+# (SFT_PLAN "Retrieval recall gap": a colloquial query under-recalls a topic
+# that lives in one long post — «ты болел недавно?» -> the Ramsay-Hunt post,
+# whose best chunk ranks ~#47. These lock the mechanics; the end-to-end
+# semantic-recall proof against real embeddings is scripts/recall_golden.py,
+# which the SQLite test suite can't run.)
+
+
+def _chunk_hit(slug, *, post_id, snippet, rerank_text="", repost_excerpt=""):
+    """A BotHit carrying a matched-chunk text (the semantic half's output)."""
+    from blog.bot_retrieval import BotHit
+
+    return BotHit(
+        id=post_id, slug=slug, title="", snippet=snippet, created_at_iso="",
+        score=0.0, keyword_rank=None, semantic_distance=None,
+        repost_excerpt=repost_excerpt, rerank_text=rerank_text,
+    )
+
+
+def test_best_chunk_per_post_maxpools_to_closest_chunk_with_text():
+    """Each post collapses to its single CLOSEST chunk — the distance AND
+    that chunk's text (the matched passage the reranker then scores)."""
+    from blog import bot_retrieval
+
+    rows = [
+        {"post_id": 1, "distance": 0.70, "text": "post1 far chunk"},
+        {"post_id": 1, "distance": 0.40, "text": "post1 near chunk"},
+        {"post_id": 2, "distance": 0.55, "text": "post2 only chunk"},
+    ]
+    best = bot_retrieval._best_chunk_per_post(rows)
+    assert best[1] == (0.40, "post1 near chunk")  # closest wins, carries its text
+    assert best[2] == (0.55, "post2 only chunk")
+
+
+def test_semantic_post_fanout_keeps_buried_long_post():
+    """Lever 1: a post whose best chunk ranks deep (#47 — the «ты болел
+    недавно?» case) is DROPPED by the old narrow 25-post cut but KEPT by the
+    widened SEM_POST_FANOUT, so it can reach the reranker at all."""
+    from blog import bot_retrieval
+
+    # 60 posts, one chunk each, monotonically increasing distance → post i is
+    # the i-th closest. The oracle is the 47th-closest post (id 47).
+    rows = [
+        {"post_id": i, "distance": 0.30 + i * 0.001, "text": f"chunk {i}"}
+        for i in range(1, 61)
+    ]
+    best = bot_retrieval._best_chunk_per_post(rows)
+    narrow = bot_retrieval._top_post_ids_by_distance(best, 25)
+    wide = bot_retrieval._top_post_ids_by_distance(best, bot_retrieval.SEM_POST_FANOUT)
+    assert 47 not in narrow, "the old 25-post cut dropped the deep oracle (the bug)"
+    assert 47 in wide, "widened fanout keeps the deep oracle so rerank can see it"
+    assert bot_retrieval.SEM_POST_FANOUT >= 47
+
+
+def test_rerank_doc_text_appends_buried_chunk_for_long_post():
+    """Lever 2: a long post (head fills the snippet cap) whose answer is
+    buried past the head — the matched chunk is appended so the reranker
+    actually sees the answer, not just an off-topic intro."""
+    from blog import bot_retrieval
+
+    head = ("отвлечённое вступление " * 40)[: bot_retrieval.SNIPPET_MAX_CHARS]
+    h = _chunk_hit(
+        "oracle", post_id=1, snippet=head,
+        rerank_text="именно про синдром Рамзая Ханта мне поставили диагноз",
+    )
+    doc = bot_retrieval._rerank_doc_text(h)
+    assert "синдром Рамзая Ханта" in doc, "buried matched chunk must reach the reranker"
+
+
+def test_rerank_doc_text_keeps_short_post_tight_no_chunk_dilution():
+    """Lever 2 guard (the Anacondaz regression): a SHORT post is fully shown
+    by its head, so its matched chunk is NOT appended — appending it would
+    dilute the cross-encoder's relevance and sink a tight on-topic post."""
+    from blog import bot_retrieval
+
+    h = _chunk_hit(
+        "anaconda", post_id=2, snippet="репост Anacondaz — лучший трек",
+        rerank_text="ZZZ_DISTINCT_CHUNK_MARKER_не_про_рэп",
+    )
+    doc = bot_retrieval._rerank_doc_text(h)
+    assert "Anacondaz" in doc
+    assert "ZZZ_DISTINCT_CHUNK_MARKER" not in doc, "short post must stay head-only"
+
+
+def test_rerank_doc_text_falls_back_to_head_without_chunk():
+    """Keyword/date hits carry no chunk text → head snippet only (the prior
+    behaviour, unchanged)."""
+    from blog import bot_retrieval
+
+    h = _chunk_hit("kw", post_id=3, snippet="head body text", rerank_text="")
+    assert "head body text" in bot_retrieval._rerank_doc_text(h)
+
+
+def test_rerank_doc_text_does_not_duplicate_chunk_equal_to_head():
+    """A one-chunk long post: the matched chunk IS the head — don't duplicate
+    it into the rerank doc."""
+    from blog import bot_retrieval
+
+    head = ("про мою болезнь " * 40)[: bot_retrieval.SNIPPET_MAX_CHARS]
+    h = _chunk_hit("dup", post_id=4, snippet=head, rerank_text=head)
+    doc = bot_retrieval._rerank_doc_text(h)
+    assert doc.count("болезнь") == head.count("болезнь"), "chunk==head must not double"
+
+
+def test_rerank_floats_long_post_via_matched_chunk(monkeypatch):
+    """End-to-end of lever 2: a long post whose HEAD is off-topic but whose
+    MATCHED CHUNK is on-topic floats to #1 once the reranker scores the chunk
+    (it would have scored only the off-topic head before)."""
+    from blog import bot_retrieval
+
+    off_topic_head = ("погода и задержки рейсов " * 40)[: bot_retrieval.SNIPPET_MAX_CHARS]
+    pool = [
+        bot_retrieval._with_score(
+            _chunk_hit("kw_coincide", post_id=1, snippet="случайное совпадение"), 0.50),
+        bot_retrieval._with_score(
+            _chunk_hit("buried", post_id=2, snippet=off_topic_head,
+                       rerank_text="именно про синдром Рамзая Ханта"), 0.20),
+    ]
+    monkeypatch.setattr(bot_retrieval, "is_available", lambda: True)
+    monkeypatch.setattr(
+        bot_retrieval, "rerank",
+        _fake_rerank({"Рамзая Ханта": 0.95, "совпадение": 0.10}))
+    out = bot_retrieval._mmr_select(
+        bot_retrieval._rerank("ты болел недавно?", pool, date_ids=set()), top_k=2)
+    assert out[0].slug == "buried", (
+        f"matched-chunk rerank must float the buried-answer post; got "
+        f"{[h.slug for h in out]}"
+    )
+
+
 # ── Happy path with mocked Anthropic ──────────────────────────────────
 
 

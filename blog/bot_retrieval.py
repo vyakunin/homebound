@@ -53,9 +53,24 @@ SNIPPET_MAX_CHARS = 500
 # Wider fanout than the MCP — the bot has only one chance to surface
 # the right post, so we trade some prompt cost for recall. Top-K stays
 # at 10 (the magic comes from breadth — drop it and short queries
-# start missing relevant posts).
+# start missing relevant posts). This is the KEYWORD half's fanout.
 FANOUT_PER_HALF = 25
 DEFAULT_TOP_K = 10
+# The SEMANTIC half keeps a WIDER post-fanout than the keyword half
+# (lever 1 of the recall fix). Failure mode (the «ты болел недавно?»
+# Ramsay-Hunt case, SFT_PLAN "Retrieval recall gap"): a terse colloquial
+# query embeds weakly, so the answer-bearing long post's BEST chunk ranks
+# deep (~#47) and the old 25-post cut dropped it BEFORE it ever reached the
+# reranker. The reranker is a cross-encoder — it judges «ты болел?»↔«я
+# приболел…» far better than the bi-encoder cosine — so the fix is to let
+# more posts THROUGH to it. Breadth goes into the candidate POOL, not the
+# prompt (top-K is still DEFAULT_TOP_K).
+SEM_POST_FANOUT = 60
+# Chunks fanned out (over all posts) before max-pooling to posts. Must
+# comfortably exceed SEM_POST_FANOUT (one post contributes several chunks)
+# AND the deepest answer-bearing chunk rank we want to catch (#47 in the
+# canonical miss).
+CHUNK_FANOUT = SEM_POST_FANOUT * 5
 # Cap how many date-anchored posts we splice into the result set;
 # busy days like 2022-02-24 have 19+ public posts.
 DATE_HIT_MAX = 12
@@ -90,7 +105,7 @@ MMR_YEAR_PENALTY = 0.10
 # coincidence so the subsequent MMR/top-K cut keeps the right ones.
 # Degrades gracefully: if Voyage is unavailable the pre-rerank fusion
 # order is used unchanged.
-RERANK_DOC_MAX_CHARS = 1000
+RERANK_DOC_MAX_CHARS = 1400
 # Date-anchored posts keep this bonus ON TOP of their rerank relevance so
 # explicit-date questions («что было 24 февраля 2022») still surface that
 # day's posts even when the reranker scores them low on topical relevance.
@@ -116,6 +131,12 @@ class BotHit:
     # content to the original author instead of to Vladimir.
     repost_author: str = ""
     repost_excerpt: str = ""
+    # The semantically-closest CHUNK's text (semantic half only, lever 2 of
+    # the recall fix). Fed to the reranker INSTEAD of the post-head snippet so
+    # a long post whose answering passage is past SNIPPET_MAX_CHARS isn't
+    # under-scored on its intro. Empty for keyword/date hits — the reranker
+    # then falls back to the snippet (the prior behaviour).
+    rerank_text: str = ""
 
 
 def retrieve(query: str, *, top_k: int = DEFAULT_TOP_K) -> list[BotHit]:
@@ -201,9 +222,9 @@ def _semantic_hits(query: str) -> list[BotHit]:
     except ImportError:
         return []
 
-    # Fan out wide on chunks (a single post can contribute multiple
-    # chunks here), then dedupe by post taking the lowest distance.
-    chunk_fanout = FANOUT_PER_HALF * 4
+    # Fan out wide on chunks (a single post can contribute multiple chunks
+    # here), then max-pool to posts. We also pull each chunk's TEXT so the
+    # post's best (= matched) chunk can be handed to the reranker (lever 2).
     try:
         chunk_rows = list(
             PostChunk.objects
@@ -213,7 +234,7 @@ def _semantic_hits(query: str) -> list[BotHit]:
             )
             .annotate(distance=CosineDistance("embedding", qvec))
             .order_by("distance")
-            .values("post_id", "distance")[:chunk_fanout]
+            .values("post_id", "distance", "text")[:CHUNK_FANOUT]
         )
     except Exception as e:  # noqa: BLE001 — table missing or pgvector type-cast issue
         _log.warning("bot semantic chunk SQL failed: %s", e)
@@ -223,14 +244,10 @@ def _semantic_hits(query: str) -> list[BotHit]:
         # Fall back to legacy per-post embeddings (pre-chunked-backfill).
         return _semantic_hits_legacy(qvec)
 
-    # Max-pool: best (= smallest distance) chunk per post.
-    best_by_post: dict[int, float] = {}
-    for row in chunk_rows:
-        pid = row["post_id"]
-        dist = float(row["distance"])
-        if pid not in best_by_post or dist < best_by_post[pid]:
-            best_by_post[pid] = dist
-    top_post_ids = sorted(best_by_post, key=lambda pid: best_by_post[pid])[:FANOUT_PER_HALF]
+    # Max-pool to each post's single closest chunk (distance + that chunk's
+    # text), then keep the top SEM_POST_FANOUT posts by best-chunk distance.
+    best_by_post = _best_chunk_per_post(chunk_rows)
+    top_post_ids = _top_post_ids_by_distance(best_by_post, SEM_POST_FANOUT)
     if not top_post_ids:
         return []
     posts = (
@@ -246,8 +263,39 @@ def _semantic_hits(query: str) -> list[BotHit]:
         p = posts_by_id.get(pid)
         if p is None:
             continue
-        hits.append(_post_to_hit(p, keyword_rank=None, semantic_distance=best_by_post[pid]))
+        dist, chunk_text = best_by_post[pid]
+        hits.append(_post_to_hit(
+            p, keyword_rank=None, semantic_distance=dist, rerank_text=chunk_text))
     return hits
+
+
+def _best_chunk_per_post(chunk_rows) -> dict[int, tuple[float, str]]:
+    """Max-pool chunk rows to one ``(distance, text)`` per post: the post's
+    single closest chunk and THAT chunk's text. The text is the matched
+    passage the reranker should score (lever 2), not the post head.
+
+    ``chunk_rows`` is an iterable of ``{"post_id", "distance", "text"}`` dicts
+    (the pgvector query's ``.values(...)`` rows). Pure — unit-tested without a
+    DB."""
+    best: dict[int, tuple[float, str]] = {}
+    for row in chunk_rows:
+        pid = row["post_id"]
+        dist = float(row["distance"])
+        if pid not in best or dist < best[pid][0]:
+            best[pid] = (dist, row.get("text", "") or "")
+    return best
+
+
+def _top_post_ids_by_distance(
+    best_by_post: dict[int, tuple[float, str]], fanout: int,
+) -> list[int]:
+    """Post ids ordered by their best-chunk distance, capped at ``fanout``.
+
+    Widening ``fanout`` is lever 1 of the recall fix: a long post whose best
+    chunk ranks deep (the «ты болел недавно?» Ramsay-Hunt case, best chunk
+    ~#47) only reaches the reranker if the post-fanout is wide enough to keep
+    it. Pure — unit-tested without a DB."""
+    return sorted(best_by_post, key=lambda pid: best_by_post[pid][0])[:fanout]
 
 
 def _semantic_hits_legacy(qvec: list[float]) -> list[BotHit]:
@@ -500,6 +548,9 @@ def _merge_and_dedup(
                 semantic_distance=h.semantic_distance,
                 repost_author=existing.repost_author,
                 repost_excerpt=existing.repost_excerpt,
+                # The semantic half carries the matched-chunk text; a
+                # keyword-only `existing` has none, so prefer the incoming.
+                rerank_text=h.rerank_text or existing.rerank_text,
             )
     for h in date_hits:
         existing = merged.get(h.id)
@@ -514,6 +565,7 @@ def _merge_and_dedup(
                 semantic_distance=existing.semantic_distance,
                 repost_author=existing.repost_author,
                 repost_excerpt=existing.repost_excerpt,
+                rerank_text=existing.rerank_text,
             )
 
     # Mild repost dampening — break ties toward Vladimir's own writing
@@ -646,10 +698,38 @@ def _rerank(query: str, pool: list[BotHit], *, date_ids: set[int]) -> list[BotHi
 
 
 def _rerank_doc_text(h: BotHit) -> str:
-    """The text handed to the reranker for one candidate — the same
-    title + body + reshared excerpt the model ultimately sees, capped so a
-    long post can't dominate the rerank token budget."""
-    parts = [h.title or "", h.snippet or "", h.repost_excerpt or ""]
+    """The text handed to the reranker for one candidate, capped so a long
+    post can't dominate the rerank token budget.
+
+    Lever 2 of the recall fix: give the cross-encoder BOTH the post head
+    (``snippet``) AND the matched chunk (``rerank_text``, the passage the
+    semantic half scored closest). Either can be the answering passage — the
+    head when the post leads with the answer, the buried chunk when a long
+    post answers deep past the first SNIPPET_MAX_CHARS (the «ты болел
+    недавно?» Ramsay-Hunt case). Scoring ONLY the head missed buried answers;
+    scoring ONLY the matched chunk missed answers that live in the head (the
+    closest-cosine chunk isn't always the most answer-bearing one). Showing
+    both covers both. De-dup when the matched chunk IS the head (short posts
+    are a single chunk). Keyword/date hits carry no chunk text → head only
+    (the prior behaviour)."""
+    head = h.snippet or ""
+    chunk = h.rerank_text or ""
+    parts = [h.title or "", head]
+    # Append the matched chunk ONLY when the post is longer than the snippet
+    # window — i.e. there's content BURIED past the head that the chunk may
+    # carry. A short post is fully shown by its head, so appending its (often
+    # differently-formatted / whitespace-variant) chunk only DILUTES the
+    # cross-encoder's relevance (regression: it sank the tight on-topic
+    # Anacondaz repost from #1 out of the top-10). De-dup when the chunk just
+    # restates the head.
+    if (
+        chunk
+        and len(head) >= SNIPPET_MAX_CHARS
+        and _norm_text(chunk)[:120] not in _norm_text(head)
+    ):
+        parts.append(chunk)
+    if h.repost_excerpt:
+        parts.append(h.repost_excerpt)
     text = "\n".join(p for p in parts if p).strip()
     return text[:RERANK_DOC_MAX_CHARS]
 
@@ -662,6 +742,7 @@ def _post_to_hit(
     *,
     keyword_rank: float | None,
     semantic_distance: float | None,
+    rerank_text: str = "",
 ) -> BotHit:
     own_text = post.content_text or ""
     reshared_text = getattr(post, "reshared_content_text", "") or ""
@@ -688,6 +769,7 @@ def _post_to_hit(
         semantic_distance=semantic_distance,
         repost_author=reshared_author,
         repost_excerpt=repost_excerpt,
+        rerank_text=rerank_text,
     )
 
 
@@ -697,4 +779,5 @@ def _with_score(h: BotHit, score: float) -> BotHit:
         created_at_iso=h.created_at_iso, score=score,
         keyword_rank=h.keyword_rank, semantic_distance=h.semantic_distance,
         repost_author=h.repost_author, repost_excerpt=h.repost_excerpt,
+        rerank_text=h.rerank_text,
     )
