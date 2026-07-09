@@ -83,10 +83,18 @@ _PHASE_JS = r"""(async () => {
       await new Promise(res => {
         const l=(id,info)=>{ if(id===xt.id && info.status==='complete'){ chrome.tabs.onUpdated.removeListener(l); res(); } };
         chrome.tabs.onUpdated.addListener(l);
-        chrome.tabs.update(xt.id, {url: __NAV_URL__});
+        chrome.tabs.update(xt.id, {url: __NAV_URL__, active: true});
       });
       await new Promise(r=>setTimeout(r, 5000));
     }
+    // Foreground the tab + focus its window. A BACKGROUND tab is render-throttled
+    // by Chrome, so window.scrollTo never triggers X's IntersectionObserver lazy
+    // load → scrollHeight stays flat → the harvest's stability counter trips after
+    // ~10 rounds and stops with only the first viewport (~6 tweets). Activating it
+    // makes the virtualized timeline actually page in. (2026-06-15)
+    try { await chrome.tabs.update(xt.id, {active: true}); } catch(e){}
+    try { if (xt.windowId != null) await chrome.windows.update(xt.windowId, {focused: true}); } catch(e){}
+    await new Promise(r=>setTimeout(r, 800));
     const msg = {type:'RUN_PHASE', phase: __PHASE__, mode:'full', skipMedia: __SKIP_MEDIA__};
     if (__MAX__ > 0) msg.caps = {maxTweets: __MAX__};
     const r = await chrome.tabs.sendMessage(xt.id, msg);
@@ -123,10 +131,34 @@ def main() -> int:
     ap.add_argument("--skip-media", action="store_true", help="skip media fetch (text-only; faster)")
     args = ap.parse_args()
 
-    swurl = _reload_ext_get_sw()
-    ws = _ws(swurl, 600)
-    st = {"i": 0}
-    _cmd(ws, st, "Runtime.enable")
+    # MV3 service workers are ephemeral: the SW url returned by _reload_ext_get_sw
+    # can go stale (idle-evicted → new target id) before we connect, yielding a
+    # 500 "No such target id" on the WS handshake. Reload+connect is cheap and
+    # idempotent, so retry the whole acquisition a few times. (2026-06-15)
+    ws = None
+    for attempt in range(1, 5):
+        try:
+            swurl = _reload_ext_get_sw()
+            # 30-min recv timeout: with the foreground fix the /with_replies
+            # harvest actually pages the whole virtualized timeline in, so a long
+            # history's replies phase can run well past the old 600s (a single
+            # RUN_PHASE awaitPromise emits no intermediate frames, so this socket
+            # timeout bounds the whole phase). (2026-06-15)
+            ws = _ws(swurl, 1800)
+            st = {"i": 0}
+            _cmd(ws, st, "Runtime.enable")
+            break
+        except Exception as e:  # noqa: BLE001 — handshake/connect races are retryable
+            print(f"[x-driver] SW acquire attempt {attempt} failed: {e}", file=sys.stderr)
+            try:
+                if ws:
+                    ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+            ws = None
+            if attempt == 4:
+                raise
+            time.sleep(2)
 
     print(f"[x-driver] owner={args.owner} max={args.max or 'unbounded'} skip_media={args.skip_media}", file=sys.stderr)
 
