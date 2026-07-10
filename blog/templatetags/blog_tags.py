@@ -201,6 +201,43 @@ def fb_reshare_embed_iframe_ok(post) -> bool:
     return True
 
 
+@register.filter
+def fb_reshare_render_own_native(post) -> bool:
+    """True for a Facebook 'shared a memory.' self-repost of the user's OWN
+    earlier post, which should render the resurfaced original body natively
+    (it is the user's own content — no copyright concern) rather than via a
+    third-party FB iframe embed or a bare 'View on Facebook' link.
+
+    Positive 'this is mine' signal (set by the activity_log extractor):
+      - the reshare kept its own-profile ``source_url`` (third-party reshares
+        get ``source_url`` cleared), AND
+      - it carries the original body in ``reshared_content_text`` with NO
+        external ``reshared_from_url`` (the original permalink isn't exposed in
+        the memory row), AND
+      - the body is real content, not the '(original post not available)'
+        placeholder.
+
+    NOTE: in the FB pipeline this condition is produced ONLY by own memory
+    reshares, so the caller labels it 'Shared a memory'. Locked by
+    tests/test_reshare_rendering.py.
+    """
+    if getattr(post, 'source', None) != PostSource.FACEBOOK:
+        return False
+    body = (post.reshared_content_text or '').strip()
+    if not body:
+        return False
+    if (post.reshared_from_url or '').strip():
+        return False
+    if not (post.source_url or '').strip():
+        return False
+    # Exclude both "original unavailable" placeholders (Graph-side notice and the
+    # activity-log '(original post not available)' commentary-reshare placeholder)
+    # — neither is the user's own resurfaced content.
+    if is_unavailable_reshare_notice(body) or body == '(original post not available)':
+        return False
+    return True
+
+
 def _profile_name_from_url(url: str) -> str:
     """Return a display name for a reshared post URL.
 

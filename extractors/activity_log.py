@@ -88,6 +88,15 @@ logger = logging.getLogger(__name__)
 # (not another Facebook post), so it is a regular post with a link attachment.
 _RESHARE_PREFIX_RE = re.compile(r'^shared\s+a(?!\s+link)\b[^.]*\.', re.IGNORECASE)
 
+# "shared a memory." — a Facebook On-This-Day self-repost of the user's OWN
+# earlier post. Unlike Marketplace listings / "shared a photo." (which are the
+# user's own NEW content and stay flattened), a memory is genuinely a reshare:
+# the row text is the resurfaced ORIGINAL body. We model it as a reshare of the
+# user's own post so it renders as an attached original card (rendered natively
+# downstream because it is the user's own content) rather than being flattened
+# into a brand-new post dated at the re-share moment.
+_MEMORY_PREFIX_RE = re.compile(r'^shared\s+a\s+memory\b', re.IGNORECASE)
+
 
 def _clean_reshare_commentary(raw: str) -> str:
     """Strip the FB Activity-Log UI trailer from a ``reshareCommentary`` value.
@@ -716,6 +725,12 @@ def extract(
         post_key_to_source_id: dict[str, str] = {}
         # Track which source_ids are reshare entries ("shared a post." prefix)
         is_reshare_by_source_id: dict[str, bool] = {}
+        # "shared a memory." rows — On-This-Day self-reposts of the user's own
+        # earlier posts. Tracked separately from generic reshares because they
+        # become own reshares (native render) while Marketplace/photo rows stay
+        # flattened. Signal: extension `isMemory` flag (v2.8.42+) or the
+        # "shared a memory." text prefix (older exports).
+        is_memory_by_source_id: dict[str, bool] = {}
         reshare_commentary_by_source_id: dict[str, str] = {}  # unused; kept for ZIP compat
         # Extension v2.8.x records the resolved reshare target URL per post (from the
         # Googlebot-rendered permalink). Authoritative when present — covers self-
@@ -758,6 +773,13 @@ def extract(
                 continue
 
             is_reshare = bool(_RESHARE_PREFIX_RE.match(raw_text.strip()))
+            is_memory = bool(raw.get('isMemory')) or bool(
+                _MEMORY_PREFIX_RE.match(raw_text.strip())
+            )
+            # A memory IS a reshare — force the flag so an explicit extension
+            # isMemory signal (which may arrive without the "shared a memory."
+            # text prefix) still flows through the reshare reclassification below.
+            is_reshare = is_reshare or is_memory
             is_link_share = raw_text.strip().startswith('shared a link.')
             content_text = fix_facebook_encoding(cleaned)
             tags = _extract_tags(content_text)
@@ -786,6 +808,7 @@ def extract(
 
             post_by_source_id[source_id] = record
             is_reshare_by_source_id[source_id] = is_reshare
+            is_memory_by_source_id[source_id] = is_memory
             if is_link_share:
                 record.extra['_is_link_share'] = '1'
             post_key_to_source_id[_post_key_from_url(post_key)] = source_id
@@ -813,9 +836,19 @@ def extract(
                 pass
         own_profile = profile_counts.most_common(1)[0][0] if profile_counts else None
 
-        # Own-profile "shared a ." entries without reshareCommentary are not true reshares
-        # (e.g. Marketplace listings, "shared a memory").  Clear the reshare flag so their
-        # media gets attached below.
+        # Own-profile "shared a ." entries without reshareCommentary are not true
+        # third-party reshares (e.g. Marketplace listings, "shared a photo.",
+        # "shared a memory.").  Two outcomes:
+        #   - "shared a memory." → an own reshare: the row text is the user's OWN
+        #     resurfaced earlier post.  Move it into reshared_from.content_text and
+        #     blank content_text (a bare memory carries no separate commentary), so
+        #     it renders as an attached original card — natively, because it is the
+        #     user's own content.  The original post's permalink is not exposed in
+        #     the memory row, so reshared_from.url stays empty; the kept own-profile
+        #     source_url is the positive "this is mine" signal the template keys
+        #     native rendering off.
+        #   - everything else (Marketplace, own photos) → flatten: clear the reshare
+        #     flag so the media attaches to the user's own post.
         if own_profile:
             for sid, record in post_by_source_id.items():
                 if not is_reshare_by_source_id.get(sid):
@@ -835,6 +868,14 @@ def extract(
                 except Exception:
                     post_profile = ''
                 if post_profile == own_profile:
+                    if is_memory_by_source_id.get(sid):
+                        record.reshared_from = ResharedFrom(
+                            author=_author_from_url(record.source_url, slug_to_name),
+                            content_text=record.content_text,
+                        )
+                        record.content_text = ''
+                    # Clear the reshare flag either way so media attaches below as
+                    # the user's own content (memory media IS his own).
                     is_reshare_by_source_id[sid] = False
 
         # ---------- Attach media to posts ----------
@@ -1194,10 +1235,22 @@ def extract(
                     record.reshared_from = ResharedFrom(
                         content_text='(original post not available)',
                     )
+                elif is_memory_by_source_id.get(sid):
+                    # Own-profile "shared a memory." — On-This-Day self-repost.
+                    # (Normally already handled in the reclassify pass above; this
+                    # is the fallback path for exports with no detectable own
+                    # profile.) Model as an own reshare: body → reshared_from,
+                    # blank content_text, clear the flag so media attaches.
+                    record.reshared_from = ResharedFrom(
+                        author=_author_from_url(record.source_url, slug_to_name),
+                        content_text=record.content_text,
+                    )
+                    record.content_text = ''
+                    is_reshare_by_source_id[sid] = False
                 else:
                     # Own-profile entry without commentary and not pair-linked.
-                    # Could be a Marketplace listing, "shared a memory", or another
-                    # non-reshare action that the Activity Log prefixes with "shared a.".
+                    # Could be a Marketplace listing or another non-reshare action
+                    # that the Activity Log prefixes with "shared a.".
                     # Treat as a regular post — clear the reshare flag so media attaches.
                     is_reshare_by_source_id[sid] = False
             elif post_profile and post_profile != own_profile:

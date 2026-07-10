@@ -1289,6 +1289,15 @@ function harvestPostsPhase(urls, postByKey, mediaCandidates, caps, profileLinkMa
       if (!entry.reshareCommentary && /^shared\s+a\s+(?:photo|memory|\.)/i.test(text)) {
         entry.mediaHint = true;
       }
+      // "shared a memory." is a distinct case: an On-This-Day self-repost of the
+      // user's OWN earlier post. Flag it explicitly so the Python extractor models
+      // it as an own reshare (resurfaced original rendered natively) instead of
+      // flattening it into a new post — a structured signal that survives even if
+      // the "shared a memory." text prefix is ever stripped upstream.
+      const isMemoryFn = (typeof globalThis !== 'undefined') ? globalThis.isMemoryText_lib : null;
+      if (isMemoryFn ? isMemoryFn(text) : /^shared\s+a\s+memory\b/i.test(text)) {
+        entry.isMemory = true;
+      }
       postByKey.set(postKey, entry);
     }
     // Row-level media collection used to run here:

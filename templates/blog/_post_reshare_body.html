@@ -1,4 +1,19 @@
 {% load blog_tags %}
+
+{% if post|fb_reshare_render_own_native %}
+{# ── Own 'shared a memory' self-repost ─────────────────────────────────── #}
+{# The resurfaced original is the user's OWN earlier post, so we render its    #}
+{# body natively (no copyright concern) instead of an FB iframe. The post's    #}
+{# own media renders below in the normal media gallery. The timeline date is   #}
+{# the re-share moment; this card shows what was resurfaced.                   #}
+<div class="gplus-reshare-header gplus-reshare-header--memory">Shared a memory</div>
+<div class="gplus-content gplus-content--memory js-post-content">
+  {{ post.get_reshared_display_content|safe }}
+</div>
+<button class="gplus-show-more js-show-more" style="display:none" data-expanded="false">
+  Show more
+</button>
+{% else %}
 {% reshare_info post as info %}
 
 {# ── Attribution header ─────────────────────────────────────────────── #}
@@ -44,4 +59,5 @@
   <span class="gplus-reshare-note">
     <a href="{{ post.reshared_from_url }}" target="_blank" rel="noopener noreferrer">View on Facebook ↗</a>
   </span>
+{% endif %}
 {% endif %}

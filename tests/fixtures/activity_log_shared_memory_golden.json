@@ -1,0 +1,22 @@
+{
+  "_comment": "Golden fixture: real rows captured from the FB Activity Log export fb-activity-export-v2.8.30-2026-05-20T14-10-28 (postsWithText). Pins the 'shared a memory.' own-reshare behavior against Marketplace/'shared a photo.' rows which must STAY flattened. Do NOT hand-edit values to make a change pass — re-derive from a real export.",
+  "collectedAt": "2026-05-20T14:10:28.000Z",
+  "postsWithText": [
+    {
+      "fbId": "pfbid02cEDZg1mimteXguWpzpJRbTmJL13v9FMNQAZhyXhuAVNCpUEAYnCCHtUAQuD4yAC8l",
+      "mediaHint": true,
+      "postKey": "https://www.facebook.com/vyakunin/posts/pfbid02cEDZg1mimteXguWpzpJRbTmJL13v9FMNQAZhyXhuAVNCpUEAYnCCHtUAQuD4yAC8l",
+      "text": "shared a memory.такой вот понимаете суп из каза лупPublic4:41 PMView",
+      "timestamp": {"iso": null, "rawText": null, "source": "graphql", "utime": 1742485319},
+      "url": "https://www.facebook.com/vyakunin/posts/pfbid02cEDZg1mimteXguWpzpJRbTmJL13v9FMNQAZhyXhuAVNCpUEAYnCCHtUAQuD4yAC8l"
+    },
+    {
+      "fbId": "pfbid023r2ECXqgg6f3RMY3kMhHNkkVnc6U8RBM3FEgEuEq4AtDNmpES18mNYYgYWscyQRpl",
+      "postKey": "https://www.facebook.com/vyakunin/posts/pfbid023r2ECXqgg6f3RMY3kMhHNkkVnc6U8RBM3FEgEuEq4AtDNmpES18mNYYgYWscyQRpl",
+      "text": "updated his status.Один мужик другому мужикуPublic5:13 PMView",
+      "timestamp": {"iso": null, "rawText": "June 26, 2025", "utime": null},
+      "url": "https://www.facebook.com/vyakunin/posts/pfbid023r2ECXqgg6f3RMY3kMhHNkkVnc6U8RBM3FEgEuEq4AtDNmpES18mNYYgYWscyQRpl"
+    }
+  ],
+  "profileLinks": {}
+}

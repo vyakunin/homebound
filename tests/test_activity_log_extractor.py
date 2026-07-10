@@ -1699,7 +1699,12 @@ class TestSpecificPostExtractionBugs:
         )
         record = next((r for r in records if r.source_id == "20000000028"), None)
         assert record is not None
-        assert record.content_text == "такой вот понимаете суп из каза луп"
+        # A "shared a memory." row is an own reshare: the resurfaced original body
+        # moves to reshared_from.content_text; content_text (the reshare message)
+        # is empty for a bare memory. Media still attaches (it is the user's own).
+        assert record.content_text == ""
+        assert record.reshared_from is not None
+        assert record.reshared_from.content_text == "такой вот понимаете суп из каза луп"
 
         # Should have video, NOT sidebar images
         video_media = [m for m in record.media if m.type == 2]  # MEDIA_TYPE_VIDEO
@@ -2093,6 +2098,99 @@ class TestFirstCommentLinkByPost:
         # earliest has no URL, so the first comment that DOES carry one wins
         assert out["https://www.facebook.com/vyakunin/posts/pfbidCCC"] == \
             "https://link.example/post"
+
+
+class TestSharedMemoryReshare:
+    """Golden: a Facebook 'shared a memory.' row is the user's own earlier post
+    resurfaced by On-This-Day. It must be modeled as an OWN reshare (attached
+    original card, rendered natively), NOT flattened into a brand-new post at the
+    re-share date — while Marketplace / 'shared a photo.' own rows STAY flattened.
+
+    Fixture rows are real, captured from
+    fb-activity-export-v2.8.30-2026-05-20T14-10-28. Do not tune fixture values to
+    make a change pass — re-derive from a real export.
+    """
+
+    def _extract(self, tmp_path, posts) -> list[PostRecord]:
+        zip_bytes = make_zip({"postsWithText": posts, "profileLinks": {},
+                              "collectedAt": "2026-05-20T14:10:28.000Z"})
+        (tmp_path / "test.zip").write_bytes(zip_bytes)
+        extract(tmp_path / "test.zip", tmp_path / "out", dry_run=False)
+        return list(read_records(tmp_path / "out" / "posts.binpb"))
+
+    def _golden_posts(self) -> list[dict]:
+        return load_fixture("activity_log_shared_memory_golden.json")["postsWithText"]
+
+    def test_memory_row_becomes_own_reshare(self, tmp_path):
+        records = self._extract(tmp_path, self._golden_posts())
+        mem = next((r for r in records
+                    if r.reshared_from and "суп из каза" in r.reshared_from.content_text), None)
+        assert mem is not None, "memory row must produce a reshared_from record"
+        # The reshare message (commentary) is empty for a bare memory …
+        assert mem.content_text == ""
+        # … and the resurfaced original body lives on the attached original.
+        assert mem.reshared_from.content_text == "такой вот понимаете суп из каза луп"
+
+    def test_memory_keeps_own_source_url_and_no_external_url(self, tmp_path):
+        """Positive 'this is mine' signals for native rendering: own-profile
+        source_url is KEPT (third-party reshares get it cleared) and there is no
+        external reshared_from.url (the original permalink isn't exposed)."""
+        records = self._extract(tmp_path, self._golden_posts())
+        mem = next(r for r in records
+                   if r.reshared_from and "суп из каза" in r.reshared_from.content_text)
+        assert "/vyakunin/" in mem.source_url
+        assert mem.reshared_from.url == ""
+
+    def test_memory_keeps_reshare_date_not_original(self, tmp_path):
+        """The timeline date is the re-share moment (Mar 20 2025) — the memory
+        legitimately WAS shared then; the original's date belongs to the card."""
+        records = self._extract(tmp_path, self._golden_posts())
+        mem = next(r for r in records
+                   if r.reshared_from and "суп из каза" in r.reshared_from.content_text)
+        assert mem.created_at.year == 2025 and mem.created_at.month == 3
+        assert mem.created_at.day == 20
+
+    def test_own_status_post_is_untouched(self, tmp_path):
+        """A normal own post ('updated his status.') stays a plain post."""
+        records = self._extract(tmp_path, self._golden_posts())
+        status = next((r for r in records if "Один мужик" in r.content_text), None)
+        assert status is not None
+        assert not (status.reshared_from and status.reshared_from.content_text)
+
+    def test_own_shared_photo_stays_flattened(self, tmp_path):
+        """A Marketplace / 'shared a photo.' own row is NEW own content, not a
+        reshare — its body stays in content_text and it gets NO reshared_from."""
+        posts = self._golden_posts() + [{
+            "fbId": "pfbid09PHOTO000000000000000000000000000000000000000000000000000000",
+            "url": "https://www.facebook.com/vyakunin/posts/pfbid09PHOTO000000000000000000000000000000000000000000000000000000",
+            "postKey": "https://www.facebook.com/vyakunin/posts/pfbid09PHOTO000000000000000000000000000000000000000000000000000000",
+            "text": "shared a photo.вот моё фото на продажуPublic2:00 PMView",
+            "timestamp": {"utime": 1740000000, "iso": None, "rawText": None},
+        }]
+        records = self._extract(tmp_path, posts)
+        photo = next((r for r in records if "моё фото на продажу" in r.content_text), None)
+        assert photo is not None, "own 'shared a photo.' body must stay in content_text"
+        assert not (photo.reshared_from and photo.reshared_from.content_text), \
+            "own 'shared a photo.' must NOT become a reshare"
+
+    def test_extension_isMemory_flag_triggers_reshare(self, tmp_path):
+        """Future exports (v2.8.42+) set an explicit isMemory flag; it must drive
+        the same own-reshare behavior even if the text prefix ever changes."""
+        posts = [
+            {
+                "fbId": "pfbid09MEM0000000000000000000000000000000000000000000000000000000",
+                "url": "https://www.facebook.com/vyakunin/posts/pfbid09MEM0000000000000000000000000000000000000000000000000000000",
+                "postKey": "https://www.facebook.com/vyakunin/posts/pfbid09MEM0000000000000000000000000000000000000000000000000000000",
+                "text": "старый пост из прошлогоPublic1:00 PMView",
+                "isMemory": True,
+                "timestamp": {"utime": 1740000000, "iso": None, "rawText": None},
+            },
+        ] + self._golden_posts()
+        records = self._extract(tmp_path, posts)
+        mem = next((r for r in records
+                    if r.reshared_from and "старый пост" in r.reshared_from.content_text), None)
+        assert mem is not None, "isMemory flag must produce an own reshare"
+        assert mem.content_text == ""
 
 
 if __name__ == "__main__":

@@ -64,9 +64,24 @@ function stripActivityNoise(s) {
   return out.trim();
 }
 
+// "shared a memory." — a Facebook On-This-Day self-repost of the user's OWN
+// earlier post. The Python extractor models these as own reshares (the row text
+// is the resurfaced original body, rendered natively) rather than flattening
+// them into a new post. Marketplace / "shared a photo." rows are the user's own
+// NEW content and are deliberately NOT matched here. Runs on the RAW row text
+// (before stripActivityNoise removes the action prefix).
+const MEMORY_PREFIX = /^shared\s+a\s+memory\b/i;
+function isMemoryText(s) {
+  return MEMORY_PREFIX.test((s || '').trim());
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { stripActivityNoise, ACTION_PREFIX, PUBLIC_TRAILER, AL_HEADER_ONLY };
+  module.exports = {
+    stripActivityNoise, ACTION_PREFIX, PUBLIC_TRAILER, AL_HEADER_ONLY,
+    isMemoryText, MEMORY_PREFIX,
+  };
 }
 if (typeof globalThis !== 'undefined') {
   globalThis.stripActivityNoise_lib = stripActivityNoise;
+  globalThis.isMemoryText_lib = isMemoryText;
 }

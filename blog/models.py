@@ -201,6 +201,13 @@ class Post(models.Model):
             )
         return self.content_html
 
+    def get_reshared_display_content(self):
+        """HTML for a reshared original body rendered natively (own 'shared a
+        memory' self-reposts). Same escaping/linkifying as a plain FB body."""
+        from django.utils.html import linebreaks, urlize
+        return linebreaks(urlize(self.reshared_content_text or '',
+                                 nofollow=True, autoescape=True))
+
 
 class PostMedia(models.Model):
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='media')
