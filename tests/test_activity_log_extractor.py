@@ -2140,6 +2140,13 @@ class TestSharedMemoryReshare:
                    if r.reshared_from and "суп из каза" in r.reshared_from.content_text)
         assert "/vyakunin/" in mem.source_url
         assert mem.reshared_from.url == ""
+        # The extracted author is a SELF-reshare (derived from the own source_url)
+        # — this is what the render-time copyright guard
+        # (blog_tags.fb_reshare_render_own_native) requires to render natively.
+        assert mem.reshared_from.author
+        _slug = mem.source_url.split('/vyakunin/')[0].rsplit('/', 1)[-1] or 'vyakunin'
+        _norm = lambda s: ''.join(c for c in s.lower() if c.isalnum())
+        assert _norm(mem.reshared_from.author) == _norm('vyakunin')
 
     def test_memory_keeps_reshare_date_not_original(self, tmp_path):
         """The timeline date is the re-share moment (Mar 20 2025) — the memory

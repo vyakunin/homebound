@@ -215,7 +215,12 @@ def fb_reshare_render_own_native(post) -> bool:
         external ``reshared_from_url`` (the original permalink isn't exposed in
         the memory row), AND
       - the body is real content, not the '(original post not available)'
-        placeholder.
+        placeholder, AND
+      - it is a SELF-reshare: ``reshared_from_author`` (which the extractor
+        derives from the own-profile ``source_url``) matches that source
+        profile.  A foreign author on a bodied reshare with no URL (e.g. a
+        third-party reshare whose original permalink wasn't captured) is NOT
+        the user's content and must fall through to the copyright-safe path.
 
     NOTE: in the FB pipeline this condition is produced ONLY by own memory
     reshares, so the caller labels it 'Shared a memory'. Locked by
@@ -228,14 +233,36 @@ def fb_reshare_render_own_native(post) -> bool:
         return False
     if (post.reshared_from_url or '').strip():
         return False
-    if not (post.source_url or '').strip():
+    su = (post.source_url or '').strip()
+    if not su:
         return False
     # Exclude both "original unavailable" placeholders (Graph-side notice and the
     # activity-log '(original post not available)' commentary-reshare placeholder)
     # — neither is the user's own resurfaced content.
     if is_unavailable_reshare_notice(body) or body == '(original post not available)':
         return False
+    # Self-reshare guard (copyright): only render natively when the reshared
+    # author IS the source profile. A memory's author is derived from its own
+    # source_url, so it always matches; a captured third-party body with a
+    # foreign author (and no embeddable URL) must not be hosted.
+    if not _fb_author_matches_profile(post.reshared_from_author, su):
+        return False
     return True
+
+
+def _fb_author_matches_profile(author: str, url: str) -> bool:
+    """True when ``author`` names the profile that ``url`` points to.
+
+    Compares an alnum-normalised author string against the URL's raw profile
+    slug and its resolved display name (ProfileLink or humanised slug) — the two
+    forms ``reshared_from_author`` can take for a self-reshare.
+    """
+    a = re.sub(r'[^a-z0-9]', '', (author or '').lower())
+    if not a:
+        return False
+    slug = re.sub(r'[^a-z0-9]', '', _fb_profile_from_url(url))
+    name = re.sub(r'[^a-z0-9]', '', _profile_name_from_url(url).lower())
+    return a == slug or a == name
 
 
 def _profile_name_from_url(url: str) -> str:

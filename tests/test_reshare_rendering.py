@@ -59,6 +59,28 @@ class TestFbReshareRenderOwnNative:
         p = _own_memory_post(reshared_content_text='')
         assert fb_reshare_render_own_native(p) is False
 
+    def test_false_for_foreign_author_no_url(self):
+        """Copyright guard: a bodied reshare with no embeddable URL whose author
+        is NOT the source profile (e.g. a third-party reshare whose original
+        permalink wasn't captured) must NOT render natively — even though its
+        field shape matches a memory. Regression for the self-reshare guard."""
+        p = _own_memory_post(
+            reshared_from_author='Anonymous',
+            reshared_content_text='Original post body captured without URL.',
+        )
+        assert fb_reshare_render_own_native(p) is False
+
+    def test_true_for_display_name_author(self):
+        """Self-reshare where the extractor resolved the own slug to a display
+        name (via profile_links) still matches the source profile → native."""
+        from blog.models import ProfileLink
+        ProfileLink.objects.create(
+            profile_url='https://www.facebook.com/vyakunin',
+            display_name='Vladimir Yakunin',
+        )
+        p = _own_memory_post(reshared_from_author='Vladimir Yakunin')
+        assert fb_reshare_render_own_native(p) is True
+
 
 @pytest.mark.django_db
 class TestOwnMemoryRendersNatively:
