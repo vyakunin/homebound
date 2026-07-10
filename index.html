@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Homebound — own your social-media archive</title>
+  <meta name="description" content="Homebound: export your Facebook and X history with open-source browser extensions, self-host it as a searchable blog, talk to it with an LLM.">
+  <link rel="canonical" href="https://homebound.my/">
+  <link rel="icon" href="/app-icon-1024.png" type="image/png" sizes="any">
+  <link rel="apple-touch-icon" href="/app-icon-1024.png">
+  <meta property="og:title" content="Homebound — own your social-media archive">
+  <meta property="og:description" content="Export your Facebook and X history, self-host it as a searchable blog, talk to it with an LLM. Open source, local-only.">
+  <meta property="og:image" content="https://homebound.my/app-icon-1024.png">
+  <meta property="og:image:width" content="1024">
+  <meta property="og:image:height" content="1024">
+  <style>
+    :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 2rem; line-height: 1.6; }
+    h1 { font-size: 1.75rem; font-weight: 600; margin: 0 0 0.5rem; }
+    p { color: var(--muted); max-width: 36rem; text-align: center; margin: 0 0 1.5rem; }
+    nav { display: flex; gap: 1.25rem; flex-wrap: wrap; justify-content: center; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    footer { margin-top: 3rem; font-size: 0.875rem; color: var(--muted); }
+    .logo-mark { width: min(40vw, 200px); height: auto; display: block; margin-block-end: 1.25rem; border-radius: 22%; }
+  </style>
+</head>
+<body>
+  <img class="logo-mark" src="/app-icon-1024.png" width="1024" height="1024" alt="Homebound logo">
+  <h1>Homebound — own your social-media archive</h1>
+  <p>Your posts will outlive the platforms. Homebound is a set of open-source
+  tools: browser extensions that export your own Facebook and X history
+  (everything stays on your machine), and a self-hosted blog that imports it,
+  makes it searchable, and lets you talk to it with an LLM.</p>
+  <nav>
+    <a href="https://github.com/vyakunin/homebound">GitHub</a>
+    <a href="https://vyakunin.org/">Live demo (the author's archive)</a>
+  </nav>
+  <nav style="margin-top:1rem">
+    <a href="/privacy.html">Privacy Policy</a>
+    <a href="/data-deletion.html">User Data Deletion</a>
+    <a href="/impressum.html">Impressum</a>
+  </nav>
+  <footer><a href="/impressum.html">Impressum</a> · homebound.my</footer>
+</body>
+</html>
