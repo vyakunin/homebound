@@ -9,6 +9,7 @@ Homebound takes the years of content you've scattered across Google+ (RIP), Face
 ## What's in the box
 
 - **Ingest pipeline** — adapters for Google+ Takeout HTML/CSV, Facebook activity-log export (via the bundled browser extension), and Twitter/X export + Wayback Machine reconstruction
+- **Browser extensions** (also on the Chrome Web Store): [Homebound: Activity Log Exporter](https://chromewebstore.google.com/detail/kaghpmdkjknpefjhfjgmnaclmhalgbkb) (Facebook) and [Homebound: Timeline Exporter](https://chromewebstore.google.com/detail/gidophdcplhcbkelkejbeogdnnkmndni) (X/Twitter) — export *your own* data to a local ZIP; nothing leaves your machine
 - **Django blog** — post listing + detail, tag cloud, full-text search, RSS, JSON-LD `BlogPosting` structured data, year-sharded sitemap
 - **Markdown editor** — EasyMDE-backed authoring with OG-metadata fetch
 - **Semantic search (Stage 1.3)** — Voyage embeddings + pgvector for natural-language queries across your whole archive
